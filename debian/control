@@ -1,0 +1,14 @@
+Source: linux-libc-dev
+Section: host/tools
+Priority: optional
+Maintainer: Mikhail Gusarov <dottedmag@dottedmag.net>
+Build-Depends: debhelper (>= 7), quilt
+XCS-Cross-Host-Build-Depends: debhelper (>= 7), quilt
+Standards-Version: 3.8.0
+
+Package: linux-libc-dev
+Architecture: any
+Section: libdevel
+Description: Linux support headers for userspace development
+ This package provides userspaces headers from the Linux kernel. These headers
+ are used by the installed headers for GNU glibc and other system libraries.

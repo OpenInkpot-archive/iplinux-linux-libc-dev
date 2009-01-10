@@ -1,0 +1,52 @@
+#!/usr/bin/make -f
+
+OUT = $(CURDIR)/debian/linux-libc-dev
+
+DEB_HOST_ARCH_CPU := $(shell dpkg-architecture -qDEB_HOST_ARCH_CPU)
+ifeq ($(DEB_HOST_ARCH_CPU),arm)
+  LIBC_DEV_ARCH := arm
+else ifeq ($(DEB_HOST_ARCH_CPU),i386)
+  LIBC_DEV_ARCH := i386
+endif
+
+ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+	NUMJOBS = $(patsubst parallel=%,%,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+	MAKEFLAGS += -j$(NUMJOBS)
+endif
+
+include /usr/share/quilt/quilt.make
+
+clean: clean-patched unpatch
+clean-patched: patch
+	dh_testdir
+	dh_testroot
+	$(MAKE) ARCH=$(LIBC_DEV_ARCH) distclean
+	dh_clean 
+
+build: patch
+
+install: build
+	dh_testdir
+	dh_testroot
+	dh_prep -s 
+	install -d $(OUT)/usr
+	$(MAKE) headers_check ARCH=$(LIBC_DEV_ARCH) INSTALL_HDR_PATH=$(OUT)/usr
+	$(MAKE) headers_install ARCH=$(LIBC_DEV_ARCH) INSTALL_HDR_PATH=$(OUT)/usr
+	find $(OUT) \( -name .install -o -name ..install.cmd -o -name .check -o -name ..check.cmd \) -delete
+
+binary-arch: install
+	dh_testdir -s
+	dh_testroot -s
+	dh_link -s
+	dh_strip -s
+	dh_compress -s
+	dh_fixperms -s
+	dh_installdeb -s
+	dh_gencontrol -s
+	dh_md5sums -s
+	dh_builddeb -s
+
+binary-indep: install
+
+binary: binary-arch binary-indep
+.PHONY: build clean binary-indep binary-arch binary install install-indep install-arch configure
