@@ -1,0 +1,13 @@
+Index: linux-libc-dev/scripts/package/Makefile
+===================================================================
+--- linux-libc-dev.orig/scripts/package/Makefile	2008-12-31 20:07:55.000000000 +0600
++++ linux-libc-dev/scripts/package/Makefile	2008-12-31 20:08:05.000000000 +0600
+@@ -74,7 +74,7 @@
+ 	$(MAKE) KBUILD_SRC=
+ 	$(CONFIG_SHELL) $(srctree)/scripts/package/builddeb
+ 
+-clean-dirs += $(objtree)/debian/
++# clean-dirs += $(objtree)/debian/
+ 
+ 
+ # tarball targets
