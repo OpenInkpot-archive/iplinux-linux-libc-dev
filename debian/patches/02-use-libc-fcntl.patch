@@ -1,0 +1,16 @@
+Index: linux-libc-dev/include/asm-generic/fcntl.h
+===================================================================
+--- linux-libc-dev.orig/include/asm-generic/fcntl.h	2009-01-19 22:21:30.000000000 +0600
++++ linux-libc-dev/include/asm-generic/fcntl.h	2009-01-19 22:21:53.000000000 +0600
+@@ -1,6 +1,11 @@
+ #ifndef _ASM_GENERIC_FCNTL_H
+ #define _ASM_GENERIC_FCNTL_H
+ 
++/* Pull in fcntl structs from the libc */
++#include <fcntl.h>
++#define HAVE_ARCH_STRUCT_FLOCK
++#define HAVE_ARCH_STRUCT_FLOCK64
++
+ #include <linux/types.h>
+ 
+ /* open/fcntl - O_SYNC is only implemented on blocks devices and on files
