@@ -9,6 +9,8 @@ else ifeq ($(DEB_HOST_ARCH_CPU),i386)
   LIBC_DEV_ARCH := i386
 else ifeq ($(DEB_HOST_ARCH_CPU),amd64)
   LIBC_DEV_ARCH := x86_64
+else ifeq ($(DEB_HOST_ARCH_CPU),mipsel)
+  LIBC_DEV_ARCH := mips
 endif
 
 ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
