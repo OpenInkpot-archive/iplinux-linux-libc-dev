@@ -1,2 +1,3 @@
 01-disable-cleaning-debian-directory.patch
 02-use-libc-fcntl.patch
+03-fix-byteorder-header.patch
