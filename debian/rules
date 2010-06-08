@@ -38,6 +38,9 @@ install: build
 	$(MAKE) $(NJOBS) headers_check ARCH=$(LIBC_DEV_ARCH) INSTALL_HDR_PATH=$(OUT)/usr
 	$(MAKE) $(NJOBS) headers_install ARCH=$(LIBC_DEV_ARCH) INSTALL_HDR_PATH=$(OUT)/usr
 	find $(OUT) \( -name .install -o -name ..install.cmd -o -name .check -o -name ..check.cmd \) -delete
+# Do not install scsi headers, provided by glibc
+# Do not install drm headers, provided by libdrm
+	rm -rf $(OUT)/usr/include/scsi $(OUT)/usr/include/drm
 
 binary-arch: install
 	dh_testdir -s
