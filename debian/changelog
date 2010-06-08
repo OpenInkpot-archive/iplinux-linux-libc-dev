@@ -1,3 +1,12 @@
+linux-libc-dev (2.6.34-1) zelazny; urgency=low
+
+  * Update to Linux 2.6.34
+  * Drop obsolete patches 02-use-libc-fcntl.patch and
+    03-fix-byteorder-headers.patch
+  * Do not install /usr/include/{scsi,drm}, provided by other packages
+
+ -- Mikhail Gusarov <dottedmag@dottedmag.net>  Wed, 09 Jun 2010 05:27:56 +0700
+
 linux-libc-dev (2.6.28-2) asimov; urgency=low
 
   * Mark package as not requiring cross-toolchain for build.
