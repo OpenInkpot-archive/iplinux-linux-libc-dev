@@ -10,6 +10,7 @@
 #include <linux/debugfs.h>
 #include <linux/ftrace.h>
 #include <linux/module.h>
+#include <linux/sysctl.h>
 #include <linux/init.h>
 #include <linux/fs.h>
 #include "trace.h"
@@ -26,11 +27,15 @@ static struct stack_trace max_stack_trace = {
 };
 
 static unsigned long max_stack_size;
-static raw_spinlock_t max_stack_lock =
-	(raw_spinlock_t)__RAW_SPIN_LOCK_UNLOCKED;
+static arch_spinlock_t max_stack_lock =
+	(arch_spinlock_t)__ARCH_SPIN_LOCK_UNLOCKED;
 
 static int stack_trace_disabled __read_mostly;
 static DEFINE_PER_CPU(int, trace_active);
+static DEFINE_MUTEX(stack_sysctl_mutex);
+
+int stack_tracer_enabled;
+static int last_stack_tracer_enabled;
 
 static inline void check_stack(void)
 {
@@ -48,8 +53,8 @@ static inline void check_stack(void)
 	if (!object_is_on_stack(&this_size))
 		return;
 
-	raw_local_irq_save(flags);
-	__raw_spin_lock(&max_stack_lock);
+	local_irq_save(flags);
+	arch_spin_lock(&max_stack_lock);
 
 	/* a race could have already updated it */
 	if (this_size <= max_stack_size)
@@ -78,6 +83,7 @@ static inline void check_stack(void)
 	 * on a new max, so it is far from a fast path.
 	 */
 	while (i < max_stack_trace.nr_entries) {
+		int found = 0;
 
 		stack_dump_index[i] = this_size;
 		p = start;
@@ -86,17 +92,19 @@ static inline void check_stack(void)
 			if (*p == stack_dump_trace[i]) {
 				this_size = stack_dump_index[i++] =
 					(top - p) * sizeof(unsigned long);
+				found = 1;
 				/* Start the search from here */
 				start = p + 1;
 			}
 		}
 
-		i++;
+		if (!found)
+			i++;
 	}
 
  out:
-	__raw_spin_unlock(&max_stack_lock);
-	raw_local_irq_restore(flags);
+	arch_spin_unlock(&max_stack_lock);
+	local_irq_restore(flags);
 }
 
 static void
@@ -107,8 +115,7 @@ stack_trace_call(unsigned long ip, unsigned long parent_ip)
 	if (unlikely(!ftrace_enabled || stack_trace_disabled))
 		return;
 
-	resched = need_resched();
-	preempt_disable_notrace();
+	resched = ftrace_preempt_disable();
 
 	cpu = raw_smp_processor_id();
 	/* no atomic needed, we only modify this variable by this cpu */
@@ -120,10 +127,7 @@ stack_trace_call(unsigned long ip, unsigned long parent_ip)
  out:
 	per_cpu(trace_active, cpu)--;
 	/* prevent recursion in schedule */
-	if (resched)
-		preempt_enable_no_resched_notrace();
-	else
-		preempt_enable_notrace();
+	ftrace_preempt_enable(resched);
 }
 
 static struct ftrace_ops trace_ops __read_mostly =
@@ -153,6 +157,7 @@ stack_max_size_write(struct file *filp, const char __user *ubuf,
 	unsigned long val, flags;
 	char buf[64];
 	int ret;
+	int cpu;
 
 	if (count >= sizeof(buf))
 		return -EINVAL;
@@ -166,79 +171,96 @@ stack_max_size_write(struct file *filp, const char __user *ubuf,
 	if (ret < 0)
 		return ret;
 
-	raw_local_irq_save(flags);
-	__raw_spin_lock(&max_stack_lock);
+	local_irq_save(flags);
+
+	/*
+	 * In case we trace inside arch_spin_lock() or after (NMI),
+	 * we will cause circular lock, so we also need to increase
+	 * the percpu trace_active here.
+	 */
+	cpu = smp_processor_id();
+	per_cpu(trace_active, cpu)++;
+
+	arch_spin_lock(&max_stack_lock);
 	*ptr = val;
-	__raw_spin_unlock(&max_stack_lock);
-	raw_local_irq_restore(flags);
+	arch_spin_unlock(&max_stack_lock);
+
+	per_cpu(trace_active, cpu)--;
+	local_irq_restore(flags);
 
 	return count;
 }
 
-static struct file_operations stack_max_size_fops = {
+static const struct file_operations stack_max_size_fops = {
 	.open		= tracing_open_generic,
 	.read		= stack_max_size_read,
 	.write		= stack_max_size_write,
 };
 
 static void *
-t_next(struct seq_file *m, void *v, loff_t *pos)
+__next(struct seq_file *m, loff_t *pos)
 {
-	long i;
+	long n = *pos - 1;
 
-	(*pos)++;
-
-	if (v == SEQ_START_TOKEN)
-		i = 0;
-	else {
-		i = *(long *)v;
-		i++;
-	}
-
-	if (i >= max_stack_trace.nr_entries ||
-	    stack_dump_trace[i] == ULONG_MAX)
+	if (n >= max_stack_trace.nr_entries || stack_dump_trace[n] == ULONG_MAX)
 		return NULL;
 
-	m->private = (void *)i;
-
+	m->private = (void *)n;
 	return &m->private;
+}
+
+static void *
+t_next(struct seq_file *m, void *v, loff_t *pos)
+{
+	(*pos)++;
+	return __next(m, pos);
 }
 
 static void *t_start(struct seq_file *m, loff_t *pos)
 {
-	void *t = SEQ_START_TOKEN;
-	loff_t l = 0;
+	int cpu;
 
 	local_irq_disable();
-	__raw_spin_lock(&max_stack_lock);
+
+	cpu = smp_processor_id();
+	per_cpu(trace_active, cpu)++;
+
+	arch_spin_lock(&max_stack_lock);
 
 	if (*pos == 0)
 		return SEQ_START_TOKEN;
 
-	for (; t && l < *pos; t = t_next(m, t, &l))
-		;
-
-	return t;
+	return __next(m, pos);
 }
 
 static void t_stop(struct seq_file *m, void *p)
 {
-	__raw_spin_unlock(&max_stack_lock);
+	int cpu;
+
+	arch_spin_unlock(&max_stack_lock);
+
+	cpu = smp_processor_id();
+	per_cpu(trace_active, cpu)--;
+
 	local_irq_enable();
 }
 
 static int trace_lookup_stack(struct seq_file *m, long i)
 {
 	unsigned long addr = stack_dump_trace[i];
-#ifdef CONFIG_KALLSYMS
-	char str[KSYM_SYMBOL_LEN];
 
-	sprint_symbol(str, addr);
+	return seq_printf(m, "%pF\n", (void *)addr);
+}
 
-	return seq_printf(m, "%s\n", str);
-#else
-	return seq_printf(m, "%p\n", (void*)addr);
-#endif
+static void print_disabled(struct seq_file *m)
+{
+	seq_puts(m, "#\n"
+		 "#  Stack tracer disabled\n"
+		 "#\n"
+		 "# To enable the stack tracer, either add 'stacktrace' to the\n"
+		 "# kernel command line\n"
+		 "# or 'echo 1 > /proc/sys/kernel/stack_tracer_enabled'\n"
+		 "#\n");
 }
 
 static int t_show(struct seq_file *m, void *v)
@@ -247,10 +269,14 @@ static int t_show(struct seq_file *m, void *v)
 	int size;
 
 	if (v == SEQ_START_TOKEN) {
-		seq_printf(m, "        Depth   Size      Location"
+		seq_printf(m, "        Depth    Size   Location"
 			   "    (%d entries)\n"
-			   "        -----   ----      --------\n",
-			   max_stack_trace.nr_entries);
+			   "        -----    ----   --------\n",
+			   max_stack_trace.nr_entries - 1);
+
+		if (!stack_tracer_enabled && !max_stack_size)
+			print_disabled(m);
+
 		return 0;
 	}
 
@@ -273,7 +299,7 @@ static int t_show(struct seq_file *m, void *v)
 	return 0;
 }
 
-static struct seq_operations stack_trace_seq_ops = {
+static const struct seq_operations stack_trace_seq_ops = {
 	.start		= t_start,
 	.next		= t_next,
 	.stop		= t_stop,
@@ -282,37 +308,65 @@ static struct seq_operations stack_trace_seq_ops = {
 
 static int stack_trace_open(struct inode *inode, struct file *file)
 {
-	int ret;
-
-	ret = seq_open(file, &stack_trace_seq_ops);
-
-	return ret;
+	return seq_open(file, &stack_trace_seq_ops);
 }
 
-static struct file_operations stack_trace_fops = {
+static const struct file_operations stack_trace_fops = {
 	.open		= stack_trace_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
+	.release	= seq_release,
 };
+
+int
+stack_trace_sysctl(struct ctl_table *table, int write,
+		   void __user *buffer, size_t *lenp,
+		   loff_t *ppos)
+{
+	int ret;
+
+	mutex_lock(&stack_sysctl_mutex);
+
+	ret = proc_dointvec(table, write, buffer, lenp, ppos);
+
+	if (ret || !write ||
+	    (last_stack_tracer_enabled == !!stack_tracer_enabled))
+		goto out;
+
+	last_stack_tracer_enabled = !!stack_tracer_enabled;
+
+	if (stack_tracer_enabled)
+		register_ftrace_function(&trace_ops);
+	else
+		unregister_ftrace_function(&trace_ops);
+
+ out:
+	mutex_unlock(&stack_sysctl_mutex);
+	return ret;
+}
+
+static __init int enable_stacktrace(char *str)
+{
+	stack_tracer_enabled = 1;
+	last_stack_tracer_enabled = 1;
+	return 1;
+}
+__setup("stacktrace", enable_stacktrace);
 
 static __init int stack_trace_init(void)
 {
 	struct dentry *d_tracer;
-	struct dentry *entry;
 
 	d_tracer = tracing_init_dentry();
 
-	entry = debugfs_create_file("stack_max_size", 0644, d_tracer,
-				    &max_stack_size, &stack_max_size_fops);
-	if (!entry)
-		pr_warning("Could not create debugfs 'stack_max_size' entry\n");
+	trace_create_file("stack_max_size", 0644, d_tracer,
+			&max_stack_size, &stack_max_size_fops);
 
-	entry = debugfs_create_file("stack_trace", 0444, d_tracer,
-				    NULL, &stack_trace_fops);
-	if (!entry)
-		pr_warning("Could not create debugfs 'stack_trace' entry\n");
+	trace_create_file("stack_trace", 0444, d_tracer,
+			NULL, &stack_trace_fops);
 
-	register_ftrace_function(&trace_ops);
+	if (stack_tracer_enabled)
+		register_ftrace_function(&trace_ops);
 
 	return 0;
 }

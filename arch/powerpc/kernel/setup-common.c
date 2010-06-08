@@ -24,7 +24,6 @@
 #include <linux/seq_file.h>
 #include <linux/ioport.h>
 #include <linux/console.h>
-#include <linux/utsname.h>
 #include <linux/screen_info.h>
 #include <linux/root_dev.h>
 #include <linux/notifier.h>
@@ -35,7 +34,9 @@
 #include <linux/debugfs.h>
 #include <linux/percpu.h>
 #include <linux/lmb.h>
+#include <linux/of_platform.h>
 #include <asm/io.h>
+#include <asm/paca.h>
 #include <asm/prom.h>
 #include <asm/processor.h>
 #include <asm/vdso_datapage.h>
@@ -157,7 +158,7 @@ extern u32 cpu_temp_both(unsigned long cpu);
 #endif /* CONFIG_TAU */
 
 #ifdef CONFIG_SMP
-DEFINE_PER_CPU(unsigned int, pvr);
+DEFINE_PER_CPU(unsigned int, cpu_pvr);
 #endif
 
 static int show_cpuinfo(struct seq_file *m, void *v)
@@ -209,7 +210,7 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 	}
 
 #ifdef CONFIG_SMP
-	pvr = per_cpu(pvr, cpu_id);
+	pvr = per_cpu(cpu_pvr, cpu_id);
 #else
 	pvr = mfspr(SPRN_PVR);
 #endif
@@ -327,7 +328,7 @@ static void c_stop(struct seq_file *m, void *v)
 {
 }
 
-struct seq_operations cpuinfo_op = {
+const struct seq_operations cpuinfo_op = {
 	.start =c_start,
 	.next =	c_next,
 	.stop =	c_stop,
@@ -431,9 +432,9 @@ void __init smp_setup_cpu_maps(void)
 		for (j = 0; j < nthreads && cpu < NR_CPUS; j++) {
 			DBG("    thread %d -> cpu %d (hard id %d)\n",
 			    j, cpu, intserv[j]);
-			cpu_set(cpu, cpu_present_map);
+			set_cpu_present(cpu, true);
 			set_hard_smp_processor_id(cpu, intserv[j]);
-			cpu_set(cpu, cpu_possible_map);
+			set_cpu_possible(cpu, true);
 			cpu++;
 		}
 	}
@@ -479,7 +480,7 @@ void __init smp_setup_cpu_maps(void)
 			       maxcpus);
 
 		for (cpu = 0; cpu < maxcpus; cpu++)
-			cpu_set(cpu, cpu_possible_map);
+			set_cpu_possible(cpu, true);
 	out:
 		of_node_put(dn);
 	}
@@ -493,6 +494,8 @@ void __init smp_setup_cpu_maps(void)
 	 * here will have to be reworked
 	 */
 	cpu_init_thread_core_maps(nthreads);
+
+	free_unused_pacas();
 }
 #endif /* CONFIG_SMP */
 
@@ -660,6 +663,7 @@ late_initcall(check_cache_coherency);
 
 #ifdef CONFIG_DEBUG_FS
 struct dentry *powerpc_debugfs_root;
+EXPORT_SYMBOL(powerpc_debugfs_root);
 
 static int powerpc_debugfs_init(void)
 {
@@ -669,3 +673,37 @@ static int powerpc_debugfs_init(void)
 }
 arch_initcall(powerpc_debugfs_init);
 #endif
+
+static int ppc_dflt_bus_notify(struct notifier_block *nb,
+				unsigned long action, void *data)
+{
+	struct device *dev = data;
+
+	/* We are only intereted in device addition */
+	if (action != BUS_NOTIFY_ADD_DEVICE)
+		return 0;
+
+	set_dma_ops(dev, &dma_direct_ops);
+
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block ppc_dflt_plat_bus_notifier = {
+	.notifier_call = ppc_dflt_bus_notify,
+	.priority = INT_MAX,
+};
+
+static struct notifier_block ppc_dflt_of_bus_notifier = {
+	.notifier_call = ppc_dflt_bus_notify,
+	.priority = INT_MAX,
+};
+
+static int __init setup_bus_notifier(void)
+{
+	bus_register_notifier(&platform_bus_type, &ppc_dflt_plat_bus_notifier);
+	bus_register_notifier(&of_platform_bus_type, &ppc_dflt_of_bus_notifier);
+
+	return 0;
+}
+
+arch_initcall(setup_bus_notifier);

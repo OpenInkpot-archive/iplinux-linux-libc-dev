@@ -45,6 +45,7 @@
 #include <linux/buffer_head.h>
 #include <linux/pagemap.h>
 #include <linux/quotaops.h>
+#include <linux/slab.h>
 
 #include "jfs_incore.h"
 #include "jfs_inode.h"
@@ -55,12 +56,6 @@
 #include "jfs_metapage.h"
 #include "jfs_superblock.h"
 #include "jfs_debug.h"
-
-/*
- * __mark_inode_dirty expects inodes to be hashed.  Since we don't want
- * special inodes in the fileset inode space, we hash them to a dummy head
- */
-static HLIST_HEAD(aggregate_hash);
 
 /*
  * imap locks
@@ -496,7 +491,13 @@ struct inode *diReadSpecial(struct super_block *sb, ino_t inum, int secondary)
 	/* release the page */
 	release_metapage(mp);
 
-	hlist_add_head(&ip->i_hash, &aggregate_hash);
+	/*
+	 * __mark_inode_dirty expects inodes to be hashed.  Since we don't
+	 * want special inodes in the fileset inode space, we make them
+	 * appear hashed, but do not put on any lists.  hlist_del()
+	 * will work fine and require no locking.
+	 */
+	ip->i_hash.pprev = &ip->i_hash.next;
 
 	return (ip);
 }
@@ -2571,6 +2572,7 @@ diNewIAG(struct inomap * imap, int *iagnop, int agno, struct metapage ** mpp)
 
 			txAbort(tid, 0);
 			txEnd(tid);
+			mutex_unlock(&JFS_IP(ipimap)->commit_mutex);
 
 			/* release the inode map lock */
 			IWRITE_UNLOCK(ipimap);

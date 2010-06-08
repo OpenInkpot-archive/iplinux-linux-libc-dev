@@ -71,7 +71,7 @@ MODULE_VERSION(DRV_MODULE_VERSION);
  *        x22 + x21 + x17 + x15 + x13 + x12 + x11 + x7 + x5 + x + 1
  *
  * The RNG_CTL_VCO value of each noise cell must be programmed
- * seperately.  This is why 4 control register values must be provided
+ * separately.  This is why 4 control register values must be provided
  * to the hypervisor.  During a write, the hypervisor writes them all,
  * one at a time, to the actual RNG_CTL register.  The first three
  * values are used to setup the desired RNG_CTL_VCO for each entropy
@@ -482,7 +482,7 @@ static void n2rng_dump_test_buffer(struct n2rng *np)
 	int i;
 
 	for (i = 0; i < SELFTEST_BUFFER_WORDS; i++)
-		dev_err(&np->op->dev, "Test buffer slot %d [0x%016lx]\n",
+		dev_err(&np->op->dev, "Test buffer slot %d [0x%016llx]\n",
 			i, np->test_buffer[i]);
 }
 

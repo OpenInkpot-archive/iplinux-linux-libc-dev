@@ -14,6 +14,9 @@
  *
  */
 
+#define KMSG_COMPONENT "IPVS"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 
@@ -44,7 +47,7 @@ ip_vs_lc_schedule(struct ip_vs_service *svc, const struct sk_buff *skb)
 	struct ip_vs_dest *dest, *least = NULL;
 	unsigned int loh = 0, doh;
 
-	IP_VS_DBG(6, "ip_vs_lc_schedule(): Scheduling...\n");
+	IP_VS_DBG(6, "%s(): Scheduling...\n", __func__);
 
 	/*
 	 * Simply select the server with the least number of
@@ -66,11 +69,15 @@ ip_vs_lc_schedule(struct ip_vs_service *svc, const struct sk_buff *skb)
 		}
 	}
 
-	if (least)
-	IP_VS_DBG_BUF(6, "LC: server %s:%u activeconns %d inactconns %d\n",
-		      IP_VS_DBG_ADDR(svc->af, &least->addr), ntohs(least->port),
-		      atomic_read(&least->activeconns),
-		      atomic_read(&least->inactconns));
+	if (!least)
+		IP_VS_ERR_RL("LC: no destination available\n");
+	else
+		IP_VS_DBG_BUF(6, "LC: server %s:%u activeconns %d "
+			      "inactconns %d\n",
+			      IP_VS_DBG_ADDR(svc->af, &least->addr),
+			      ntohs(least->port),
+			      atomic_read(&least->activeconns),
+			      atomic_read(&least->inactconns));
 
 	return least;
 }
@@ -81,9 +88,6 @@ static struct ip_vs_scheduler ip_vs_lc_scheduler = {
 	.refcnt =		ATOMIC_INIT(0),
 	.module =		THIS_MODULE,
 	.n_list =		LIST_HEAD_INIT(ip_vs_lc_scheduler.n_list),
-#ifdef CONFIG_IP_VS_IPV6
-	.supports_ipv6 =	1,
-#endif
 	.schedule =		ip_vs_lc_schedule,
 };
 

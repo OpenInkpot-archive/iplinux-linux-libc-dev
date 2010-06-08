@@ -2,13 +2,14 @@
   * This file contains ioctl functions
   */
 #include <linux/ctype.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/if.h>
 #include <linux/if_arp.h>
 #include <linux/wireless.h>
 #include <linux/bitops.h>
 
-#include <net/ieee80211.h>
+#include <net/lib80211.h>
 #include <net/iw_handler.h>
 
 #include "host.h"
@@ -45,6 +46,63 @@ static inline void lbs_cancel_association_work(struct lbs_private *priv)
 	priv->pending_assoc_req = NULL;
 }
 
+void lbs_send_disconnect_notification(struct lbs_private *priv)
+{
+	union iwreq_data wrqu;
+
+	memset(wrqu.ap_addr.sa_data, 0x00, ETH_ALEN);
+	wrqu.ap_addr.sa_family = ARPHRD_ETHER;
+	wireless_send_event(priv->dev, SIOCGIWAP, &wrqu, NULL);
+}
+
+static void lbs_send_iwevcustom_event(struct lbs_private *priv, s8 *str)
+{
+	union iwreq_data iwrq;
+	u8 buf[50];
+
+	lbs_deb_enter(LBS_DEB_WEXT);
+
+	memset(&iwrq, 0, sizeof(union iwreq_data));
+	memset(buf, 0, sizeof(buf));
+
+	snprintf(buf, sizeof(buf) - 1, "%s", str);
+
+	iwrq.data.length = strlen(buf) + 1 + IW_EV_LCP_LEN;
+
+	/* Send Event to upper layer */
+	lbs_deb_wext("event indication string %s\n", (char *)buf);
+	lbs_deb_wext("event indication length %d\n", iwrq.data.length);
+	lbs_deb_wext("sending wireless event IWEVCUSTOM for %s\n", str);
+
+	wireless_send_event(priv->dev, IWEVCUSTOM, &iwrq, buf);
+
+	lbs_deb_leave(LBS_DEB_WEXT);
+}
+
+/**
+ *  @brief This function handles MIC failure event.
+ *
+ *  @param priv    A pointer to struct lbs_private structure
+ *  @para  event   the event id
+ *  @return 	   n/a
+ */
+void lbs_send_mic_failureevent(struct lbs_private *priv, u32 event)
+{
+	char buf[50];
+
+	lbs_deb_enter(LBS_DEB_CMD);
+	memset(buf, 0, sizeof(buf));
+
+	sprintf(buf, "%s", "MLME-MICHAELMICFAILURE.indication ");
+
+	if (event == MACREG_INT_CODE_MIC_ERR_UNICAST)
+		strcat(buf, "unicast ");
+	else
+		strcat(buf, "multicast ");
+
+	lbs_send_iwevcustom_event(priv, buf);
+	lbs_deb_leave(LBS_DEB_CMD);
+}
 
 /**
  *  @brief Find the channel frequency power info with specific channel
@@ -66,8 +124,6 @@ struct chan_freq_power *lbs_find_cfp_by_band_and_channel(
 	for (j = 0; !cfp && (j < ARRAY_SIZE(priv->region_channel)); j++) {
 		rc = &priv->region_channel[j];
 
-		if (priv->enable11d)
-			rc = &priv->universal_channel[j];
 		if (!rc->valid || !rc->CFP)
 			continue;
 		if (rc->band != band)
@@ -107,8 +163,6 @@ static struct chan_freq_power *find_cfp_by_band_and_freq(
 	for (j = 0; !cfp && (j < ARRAY_SIZE(priv->region_channel)); j++) {
 		rc = &priv->region_channel[j];
 
-		if (priv->enable11d)
-			rc = &priv->universal_channel[j];
 		if (!rc->valid || !rc->CFP)
 			continue;
 		if (rc->band != band)
@@ -139,7 +193,7 @@ static void copy_active_data_rates(struct lbs_private *priv, u8 *rates)
 	lbs_deb_enter(LBS_DEB_WEXT);
 
 	if ((priv->connect_status != LBS_CONNECTED) &&
-		(priv->mesh_connect_status != LBS_CONNECTED))
+		!lbs_mesh_connected(priv))
 		memcpy(rates, lbs_bg_rates, MAX_RATES);
 	else
 		memcpy(rates, priv->curbssparams.rates, MAX_RATES);
@@ -163,18 +217,18 @@ static int lbs_get_name(struct net_device *dev, struct iw_request_info *info,
 static int lbs_get_freq(struct net_device *dev, struct iw_request_info *info,
 			 struct iw_freq *fwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	struct chan_freq_power *cfp;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
 
 	cfp = lbs_find_cfp_by_band_and_channel(priv, 0,
-					   priv->curbssparams.channel);
+					   priv->channel);
 
 	if (!cfp) {
-		if (priv->curbssparams.channel)
+		if (priv->channel)
 			lbs_deb_wext("invalid channel %d\n",
-			       priv->curbssparams.channel);
+			       priv->channel);
 		return -EINVAL;
 	}
 
@@ -189,7 +243,7 @@ static int lbs_get_freq(struct net_device *dev, struct iw_request_info *info,
 static int lbs_get_wap(struct net_device *dev, struct iw_request_info *info,
 			struct sockaddr *awrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
 
@@ -207,7 +261,7 @@ static int lbs_get_wap(struct net_device *dev, struct iw_request_info *info,
 static int lbs_set_nick(struct net_device *dev, struct iw_request_info *info,
 			 struct iw_point *dwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
 
@@ -231,7 +285,7 @@ static int lbs_set_nick(struct net_device *dev, struct iw_request_info *info,
 static int lbs_get_nick(struct net_device *dev, struct iw_request_info *info,
 			 struct iw_point *dwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
 
@@ -245,16 +299,17 @@ static int lbs_get_nick(struct net_device *dev, struct iw_request_info *info,
 	return 0;
 }
 
+#ifdef CONFIG_LIBERTAS_MESH
 static int mesh_get_nick(struct net_device *dev, struct iw_request_info *info,
 			 struct iw_point *dwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
 
 	/* Use nickname to indicate that mesh is on */
 
-	if (priv->mesh_connect_status == LBS_CONNECTED) {
+	if (lbs_mesh_connected(priv)) {
 		strncpy(extra, "Mesh", 12);
 		extra[12] = '\0';
 		dwrq->length = strlen(extra);
@@ -268,12 +323,13 @@ static int mesh_get_nick(struct net_device *dev, struct iw_request_info *info,
 	lbs_deb_leave(LBS_DEB_WEXT);
 	return 0;
 }
+#endif
 
 static int lbs_set_rts(struct net_device *dev, struct iw_request_info *info,
 			struct iw_param *vwrq, char *extra)
 {
 	int ret = 0;
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	u32 val = vwrq->value;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
@@ -293,7 +349,7 @@ static int lbs_set_rts(struct net_device *dev, struct iw_request_info *info,
 static int lbs_get_rts(struct net_device *dev, struct iw_request_info *info,
 			struct iw_param *vwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	int ret = 0;
 	u16 val = 0;
 
@@ -315,7 +371,7 @@ out:
 static int lbs_set_frag(struct net_device *dev, struct iw_request_info *info,
 			 struct iw_param *vwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	int ret = 0;
 	u32 val = vwrq->value;
 
@@ -336,7 +392,7 @@ static int lbs_set_frag(struct net_device *dev, struct iw_request_info *info,
 static int lbs_get_frag(struct net_device *dev, struct iw_request_info *info,
 			 struct iw_param *vwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	int ret = 0;
 	u16 val = 0;
 
@@ -359,7 +415,7 @@ out:
 static int lbs_get_mode(struct net_device *dev,
 			 struct iw_request_info *info, u32 * uwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
 
@@ -369,6 +425,7 @@ static int lbs_get_mode(struct net_device *dev,
 	return 0;
 }
 
+#ifdef CONFIG_LIBERTAS_MESH
 static int mesh_wlan_get_mode(struct net_device *dev,
 		              struct iw_request_info *info, u32 * uwrq,
 			      char *extra)
@@ -380,12 +437,13 @@ static int mesh_wlan_get_mode(struct net_device *dev,
 	lbs_deb_leave(LBS_DEB_WEXT);
 	return 0;
 }
+#endif
 
 static int lbs_get_txpow(struct net_device *dev,
 			  struct iw_request_info *info,
 			  struct iw_param *vwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	s16 curlevel = 0;
 	int ret = 0;
 
@@ -418,7 +476,7 @@ out:
 static int lbs_set_retry(struct net_device *dev, struct iw_request_info *info,
 			  struct iw_param *vwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	int ret = 0;
 	u16 slimit = 0, llimit = 0;
 
@@ -466,7 +524,7 @@ out:
 static int lbs_get_retry(struct net_device *dev, struct iw_request_info *info,
 			  struct iw_param *vwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	int ret = 0;
 	u16 val = 0;
 
@@ -542,12 +600,10 @@ static int lbs_get_range(struct net_device *dev, struct iw_request_info *info,
 			  struct iw_point *dwrq, char *extra)
 {
 	int i, j;
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	struct iw_range *range = (struct iw_range *)extra;
 	struct chan_freq_power *cfp;
 	u8 rates[MAX_RATES + 1];
-
-	u8 flag = 0;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
 
@@ -570,51 +626,20 @@ static int lbs_get_range(struct net_device *dev, struct iw_request_info *info,
 
 	range->scan_capa = IW_SCAN_CAPA_ESSID;
 
-	if (priv->enable11d &&
-	    (priv->connect_status == LBS_CONNECTED ||
-	    priv->mesh_connect_status == LBS_CONNECTED)) {
-		u8 chan_no;
-		u8 band;
-
-		struct parsed_region_chan_11d *parsed_region_chan =
-		    &priv->parsed_region_chan;
-
-		if (parsed_region_chan == NULL) {
-			lbs_deb_wext("11d: parsed_region_chan is NULL\n");
-			goto out;
-		}
-		band = parsed_region_chan->band;
-		lbs_deb_wext("band %d, nr_char %d\n", band,
-		       parsed_region_chan->nr_chan);
-
+	for (j = 0; (range->num_frequency < IW_MAX_FREQUENCIES)
+	     && (j < ARRAY_SIZE(priv->region_channel)); j++) {
+		cfp = priv->region_channel[j].CFP;
 		for (i = 0; (range->num_frequency < IW_MAX_FREQUENCIES)
-		     && (i < parsed_region_chan->nr_chan); i++) {
-			chan_no = parsed_region_chan->chanpwr[i].chan;
-			lbs_deb_wext("chan_no %d\n", chan_no);
-			range->freq[range->num_frequency].i = (long)chan_no;
+		     && priv->region_channel[j].valid
+		     && cfp
+		     && (i < priv->region_channel[j].nrcfp); i++) {
+			range->freq[range->num_frequency].i =
+			    (long)cfp->channel;
 			range->freq[range->num_frequency].m =
-			    (long)lbs_chan_2_freq(chan_no) * 100000;
+			    (long)cfp->freq * 100000;
 			range->freq[range->num_frequency].e = 1;
+			cfp++;
 			range->num_frequency++;
-		}
-		flag = 1;
-	}
-	if (!flag) {
-		for (j = 0; (range->num_frequency < IW_MAX_FREQUENCIES)
-		     && (j < ARRAY_SIZE(priv->region_channel)); j++) {
-			cfp = priv->region_channel[j].CFP;
-			for (i = 0; (range->num_frequency < IW_MAX_FREQUENCIES)
-			     && priv->region_channel[j].valid
-			     && cfp
-			     && (i < priv->region_channel[j].nrcfp); i++) {
-				range->freq[range->num_frequency].i =
-				    (long)cfp->channel;
-				range->freq[range->num_frequency].m =
-				    (long)cfp->freq * 100000;
-				range->freq[range->num_frequency].e = 1;
-				cfp++;
-				range->num_frequency++;
-			}
 		}
 	}
 
@@ -700,7 +725,6 @@ static int lbs_get_range(struct net_device *dev, struct iw_request_info *info,
 		                  | IW_ENC_CAPA_CIPHER_CCMP;
 	}
 
-out:
 	lbs_deb_leave(LBS_DEB_WEXT);
 	return 0;
 }
@@ -708,11 +732,12 @@ out:
 static int lbs_set_power(struct net_device *dev, struct iw_request_info *info,
 			  struct iw_param *vwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
+	int ret = 0;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
 
-	if (!priv->ps_supported) {
+	if (!(priv->fwcapinfo & FW_CAPINFO_PS)) {
 		if (vwrq->disabled)
 			return 0;
 		else
@@ -737,8 +762,54 @@ static int lbs_set_power(struct net_device *dev, struct iw_request_info *info,
 		       "setting power timeout is not supported\n");
 		return -EINVAL;
 	} else if ((vwrq->flags & IW_POWER_TYPE) == IW_POWER_PERIOD) {
-		lbs_deb_wext("setting power period not supported\n");
-		return -EINVAL;
+		vwrq->value = vwrq->value / 1000;
+		if (!priv->enter_deep_sleep) {
+			lbs_pr_err("deep sleep feature is not implemented "
+					"for this interface driver\n");
+			return -EINVAL;
+		}
+
+		if (priv->connect_status == LBS_CONNECTED) {
+			if ((priv->is_auto_deep_sleep_enabled) &&
+						(vwrq->value == -1000)) {
+				lbs_exit_auto_deep_sleep(priv);
+				return 0;
+			} else {
+				lbs_pr_err("can't use deep sleep cmd in "
+						"connected state\n");
+				return -EINVAL;
+			}
+		}
+
+		if ((vwrq->value < 0) && (vwrq->value != -1000)) {
+			lbs_pr_err("unknown option\n");
+			return -EINVAL;
+		}
+
+		if (vwrq->value > 0) {
+			if (!priv->is_auto_deep_sleep_enabled) {
+				priv->is_activity_detected = 0;
+				priv->auto_deep_sleep_timeout = vwrq->value;
+				lbs_enter_auto_deep_sleep(priv);
+			} else {
+				priv->auto_deep_sleep_timeout = vwrq->value;
+				lbs_deb_debugfs("auto deep sleep: "
+						"already enabled\n");
+			}
+			return 0;
+		} else {
+			if (priv->is_auto_deep_sleep_enabled) {
+				lbs_exit_auto_deep_sleep(priv);
+				/* Try to exit deep sleep if auto */
+				/*deep sleep disabled */
+				ret = lbs_set_deep_sleep(priv, 0);
+			}
+			if (vwrq->value == 0)
+				ret = lbs_set_deep_sleep(priv, 1);
+			else if (vwrq->value == -1000)
+				ret = lbs_set_deep_sleep(priv, 0);
+			return ret;
+		}
 	}
 
 	if (priv->psmode != LBS802_11POWERMODECAM) {
@@ -752,13 +823,14 @@ static int lbs_set_power(struct net_device *dev, struct iw_request_info *info,
 	}
 
 	lbs_deb_leave(LBS_DEB_WEXT);
+
 	return 0;
 }
 
 static int lbs_get_power(struct net_device *dev, struct iw_request_info *info,
 			  struct iw_param *vwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
 
@@ -781,11 +853,11 @@ static struct iw_statistics *lbs_get_wireless_stats(struct net_device *dev)
 		EXCELLENT = 95,
 		PERFECT = 100
 	};
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	u32 rssi_qual;
 	u32 tx_qual;
 	u32 quality = 0;
-	int stats_valid = 0;
+	int ret, stats_valid = 0;
 	u8 rssi;
 	u32 tx_retries;
 	struct cmd_ds_802_11_get_log log;
@@ -796,7 +868,7 @@ static struct iw_statistics *lbs_get_wireless_stats(struct net_device *dev)
 
 	/* If we're not associated, all quality values are meaningless */
 	if ((priv->connect_status != LBS_CONNECTED) &&
-	    (priv->mesh_connect_status != LBS_CONNECTED))
+	    !lbs_mesh_connected(priv))
 		goto out;
 
 	/* Quality by RSSI */
@@ -830,11 +902,13 @@ static struct iw_statistics *lbs_get_wireless_stats(struct net_device *dev)
 	quality = rssi_qual;
 
 	/* Quality by TX errors */
-	priv->wstats.discard.retries = priv->stats.tx_errors;
+	priv->wstats.discard.retries = dev->stats.tx_errors;
 
 	memset(&log, 0, sizeof(log));
 	log.hdr.size = cpu_to_le16(sizeof(log));
-	lbs_cmd_with_response(priv, CMD_802_11_GET_LOG, &log);
+	ret = lbs_cmd_with_response(priv, CMD_802_11_GET_LOG, &log);
+	if (ret)
+		goto out;
 
 	tx_retries = le32_to_cpu(log.retry);
 
@@ -862,8 +936,10 @@ static struct iw_statistics *lbs_get_wireless_stats(struct net_device *dev)
 	stats_valid = 1;
 
 	/* update stats asynchronously for future calls */
-	lbs_prepare_and_send_command(priv, CMD_802_11_RSSI, 0,
+	ret = lbs_prepare_and_send_command(priv, CMD_802_11_RSSI, 0,
 					0, 0, NULL);
+	if (ret)
+		lbs_pr_err("RSSI command failed\n");
 out:
 	if (!stats_valid) {
 		priv->wstats.miss.beacon = 0;
@@ -886,7 +962,7 @@ static int lbs_set_freq(struct net_device *dev, struct iw_request_info *info,
 		  struct iw_freq *fwrq, char *extra)
 {
 	int ret = -EINVAL;
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	struct chan_freq_power *cfp;
 	struct assoc_request * assoc_req;
 
@@ -939,11 +1015,12 @@ out:
 	return ret;
 }
 
+#ifdef CONFIG_LIBERTAS_MESH
 static int lbs_mesh_set_freq(struct net_device *dev,
 			     struct iw_request_info *info,
 			     struct iw_freq *fwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	struct chan_freq_power *cfp;
 	int ret = -EINVAL;
 
@@ -973,7 +1050,7 @@ static int lbs_mesh_set_freq(struct net_device *dev,
 		goto out;
 	}
 
-	if (fwrq->m != priv->curbssparams.channel) {
+	if (fwrq->m != priv->channel) {
 		lbs_deb_wext("mesh channel change forces eth disconnect\n");
 		if (priv->mode == IW_MODE_INFRA)
 			lbs_cmd_80211_deauthenticate(priv,
@@ -990,16 +1067,18 @@ out:
 	lbs_deb_leave_args(LBS_DEB_WEXT, "ret %d", ret);
 	return ret;
 }
+#endif
 
 static int lbs_set_rate(struct net_device *dev, struct iw_request_info *info,
 		  struct iw_param *vwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	u8 new_rate = 0;
 	int ret = -EINVAL;
 	u8 rates[MAX_RATES + 1];
 
 	lbs_deb_enter(LBS_DEB_WEXT);
+
 	lbs_deb_wext("vwrq->value %d\n", vwrq->value);
 	lbs_deb_wext("vwrq->fixed %d\n", vwrq->fixed);
 
@@ -1054,7 +1133,7 @@ out:
 static int lbs_get_rate(struct net_device *dev, struct iw_request_info *info,
 		  struct iw_param *vwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
 
@@ -1079,7 +1158,7 @@ static int lbs_set_mode(struct net_device *dev,
 		  struct iw_request_info *info, u32 * uwrq, char *extra)
 {
 	int ret = 0;
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	struct assoc_request * assoc_req;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
@@ -1124,7 +1203,7 @@ static int lbs_get_encode(struct net_device *dev,
 			   struct iw_request_info *info,
 			   struct iw_point *dwrq, u8 * extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	int index = (dwrq->flags & IW_ENCODE_INDEX) - 1;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
@@ -1319,7 +1398,7 @@ static int lbs_set_encode(struct net_device *dev,
 		    struct iw_point *dwrq, char *extra)
 {
 	int ret = 0;
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	struct assoc_request * assoc_req;
 	u16 is_default = 0, index = 0, set_tx_key = 0;
 
@@ -1395,7 +1474,7 @@ static int lbs_get_encodeext(struct net_device *dev,
 			      char *extra)
 {
 	int ret = -EINVAL;
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	struct iw_encode_ext *ext = (struct iw_encode_ext *)extra;
 	int index, max_key_len;
 
@@ -1501,7 +1580,7 @@ static int lbs_set_encodeext(struct net_device *dev,
 			      char *extra)
 {
 	int ret = 0;
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	struct iw_encode_ext *ext = (struct iw_encode_ext *)extra;
 	int alg = ext->alg;
 	struct assoc_request * assoc_req;
@@ -1639,7 +1718,7 @@ static int lbs_set_genie(struct net_device *dev,
 			  struct iw_point *dwrq,
 			  char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	int ret = 0;
 	struct assoc_request * assoc_req;
 
@@ -1685,7 +1764,7 @@ static int lbs_get_genie(struct net_device *dev,
 			  char *extra)
 {
 	int ret = 0;
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
 
@@ -1713,7 +1792,7 @@ static int lbs_set_auth(struct net_device *dev,
 			 struct iw_param *dwrq,
 			 char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	struct assoc_request * assoc_req;
 	int ret = 0;
 	int updated = 0;
@@ -1728,6 +1807,8 @@ static int lbs_set_auth(struct net_device *dev,
 	}
 
 	switch (dwrq->flags & IW_AUTH_INDEX) {
+	case IW_AUTH_PRIVACY_INVOKED:
+	case IW_AUTH_RX_UNENCRYPTED_EAPOL:
 	case IW_AUTH_TKIP_COUNTERMEASURES:
 	case IW_AUTH_CIPHER_PAIRWISE:
 	case IW_AUTH_CIPHER_GROUP:
@@ -1816,7 +1897,7 @@ static int lbs_get_auth(struct net_device *dev,
 			 char *extra)
 {
 	int ret = 0;
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
 
@@ -1857,7 +1938,7 @@ static int lbs_set_txpow(struct net_device *dev, struct iw_request_info *info,
 		   struct iw_param *vwrq, char *extra)
 {
 	int ret = 0;
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	s16 dbm = (s16) vwrq->value;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
@@ -1936,7 +2017,7 @@ out:
 static int lbs_get_essid(struct net_device *dev, struct iw_request_info *info,
 		   struct iw_point *dwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
 
@@ -1951,10 +2032,8 @@ static int lbs_get_essid(struct net_device *dev, struct iw_request_info *info,
 	if (priv->connect_status == LBS_CONNECTED) {
 		memcpy(extra, priv->curbssparams.ssid,
 		       priv->curbssparams.ssid_len);
-		extra[priv->curbssparams.ssid_len] = '\0';
 	} else {
 		memset(extra, 0, 32);
-		extra[priv->curbssparams.ssid_len] = '\0';
 	}
 	/*
 	 * If none, we may want to get the one that was set
@@ -1971,12 +2050,13 @@ static int lbs_get_essid(struct net_device *dev, struct iw_request_info *info,
 static int lbs_set_essid(struct net_device *dev, struct iw_request_info *info,
 		   struct iw_point *dwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	int ret = 0;
-	u8 ssid[IW_ESSID_MAX_SIZE];
+	u8 ssid[IEEE80211_MAX_SSID_LEN];
 	u8 ssid_len = 0;
 	struct assoc_request * assoc_req;
 	int in_ssid_len = dwrq->length;
+	DECLARE_SSID_BUF(ssid_buf);
 
 	lbs_deb_enter(LBS_DEB_WEXT);
 
@@ -1986,7 +2066,7 @@ static int lbs_set_essid(struct net_device *dev, struct iw_request_info *info,
 	}
 
 	/* Check the size of the string */
-	if (in_ssid_len > IW_ESSID_MAX_SIZE) {
+	if (in_ssid_len > IEEE80211_MAX_SSID_LEN) {
 		ret = -E2BIG;
 		goto out;
 	}
@@ -2005,7 +2085,7 @@ static int lbs_set_essid(struct net_device *dev, struct iw_request_info *info,
 		lbs_deb_wext("requested any SSID\n");
 	} else {
 		lbs_deb_wext("requested SSID '%s'\n",
-		             escape_essid(ssid, ssid_len));
+		             print_ssid(ssid_buf, ssid, ssid_len));
 	}
 
 out:
@@ -2017,7 +2097,7 @@ out:
 			ret = -ENOMEM;
 		} else {
 			/* Copy the SSID to the association request */
-			memcpy(&assoc_req->ssid, &ssid, IW_ESSID_MAX_SIZE);
+			memcpy(&assoc_req->ssid, &ssid, IEEE80211_MAX_SSID_LEN);
 			assoc_req->ssid_len = ssid_len;
 			set_bit(ASSOC_FLAG_SSID, &assoc_req->flags);
 			lbs_postpone_association_work(priv);
@@ -2035,11 +2115,12 @@ out:
 	return ret;
 }
 
+#ifdef CONFIG_LIBERTAS_MESH
 static int lbs_mesh_get_essid(struct net_device *dev,
 			      struct iw_request_info *info,
 			      struct iw_point *dwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
 
@@ -2057,7 +2138,7 @@ static int lbs_mesh_set_essid(struct net_device *dev,
 			      struct iw_request_info *info,
 			      struct iw_point *dwrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	int ret = 0;
 
 	lbs_deb_enter(LBS_DEB_WEXT);
@@ -2068,7 +2149,7 @@ static int lbs_mesh_set_essid(struct net_device *dev,
 	}
 
 	/* Check the size of the string */
-	if (dwrq->length > IW_ESSID_MAX_SIZE) {
+	if (dwrq->length > IEEE80211_MAX_SSID_LEN) {
 		ret = -E2BIG;
 		goto out;
 	}
@@ -2083,11 +2164,12 @@ static int lbs_mesh_set_essid(struct net_device *dev,
 	}
 
 	lbs_mesh_config(priv, CMD_ACT_MESH_CONFIG_START,
-			priv->curbssparams.channel);
+			priv->channel);
  out:
 	lbs_deb_leave_args(LBS_DEB_WEXT, "ret %d", ret);
 	return ret;
 }
+#endif
 
 /**
  *  @brief Connect to the AP or Ad-hoc Network with specific bssid
@@ -2101,10 +2183,9 @@ static int lbs_mesh_set_essid(struct net_device *dev,
 static int lbs_set_wap(struct net_device *dev, struct iw_request_info *info,
 		 struct sockaddr *awrq, char *extra)
 {
-	struct lbs_private *priv = dev->priv;
+	struct lbs_private *priv = dev->ml_priv;
 	struct assoc_request * assoc_req;
 	int ret = 0;
-	DECLARE_MAC_BUF(mac);
 
 	lbs_deb_enter(LBS_DEB_WEXT);
 
@@ -2114,7 +2195,7 @@ static int lbs_set_wap(struct net_device *dev, struct iw_request_info *info,
 	if (awrq->sa_family != ARPHRD_ETHER)
 		return -EINVAL;
 
-	lbs_deb_wext("ASSOC: WAP: sa_data %s\n", print_mac(mac, awrq->sa_data));
+	lbs_deb_wext("ASSOC: WAP: sa_data %pM\n", awrq->sa_data);
 
 	mutex_lock(&priv->lock);
 
@@ -2195,7 +2276,13 @@ static const iw_handler lbs_handler[] = {
 	(iw_handler) lbs_get_encodeext,/* SIOCGIWENCODEEXT */
 	(iw_handler) NULL,		/* SIOCSIWPMKSA */
 };
+struct iw_handler_def lbs_handler_def = {
+	.num_standard	= ARRAY_SIZE(lbs_handler),
+	.standard	= (iw_handler *) lbs_handler,
+	.get_wireless_stats = lbs_get_wireless_stats,
+};
 
+#ifdef CONFIG_LIBERTAS_MESH
 static const iw_handler mesh_wlan_handler[] = {
 	(iw_handler) NULL,	/* SIOCSIWCOMMIT */
 	(iw_handler) lbs_get_name,	/* SIOCGIWNAME */
@@ -2253,14 +2340,10 @@ static const iw_handler mesh_wlan_handler[] = {
 	(iw_handler) lbs_get_encodeext,/* SIOCGIWENCODEEXT */
 	(iw_handler) NULL,		/* SIOCSIWPMKSA */
 };
-struct iw_handler_def lbs_handler_def = {
-	.num_standard	= ARRAY_SIZE(lbs_handler),
-	.standard	= (iw_handler *) lbs_handler,
-	.get_wireless_stats = lbs_get_wireless_stats,
-};
 
 struct iw_handler_def mesh_handler_def = {
 	.num_standard	= ARRAY_SIZE(mesh_wlan_handler),
 	.standard	= (iw_handler *) mesh_wlan_handler,
 	.get_wireless_stats = lbs_get_wireless_stats,
 };
+#endif

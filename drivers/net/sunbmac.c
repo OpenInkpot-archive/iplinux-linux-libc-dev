@@ -11,7 +11,6 @@
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -25,6 +24,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/gfp.h>
 
 #include <asm/auxio.h>
 #include <asm/byteorder.h>
@@ -878,7 +878,6 @@ static void bigmac_rx(struct bigmac *bp)
 		/* No checksums done by the BigMAC ;-( */
 		skb->protocol = eth_type_trans(skb, bp->dev);
 		netif_rx(skb);
-		bp->dev->last_rx = jiffies;
 		bp->enet_stats.rx_packets++;
 		bp->enet_stats.rx_bytes += len;
 	next:
@@ -917,10 +916,10 @@ static irqreturn_t bigmac_interrupt(int irq, void *dev_id)
 
 static int bigmac_open(struct net_device *dev)
 {
-	struct bigmac *bp = (struct bigmac *) dev->priv;
+	struct bigmac *bp = netdev_priv(dev);
 	int ret;
 
-	ret = request_irq(dev->irq, &bigmac_interrupt, IRQF_SHARED, dev->name, bp);
+	ret = request_irq(dev->irq, bigmac_interrupt, IRQF_SHARED, dev->name, bp);
 	if (ret) {
 		printk(KERN_ERR "BIGMAC: Can't order irq %d to go.\n", dev->irq);
 		return ret;
@@ -934,7 +933,7 @@ static int bigmac_open(struct net_device *dev)
 
 static int bigmac_close(struct net_device *dev)
 {
-	struct bigmac *bp = (struct bigmac *) dev->priv;
+	struct bigmac *bp = netdev_priv(dev);
 
 	del_timer(&bp->bigmac_timer);
 	bp->timer_state = asleep;
@@ -948,7 +947,7 @@ static int bigmac_close(struct net_device *dev)
 
 static void bigmac_tx_timeout(struct net_device *dev)
 {
-	struct bigmac *bp = (struct bigmac *) dev->priv;
+	struct bigmac *bp = netdev_priv(dev);
 
 	bigmac_init_hw(bp, 0);
 	netif_wake_queue(dev);
@@ -957,7 +956,7 @@ static void bigmac_tx_timeout(struct net_device *dev)
 /* Put a packet on the wire. */
 static int bigmac_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	struct bigmac *bp = (struct bigmac *) dev->priv;
+	struct bigmac *bp = netdev_priv(dev);
 	int len, entry;
 	u32 mapping;
 
@@ -985,12 +984,12 @@ static int bigmac_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	dev->trans_start = jiffies;
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static struct net_device_stats *bigmac_get_stats(struct net_device *dev)
 {
-	struct bigmac *bp = (struct bigmac *) dev->priv;
+	struct bigmac *bp = netdev_priv(dev);
 
 	bigmac_get_counters(bp, bp->bregs);
 	return &bp->enet_stats;
@@ -998,9 +997,9 @@ static struct net_device_stats *bigmac_get_stats(struct net_device *dev)
 
 static void bigmac_set_multicast(struct net_device *dev)
 {
-	struct bigmac *bp = (struct bigmac *) dev->priv;
+	struct bigmac *bp = netdev_priv(dev);
 	void __iomem *bregs = bp->bregs;
-	struct dev_mc_list *dmi = dev->mc_list;
+	struct dev_mc_list *dmi;
 	char *addrs;
 	int i;
 	u32 tmp, crc;
@@ -1014,7 +1013,7 @@ static void bigmac_set_multicast(struct net_device *dev)
 	while ((sbus_readl(bregs + BMAC_RXCFG) & BIGMAC_RXCFG_ENABLE) != 0)
 		udelay(20);
 
-	if ((dev->flags & IFF_ALLMULTI) || (dev->mc_count > 64)) {
+	if ((dev->flags & IFF_ALLMULTI) || (netdev_mc_count(dev) > 64)) {
 		sbus_writel(0xffff, bregs + BMAC_HTABLE0);
 		sbus_writel(0xffff, bregs + BMAC_HTABLE1);
 		sbus_writel(0xffff, bregs + BMAC_HTABLE2);
@@ -1029,9 +1028,8 @@ static void bigmac_set_multicast(struct net_device *dev)
 		for (i = 0; i < 4; i++)
 			hash_table[i] = 0;
 
-		for (i = 0; i < dev->mc_count; i++) {
+		netdev_for_each_mc_addr(dmi, dev) {
 			addrs = dmi->dmi_addr;
-			dmi = dmi->next;
 
 			if (!(*addrs & 1))
 				continue;
@@ -1061,7 +1059,7 @@ static void bigmac_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *i
 
 static u32 bigmac_get_link(struct net_device *dev)
 {
-	struct bigmac *bp = dev->priv;
+	struct bigmac *bp = netdev_priv(dev);
 
 	spin_lock_irq(&bp->lock);
 	bp->sw_bmsr = bigmac_tcvr_read(bp, bp->tregs, BIGMAC_BMSR);
@@ -1075,13 +1073,24 @@ static const struct ethtool_ops bigmac_ethtool_ops = {
 	.get_link		= bigmac_get_link,
 };
 
+static const struct net_device_ops bigmac_ops = {
+	.ndo_open		= bigmac_open,
+	.ndo_stop		= bigmac_close,
+	.ndo_start_xmit		= bigmac_start_xmit,
+	.ndo_get_stats		= bigmac_get_stats,
+	.ndo_set_multicast_list	= bigmac_set_multicast,
+	.ndo_tx_timeout		= bigmac_tx_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
 static int __devinit bigmac_ether_init(struct of_device *op,
 				       struct of_device *qec_op)
 {
 	static int version_printed;
 	struct net_device *dev;
 	u8 bsizes, bsizes_more;
-	DECLARE_MAC_BUF(mac);
 	struct bigmac *bp;
 	int i;
 
@@ -1189,16 +1198,8 @@ static int __devinit bigmac_ether_init(struct of_device *op,
 	bp->dev = dev;
 
 	/* Set links to our BigMAC open and close routines. */
-	dev->open = &bigmac_open;
-	dev->stop = &bigmac_close;
-	dev->hard_start_xmit = &bigmac_start_xmit;
 	dev->ethtool_ops = &bigmac_ethtool_ops;
-
-	/* Set links to BigMAC statistic and multi-cast loading code. */
-	dev->get_stats = &bigmac_get_stats;
-	dev->set_multicast_list = &bigmac_set_multicast;
-
-	dev->tx_timeout = &bigmac_tx_timeout;
+	dev->netdev_ops = &bigmac_ops;
 	dev->watchdog_timeo = 5*HZ;
 
 	/* Finish net device registration. */
@@ -1212,8 +1213,8 @@ static int __devinit bigmac_ether_init(struct of_device *op,
 
 	dev_set_drvdata(&bp->bigmac_op->dev, bp);
 
-	printk(KERN_INFO "%s: BigMAC 100baseT Ethernet %s\n",
-	       dev->name, print_mac(mac, dev->dev_addr));
+	printk(KERN_INFO "%s: BigMAC 100baseT Ethernet %pM\n",
+	       dev->name, dev->dev_addr);
 
 	return 0;
 
@@ -1235,7 +1236,7 @@ fail_and_cleanup:
 				  bp->bmac_block,
 				  bp->bblock_dvma);
 
-	/* This also frees the co-located 'dev->priv' */
+	/* This also frees the co-located private data */
 	free_netdev(dev);
 	return -ENODEV;
 }

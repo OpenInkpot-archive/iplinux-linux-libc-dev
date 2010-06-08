@@ -13,7 +13,6 @@
 #include <linux/fcntl.h>
 #include <linux/stat.h>
 #include <linux/mm.h>
-#include <linux/slab.h>
 #include <linux/pagemap.h>
 #include <linux/smp_lock.h>
 #include <linux/net.h>
@@ -297,7 +296,7 @@ static int smb_write_begin(struct file *file, struct address_space *mapping,
 			struct page **pagep, void **fsdata)
 {
 	pgoff_t index = pos >> PAGE_CACHE_SHIFT;
-	*pagep = __grab_cache_page(mapping, index);
+	*pagep = grab_cache_page_write_begin(mapping, index, flags);
 	if (!*pagep)
 		return -ENOMEM;
 	return 0;

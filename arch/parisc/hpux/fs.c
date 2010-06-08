@@ -26,8 +26,8 @@
 #include <linux/fs.h>
 #include <linux/sched.h>
 #include <linux/file.h>
-#include <linux/slab.h>
 #include <linux/ptrace.h>
+#include <linux/slab.h>
 #include <asm/errno.h>
 #include <asm/uaccess.h>
 
@@ -44,11 +44,6 @@ int hpux_execve(struct pt_regs *regs)
 	error = do_execve(filename, (char __user * __user *) regs->gr[25],
 		(char __user * __user *) regs->gr[24], regs);
 
-	if (error == 0) {
-		task_lock(current);
-		current->ptrace &= ~PT_DTRACE;
-		task_unlock(current);
-	}
 	putname(filename);
 
 out:
@@ -137,7 +132,6 @@ int hpux_getdents(unsigned int fd, struct hpux_dirent __user *dirent, unsigned i
 			error = count - buf.count;
 	}
 
-out_putf:
 	fput(file);
 out:
 	return error;

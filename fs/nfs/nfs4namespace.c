@@ -11,17 +11,21 @@
 #include <linux/mount.h>
 #include <linux/namei.h>
 #include <linux/nfs_fs.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/sunrpc/clnt.h>
 #include <linux/vfs.h>
 #include <linux/inet.h>
 #include "internal.h"
 #include "nfs4_fs.h"
+#include "dns_resolve.h"
 
 #define NFSDBG_FACILITY		NFSDBG_VFS
 
 /*
- * Check if fs_root is valid
+ * Convert the NFSv4 pathname components into a standard posix path.
+ *
+ * Note that the resulting string will be placed at the end of the buffer
  */
 static inline char *nfs4_pathname_string(const struct nfs4_pathname *pathname,
 					 char *buffer, ssize_t buflen)
@@ -93,41 +97,55 @@ static int nfs4_validate_fspath(const struct vfsmount *mnt_parent,
 	return 0;
 }
 
+static size_t nfs_parse_server_name(char *string, size_t len,
+		struct sockaddr *sa, size_t salen)
+{
+	ssize_t ret;
+
+	ret = rpc_pton(string, len, sa, salen);
+	if (ret == 0) {
+		ret = nfs_dns_resolve_name(string, len, sa, salen);
+		if (ret < 0)
+			ret = 0;
+	}
+	return ret;
+}
+
 static struct vfsmount *try_location(struct nfs_clone_mount *mountdata,
 				     char *page, char *page2,
 				     const struct nfs4_fs_location *location)
 {
 	struct vfsmount *mnt = ERR_PTR(-ENOENT);
 	char *mnt_path;
-	int page2len;
+	unsigned int maxbuflen;
 	unsigned int s;
 
 	mnt_path = nfs4_pathname_string(&location->rootpath, page2, PAGE_SIZE);
 	if (IS_ERR(mnt_path))
-		return mnt;
+		return ERR_CAST(mnt_path);
 	mountdata->mnt_path = mnt_path;
-	page2 += strlen(mnt_path) + 1;
-	page2len = PAGE_SIZE - strlen(mnt_path) - 1;
+	maxbuflen = mnt_path - 1 - page2;
 
 	for (s = 0; s < location->nservers; s++) {
 		const struct nfs4_string *buf = &location->servers[s];
 		struct sockaddr_storage addr;
 
-		if (buf->len <= 0 || buf->len >= PAGE_SIZE)
+		if (buf->len <= 0 || buf->len >= maxbuflen)
 			continue;
-
-		mountdata->addr = (struct sockaddr *)&addr;
 
 		if (memchr(buf->data, IPV6_SCOPE_DELIMITER, buf->len))
 			continue;
-		nfs_parse_ip_address(buf->data, buf->len,
-				mountdata->addr, &mountdata->addrlen);
-		if (mountdata->addr->sa_family == AF_UNSPEC)
-			continue;
-		nfs_set_port(mountdata->addr, NFS_PORT);
 
-		strncpy(page2, buf->data, page2len);
-		page2[page2len] = '\0';
+		mountdata->addrlen = nfs_parse_server_name(buf->data, buf->len,
+				(struct sockaddr *)&addr, sizeof(addr));
+		if (mountdata->addrlen == 0)
+			continue;
+
+		mountdata->addr = (struct sockaddr *)&addr;
+		rpc_set_port(mountdata->addr, NFS_PORT);
+
+		memcpy(page2, buf->data, buf->len);
+		page2[buf->len] = '\0';
 		mountdata->hostname = page2;
 
 		snprintf(page, PAGE_SIZE, "%s:%s",

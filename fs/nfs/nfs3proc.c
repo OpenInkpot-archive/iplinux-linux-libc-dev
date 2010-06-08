@@ -7,10 +7,10 @@
  */
 
 #include <linux/mm.h>
-#include <linux/utsname.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/sunrpc/clnt.h>
+#include <linux/slab.h>
 #include <linux/nfs.h>
 #include <linux/nfs3.h>
 #include <linux/nfs_fs.h>
@@ -23,14 +23,14 @@
 
 #define NFSDBG_FACILITY		NFSDBG_PROC
 
-/* A wrapper to handle the EJUKEBOX error message */
+/* A wrapper to handle the EJUKEBOX and EKEYEXPIRED error messages */
 static int
 nfs3_rpc_wrapper(struct rpc_clnt *clnt, struct rpc_message *msg, int flags)
 {
 	int res;
 	do {
 		res = rpc_call_sync(clnt, msg, flags);
-		if (res != -EJUKEBOX)
+		if (res != -EJUKEBOX && res != -EKEYEXPIRED)
 			break;
 		schedule_timeout_killable(NFS_JUKEBOX_RETRY_TIME);
 		res = -ERESTARTSYS;
@@ -43,9 +43,10 @@ nfs3_rpc_wrapper(struct rpc_clnt *clnt, struct rpc_message *msg, int flags)
 static int
 nfs3_async_handle_jukebox(struct rpc_task *task, struct inode *inode)
 {
-	if (task->tk_status != -EJUKEBOX)
+	if (task->tk_status != -EJUKEBOX && task->tk_status != -EKEYEXPIRED)
 		return 0;
-	nfs_inc_stats(inode, NFSIOS_DELAY);
+	if (task->tk_status == -EJUKEBOX)
+		nfs_inc_stats(inode, NFSIOS_DELAY);
 	task->tk_status = 0;
 	rpc_restart_call(task);
 	rpc_delay(task, NFS_JUKEBOX_RETRY_TIME);
@@ -299,7 +300,6 @@ static void nfs3_free_createdata(struct nfs3_createdata *data)
 
 /*
  * Create a regular file.
- * For now, we don't implement O_EXCL.
  */
 static int
 nfs3_proc_create(struct inode *dir, struct dentry *dentry, struct iattr *sattr,
@@ -328,7 +328,7 @@ nfs3_proc_create(struct inode *dir, struct dentry *dentry, struct iattr *sattr,
 		data->arg.create.verifier[1] = current->pid;
 	}
 
-	sattr->ia_mode &= ~current->fs->umask;
+	sattr->ia_mode &= ~current_umask();
 
 	for (;;) {
 		status = nfs3_do_create(dir, dentry, data);
@@ -528,7 +528,7 @@ nfs3_proc_mkdir(struct inode *dir, struct dentry *dentry, struct iattr *sattr)
 
 	dprintk("NFS call  mkdir %s\n", dentry->d_name.name);
 
-	sattr->ia_mode &= ~current->fs->umask;
+	sattr->ia_mode &= ~current_umask();
 
 	data = nfs3_alloc_createdata();
 	if (data == NULL)
@@ -639,7 +639,7 @@ nfs3_proc_mknod(struct inode *dir, struct dentry *dentry, struct iattr *sattr,
 	dprintk("NFS call  mknod %s %u:%u\n", dentry->d_name.name,
 			MAJOR(rdev), MINOR(rdev));
 
-	sattr->ia_mode &= ~current->fs->umask;
+	sattr->ia_mode &= ~current_umask();
 
 	data = nfs3_alloc_createdata();
 	if (data == NULL)
@@ -834,4 +834,5 @@ const struct nfs_rpc_ops nfs_v3_clientops = {
 	.commit_done	= nfs3_commit_done,
 	.lock		= nfs3_proc_lock,
 	.clear_acl_cache = nfs3_forget_cached_acls,
+	.close_context	= nfs_close_context,
 };

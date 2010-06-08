@@ -15,6 +15,7 @@
 #include <linux/io.h>
 #include <linux/spinlock.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/mfd/htc-egpio.h>
 
@@ -108,7 +109,7 @@ static void egpio_handler(unsigned int irq, struct irq_desc *desc)
 	ack_irqs(ei);
 	/* Process all set pins. */
 	readval &= ei->irqs_enabled;
-	for_each_bit(irqpin, &readval, ei->nirqs) {
+	for_each_set_bit(irqpin, &readval, ei->nirqs) {
 		/* Run irq handler */
 		pr_debug("got IRQ %d\n", irqpin);
 		irq = ei->irq_start + irqpin;
@@ -286,7 +287,7 @@ static int __init egpio_probe(struct platform_device *pdev)
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res)
 		goto fail;
-	ei->base_addr = ioremap_nocache(res->start, res->end - res->start);
+	ei->base_addr = ioremap_nocache(res->start, resource_size(res));
 	if (!ei->base_addr)
 		goto fail;
 	pr_debug("EGPIO phys=%08x virt=%p\n", (u32)res->start, ei->base_addr);
@@ -307,7 +308,7 @@ static int __init egpio_probe(struct platform_device *pdev)
 
 	ei->nchips = pdata->num_chips;
 	ei->chip = kzalloc(sizeof(struct egpio_chip) * ei->nchips, GFP_KERNEL);
-	if (!ei) {
+	if (!ei->chip) {
 		ret = -ENOMEM;
 		goto fail;
 	}

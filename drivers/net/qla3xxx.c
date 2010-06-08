@@ -61,7 +61,7 @@ static int msi;
 module_param(msi, int, 0);
 MODULE_PARM_DESC(msi, "Turn on Message Signaled Interrupts.");
 
-static struct pci_device_id ql3xxx_pci_tbl[] __devinitdata = {
+static DEFINE_PCI_DEVICE_TABLE(ql3xxx_pci_tbl) = {
 	{PCI_DEVICE(PCI_VENDOR_ID_QLOGIC, QL3022_DEVICE_ID)},
 	{PCI_DEVICE(PCI_VENDOR_ID_QLOGIC, QL3032_DEVICE_ID)},
 	/* required last entry */
@@ -1969,8 +1969,8 @@ static void ql_update_lrg_bufq_prod_index(struct ql3_adapter *qdev)
 	struct ql_rcv_buf_cb *lrg_buf_cb;
 	struct ql3xxx_port_registers __iomem *port_regs = qdev->mem_map_registers;
 
-	if ((qdev->lrg_buf_free_count >= 8)
-	    && (qdev->lrg_buf_release_cnt >= 16)) {
+	if ((qdev->lrg_buf_free_count >= 8) &&
+	    (qdev->lrg_buf_release_cnt >= 16)) {
 
 		if (qdev->lrg_buf_skb_check)
 			if (!ql_populate_free_queue(qdev))
@@ -1978,8 +1978,8 @@ static void ql_update_lrg_bufq_prod_index(struct ql3_adapter *qdev)
 
 		lrg_buf_q_ele = qdev->lrg_buf_next_free;
 
-		while ((qdev->lrg_buf_release_cnt >= 16)
-		       && (qdev->lrg_buf_free_count >= 8)) {
+		while ((qdev->lrg_buf_release_cnt >= 16) &&
+		       (qdev->lrg_buf_free_count >= 8)) {
 
 			for (i = 0; i < 8; i++) {
 				lrg_buf_cb =
@@ -2127,7 +2127,6 @@ static void ql_process_mac_rx_intr(struct ql3_adapter *qdev,
 	skb->protocol = eth_type_trans(skb, qdev->ndev);
 
 	netif_receive_skb(skb);
-	qdev->ndev->last_rx = jiffies;
 	lrg_buf_cb2->skb = NULL;
 
 	if (qdev->device_id == QL3022_DEVICE_ID)
@@ -2201,7 +2200,6 @@ static void ql_process_macip_rx_intr(struct ql3_adapter *qdev,
 	netif_receive_skb(skb2);
 	ndev->stats.rx_packets++;
 	ndev->stats.rx_bytes += length;
-	ndev->last_rx = jiffies;
 	lrg_buf_cb2->skb = NULL;
 
 	if (qdev->device_id == QL3022_DEVICE_ID)
@@ -2286,7 +2284,6 @@ static int ql_tx_rx_clean(struct ql3_adapter *qdev,
 static int ql_poll(struct napi_struct *napi, int budget)
 {
 	struct ql3_adapter *qdev = container_of(napi, struct ql3_adapter, napi);
-	struct net_device *ndev = qdev->ndev;
 	int rx_cleaned = 0, tx_cleaned = 0;
 	unsigned long hw_flags;
 	struct ql3xxx_port_registers __iomem *port_regs = qdev->mem_map_registers;
@@ -2295,7 +2292,7 @@ static int ql_poll(struct napi_struct *napi, int budget)
 
 	if (tx_cleaned + rx_cleaned != budget) {
 		spin_lock_irqsave(&qdev->hw_lock, hw_flags);
-		__netif_rx_complete(ndev, napi);
+		__napi_complete(napi);
 		ql_update_small_bufq_prod_index(qdev);
 		ql_update_lrg_bufq_prod_index(qdev);
 		writel(qdev->rsp_consumer_index,
@@ -2354,8 +2351,8 @@ static irqreturn_t ql3xxx_isr(int irq, void *dev_id)
 		spin_unlock(&qdev->adapter_lock);
 	} else if (value & ISP_IMR_DISABLE_CMPL_INT) {
 		ql_disable_interrupts(qdev);
-		if (likely(netif_rx_schedule_prep(ndev, &qdev->napi))) {
-			__netif_rx_schedule(ndev, &qdev->napi);
+		if (likely(napi_schedule_prep(&qdev->napi))) {
+			__napi_schedule(&qdev->napi);
 		}
 	} else {
 		return IRQ_NONE;
@@ -2575,7 +2572,8 @@ map_error:
  * The IOCB is always the top of the chain followed by one or more
  * OALs (when necessary).
  */
-static int ql3xxx_send(struct sk_buff *skb, struct net_device *ndev)
+static netdev_tx_t ql3xxx_send(struct sk_buff *skb,
+			       struct net_device *ndev)
 {
 	struct ql3_adapter *qdev = (struct ql3_adapter *)netdev_priv(ndev);
 	struct ql3xxx_port_registers __iomem *port_regs = qdev->mem_map_registers;
@@ -2620,7 +2618,6 @@ static int ql3xxx_send(struct sk_buff *skb, struct net_device *ndev)
 			    &port_regs->CommonRegs.reqQProducerIndex,
 			    qdev->req_producer_index);
 
-	ndev->trans_start = jiffies;
 	if (netif_msg_tx_queued(qdev))
 		printk(KERN_DEBUG PFX "%s: tx queued, slot %d, len %d\n",
 		       ndev->name, qdev->req_producer_index, skb->len);
@@ -3146,6 +3143,7 @@ static int ql_adapter_initialize(struct ql3_adapter *qdev)
 						(void __iomem *)port_regs;
 	u32 delay = 10;
 	int status = 0;
+	unsigned long hw_flags = 0;
 
 	if(ql_mii_setup(qdev))
 		return -1;
@@ -3154,7 +3152,8 @@ static int ql_adapter_initialize(struct ql3_adapter *qdev)
 	ql_write_common_reg(qdev, &port_regs->CommonRegs.serialPortInterfaceReg,
 			    (ISP_SERIAL_PORT_IF_WE |
 			     (ISP_SERIAL_PORT_IF_WE << 16)));
-
+	/* Give the PHY time to come out of reset. */
+	mdelay(100);
 	qdev->port_link_state = LS_DOWN;
 	netif_carrier_off(qdev->ndev);
 
@@ -3354,7 +3353,9 @@ static int ql_adapter_initialize(struct ql3_adapter *qdev)
 		value = ql_read_page0_reg(qdev, &port_regs->portStatus);
 		if (value & PORT_STATUS_IC)
 			break;
+		spin_unlock_irqrestore(&qdev->hw_lock, hw_flags);
 		msleep(500);
+		spin_lock_irqsave(&qdev->hw_lock, hw_flags);
 	} while (--delay);
 
 	if (delay == 0) {
@@ -3520,7 +3521,6 @@ static void ql_display_dev_info(struct net_device *ndev)
 {
 	struct ql3_adapter *qdev = (struct ql3_adapter *)netdev_priv(ndev);
 	struct pci_dev *pdev = qdev->pdev;
-	DECLARE_MAC_BUF(mac);
 
 	printk(KERN_INFO PFX
 	       "\n%s Adapter %d RevisionID %d found %s on PCI slot %d.\n",
@@ -3546,8 +3546,8 @@ static void ql_display_dev_info(struct net_device *ndev)
 
 	if (netif_msg_probe(qdev))
 		printk(KERN_INFO PFX
-		       "%s: MAC address %s\n",
-		       ndev->name, print_mac(mac, ndev->dev_addr));
+		       "%s: MAC address %pM\n",
+		       ndev->name, ndev->dev_addr);
 }
 
 static int ql_adapter_down(struct ql3_adapter *qdev, int do_reset)
@@ -3651,7 +3651,7 @@ static int ql_adapter_up(struct ql3_adapter *qdev)
 		ql_sem_unlock(qdev, QL_DRVR_SEM_MASK);
 	} else {
 		printk(KERN_ERR PFX
-		       "%s: Could not aquire driver lock.\n",
+		       "%s: Could not acquire driver lock.\n",
 		       ndev->name);
 		goto err_lock;
 	}
@@ -3842,7 +3842,9 @@ static void ql_reset_work(struct work_struct *work)
 						      16) | ISP_CONTROL_RI));
 			}
 
+			spin_unlock_irqrestore(&qdev->hw_lock, hw_flags);
 			ssleep(1);
+			spin_lock_irqsave(&qdev->hw_lock, hw_flags);
 		} while (--max_wait_time);
 		spin_unlock_irqrestore(&qdev->hw_lock, hw_flags);
 
@@ -3903,13 +3905,24 @@ static void ql3xxx_timer(unsigned long ptr)
 	queue_delayed_work(qdev->workqueue, &qdev->link_state_work, 0);
 }
 
+static const struct net_device_ops ql3xxx_netdev_ops = {
+	.ndo_open		= ql3xxx_open,
+	.ndo_start_xmit		= ql3xxx_send,
+	.ndo_stop		= ql3xxx_close,
+	.ndo_set_multicast_list = NULL, /* not allowed on NIC side */
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address	= ql3xxx_set_mac_address,
+	.ndo_tx_timeout		= ql3xxx_tx_timeout,
+};
+
 static int __devinit ql3xxx_probe(struct pci_dev *pdev,
 				  const struct pci_device_id *pci_entry)
 {
 	struct net_device *ndev = NULL;
 	struct ql3_adapter *qdev = NULL;
 	static int cards_found = 0;
-	int pci_using_dac, err;
+	int uninitialized_var(pci_using_dac), err;
 
 	err = pci_enable_device(pdev);
 	if (err) {
@@ -3927,12 +3940,12 @@ static int __devinit ql3xxx_probe(struct pci_dev *pdev,
 
 	pci_set_master(pdev);
 
-	if (!pci_set_dma_mask(pdev, DMA_64BIT_MASK)) {
+	if (!pci_set_dma_mask(pdev, DMA_BIT_MASK(64))) {
 		pci_using_dac = 1;
-		err = pci_set_consistent_dma_mask(pdev, DMA_64BIT_MASK);
-	} else if (!(err = pci_set_dma_mask(pdev, DMA_32BIT_MASK))) {
+		err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64));
+	} else if (!(err = pci_set_dma_mask(pdev, DMA_BIT_MASK(32)))) {
 		pci_using_dac = 0;
-		err = pci_set_consistent_dma_mask(pdev, DMA_32BIT_MASK);
+		err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
 	}
 
 	if (err) {
@@ -3969,9 +3982,7 @@ static int __devinit ql3xxx_probe(struct pci_dev *pdev,
 	if (qdev->device_id == QL3032_DEVICE_ID)
 		ndev->features |= NETIF_F_IP_CSUM | NETIF_F_SG;
 
-	qdev->mem_map_registers =
-	    ioremap_nocache(pci_resource_start(pdev, 1),
-			    pci_resource_len(qdev->pdev, 1));
+	qdev->mem_map_registers = pci_ioremap_bar(pdev, 1);
 	if (!qdev->mem_map_registers) {
 		printk(KERN_ERR PFX "%s: cannot map device registers\n",
 		       pci_name(pdev));
@@ -3983,17 +3994,8 @@ static int __devinit ql3xxx_probe(struct pci_dev *pdev,
 	spin_lock_init(&qdev->hw_lock);
 
 	/* Set driver entry points */
-	ndev->open = ql3xxx_open;
-	ndev->hard_start_xmit = ql3xxx_send;
-	ndev->stop = ql3xxx_close;
-	/* ndev->set_multicast_list
-	 * This device is one side of a two-function adapter
-	 * (NIC and iSCSI).  Promiscuous mode setting/clearing is
-	 * not allowed from the NIC side.
-	 */
+	ndev->netdev_ops = &ql3xxx_netdev_ops;
 	SET_ETHTOOL_OPS(ndev, &ql3xxx_ethtool_ops);
-	ndev->set_mac_address = ql3xxx_set_mac_address;
-	ndev->tx_timeout = ql3xxx_tx_timeout;
 	ndev->watchdog_timeo = 5 * HZ;
 
 	netif_napi_add(ndev, &qdev->napi, ql_poll, 64);
@@ -4085,7 +4087,6 @@ static void __devexit ql3xxx_remove(struct pci_dev *pdev)
 	struct ql3_adapter *qdev = netdev_priv(ndev);
 
 	unregister_netdev(ndev);
-	qdev = netdev_priv(ndev);
 
 	ql_disable_interrupts(qdev);
 

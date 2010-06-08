@@ -89,7 +89,7 @@ int save_i387_xstate(void __user *buf)
 
 	if (!used_math())
 		return 0;
-	clear_used_math(); /* trigger finit */
+
 	if (task_thread_info(tsk)->status & TS_USEDFPU) {
 		/*
 	 	 * Start with clearing the user buffer. This will present a
@@ -113,6 +113,8 @@ int save_i387_xstate(void __user *buf)
 				   xstate_size))
 			return -1;
 	}
+
+	clear_used_math(); /* trigger finit */
 
 	if (task_thread_info(tsk)->status & TS_XSAVE) {
 		struct _fpstate __user *fx = buf;
@@ -159,7 +161,7 @@ int save_i387_xstate(void __user *buf)
  * Restore the extended state if present. Otherwise, restore the FP/SSE
  * state.
  */
-int restore_user_xstate(void __user *buf)
+static int restore_user_xstate(void __user *buf)
 {
 	struct _fpx_sw_bytes fx_sw_user;
 	u64 mask;
@@ -324,7 +326,7 @@ void __ref xsave_cntxt_init(void)
 	}
 
 	/*
-	 * for now OS knows only about FP/SSE
+	 * Support only the state known to OS.
 	 */
 	pcntxt_mask = pcntxt_mask & XCNTXT_MASK;
 	xsave_init();
@@ -335,6 +337,7 @@ void __ref xsave_cntxt_init(void)
 	cpuid_count(0xd, 0, &eax, &ebx, &ecx, &edx);
 	xstate_size = ebx;
 
+	update_regset_xstate_info(xstate_size, pcntxt_mask);
 	prepare_fx_sw_frame();
 
 	setup_xstate_init();

@@ -62,13 +62,6 @@
  *   and will continue to evolve.
  */
 
-
-
-#ifdef TEST_FRAME
-#undef CONFIG_SCTP_DBG_OBJCNT
-#undef CONFIG_SYSCTL
-#endif /* TEST_FRAME */
-
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/in.h>
@@ -135,9 +128,13 @@ extern int sctp_register_pf(struct sctp_pf *, sa_family_t);
 int sctp_backlog_rcv(struct sock *sk, struct sk_buff *skb);
 int sctp_inet_listen(struct socket *sock, int backlog);
 void sctp_write_space(struct sock *sk);
+void sctp_data_ready(struct sock *sk, int len);
 unsigned int sctp_poll(struct file *file, struct socket *sock,
 		poll_table *wait);
 void sctp_sock_rfree(struct sk_buff *skb);
+void sctp_copy_sock(struct sock *newsk, struct sock *sk,
+		    struct sctp_association *asoc);
+extern struct percpu_counter sctp_sockets_allocated;
 
 /*
  * sctp/primitive.c
@@ -231,8 +228,7 @@ DECLARE_SNMP_STAT(struct sctp_mib, sctp_statistics);
 #endif /* !TEST_FRAME */
 
 /* sctp mib definitions */
-enum
-{
+enum {
 	SCTP_MIB_NUM = 0,
 	SCTP_MIB_CURRESTAB,			/* CurrEstab */
 	SCTP_MIB_ACTIVEESTABS,			/* ActiveEstabs */
@@ -285,15 +281,15 @@ extern int sctp_debug_flag;
 	if (sctp_debug_flag) { \
 		if (saddr->sa.sa_family == AF_INET6) { \
 			printk(KERN_DEBUG \
-			       lead NIP6_FMT trail, \
+			       lead "%pI6" trail, \
 			       leadparm, \
-			       NIP6(saddr->v6.sin6_addr), \
+			       &saddr->v6.sin6_addr, \
 			       otherparms); \
 		} else { \
 			printk(KERN_DEBUG \
-			       lead NIPQUAD_FMT trail, \
+			       lead "%pI4" trail, \
 			       leadparm, \
-			       NIPQUAD(saddr->v4.sin_addr.s_addr), \
+			       &saddr->v4.sin_addr.s_addr, \
 			       otherparms); \
 		} \
 	}
@@ -452,6 +448,7 @@ static inline void sctp_skb_set_owner_r(struct sk_buff *skb, struct sock *sk)
 {
 	struct sctp_ulpevent *event = sctp_skb2event(skb);
 
+	skb_orphan(skb);
 	skb->sk = sk;
 	skb->destructor = sctp_sock_rfree;
 	atomic_add(event->rmem_len, &sk->sk_rmem_alloc);
@@ -489,15 +486,16 @@ static inline __s32 sctp_jitter(__u32 rto)
 }
 
 /* Break down data chunks at this point.  */
-static inline int sctp_frag_point(const struct sctp_sock *sp, int pmtu)
+static inline int sctp_frag_point(const struct sctp_association *asoc, int pmtu)
 {
+	struct sctp_sock *sp = sctp_sk(asoc->base.sk);
 	int frag = pmtu;
 
 	frag -= sp->pf->af->net_header_len;
 	frag -= sizeof(struct sctphdr) + sizeof(struct sctp_data_chunk);
 
-	if (sp->user_frag)
-		frag = min_t(int, frag, sp->user_frag);
+	if (asoc->user_frag)
+		frag = min_t(int, frag, asoc->user_frag);
 
 	frag = min_t(int, frag, SCTP_MAX_CHUNK_LEN);
 

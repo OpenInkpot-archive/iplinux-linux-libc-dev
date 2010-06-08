@@ -42,6 +42,7 @@
 #include <linux/compiler.h>
 #include <linux/rtnetlink.h>
 #include <linux/crc32.h>
+#include <linux/slab.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -62,9 +63,9 @@ module_param (debug, int, 0);
 MODULE_PARM_DESC (debug, "de2104x bitmapped message enable number");
 
 /* Set the copy breakpoint for the copy-only-tiny-buffer Rx structure. */
-#if defined(__alpha__) || defined(__arm__) || defined(__hppa__) \
-        || defined(CONFIG_SPARC) || defined(__ia64__) \
-        || defined(__sh__) || defined(__mips__)
+#if defined(__alpha__) || defined(__arm__) || defined(__hppa__) || \
+        defined(CONFIG_SPARC) || defined(__ia64__) ||		   \
+        defined(__sh__) || defined(__mips__)
 static int rx_copybreak = 1518;
 #else
 static int rx_copybreak = 100;
@@ -81,6 +82,13 @@ MODULE_PARM_DESC (rx_copybreak, "de2104x Breakpoint at which Rx packets are copi
 				 NETIF_MSG_IFUP		| \
 				 NETIF_MSG_RX_ERR	| \
 				 NETIF_MSG_TX_ERR)
+
+/* Descriptor skip length in 32 bit longwords. */
+#ifndef CONFIG_DE2104X_DSL
+#define DSL			0
+#else
+#define DSL			CONFIG_DE2104X_DSL
+#endif
 
 #define DE_RX_RING_SIZE		64
 #define DE_TX_RING_SIZE		64
@@ -153,6 +161,7 @@ enum {
 	CmdReset		= (1 << 0),
 	CacheAlign16		= 0x00008000,
 	BurstLen4		= 0x00000400,
+	DescSkipLen		= (DSL << 2),
 
 	/* Rx/TxPoll bits */
 	NormalTxPoll		= (1 << 0),
@@ -246,7 +255,7 @@ static const u32 de_intr_mask =
  * Set the programmable burst length to 4 longwords for all:
  * DMA errors result without these values. Cache align 16 long.
  */
-static const u32 de_bus_mode = CacheAlign16 | BurstLen4;
+static const u32 de_bus_mode = CacheAlign16 | BurstLen4 | DescSkipLen;
 
 struct de_srom_media_block {
 	u8			opts;
@@ -266,6 +275,9 @@ struct de_desc {
 	__le32			opts2;
 	__le32			addr1;
 	__le32			addr2;
+#if DSL
+	__le32			skip[DSL];
+#endif
 };
 
 struct media_info {
@@ -326,7 +338,7 @@ static void de21041_media_timer (unsigned long data);
 static unsigned int de_ok_to_advertise (struct de_private *de, u32 new_media);
 
 
-static struct pci_device_id de_pci_tbl[] = {
+static DEFINE_PCI_DEVICE_TABLE(de_pci_tbl) = {
 	{ PCI_VENDOR_ID_DEC, PCI_DEVICE_ID_DEC_TULIP,
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_DEC, PCI_DEVICE_ID_DEC_TULIP_PLUS,
@@ -371,9 +383,9 @@ static void de_rx_err_acct (struct de_private *de, unsigned rx_tail,
 		/* Ingore earlier buffers. */
 		if ((status & 0xffff) != 0x7fff) {
 			if (netif_msg_rx_err(de))
-				printk(KERN_WARNING "%s: Oversized Ethernet frame "
-					   "spanned multiple buffers, status %8.8x!\n",
-					   de->dev->name, status);
+				dev_warn(&de->dev->dev,
+					 "Oversized Ethernet frame spanned multiple buffers, status %08x!\n",
+					 status);
 			de->net_stats.rx_length_errors++;
 		}
 	} else if (status & RxError) {
@@ -392,7 +404,7 @@ static void de_rx (struct de_private *de)
 	unsigned drop = 0;
 	int rc;
 
-	while (rx_work--) {
+	while (--rx_work) {
 		u32 status, len;
 		dma_addr_t mapping;
 		struct sk_buff *skb, *copy_skb;
@@ -459,24 +471,24 @@ static void de_rx (struct de_private *de)
 
 		de->net_stats.rx_packets++;
 		de->net_stats.rx_bytes += skb->len;
-		de->dev->last_rx = jiffies;
 		rc = netif_rx (skb);
 		if (rc == NET_RX_DROP)
 			drop = 1;
 
 rx_next:
-		de->rx_ring[rx_tail].opts1 = cpu_to_le32(DescOwn);
 		if (rx_tail == (DE_RX_RING_SIZE - 1))
 			de->rx_ring[rx_tail].opts2 =
 				cpu_to_le32(RingEnd | de->rx_buf_sz);
 		else
 			de->rx_ring[rx_tail].opts2 = cpu_to_le32(de->rx_buf_sz);
 		de->rx_ring[rx_tail].addr1 = cpu_to_le32(mapping);
+		wmb();
+		de->rx_ring[rx_tail].opts1 = cpu_to_le32(DescOwn);
 		rx_tail = NEXT_RX(rx_tail);
 	}
 
 	if (!rx_work)
-		printk(KERN_WARNING "%s: rx work limit reached\n", de->dev->name);
+		dev_warn(&de->dev->dev, "rx work limit reached\n");
 
 	de->rx_tail = rx_tail;
 }
@@ -484,7 +496,7 @@ rx_next:
 static irqreturn_t de_interrupt (int irq, void *dev_instance)
 {
 	struct net_device *dev = dev_instance;
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	u32 status;
 
 	status = dr32(MacStatus);
@@ -493,7 +505,8 @@ static irqreturn_t de_interrupt (int irq, void *dev_instance)
 
 	if (netif_msg_intr(de))
 		printk(KERN_DEBUG "%s: intr, status %08x mode %08x desc %u/%u/%u\n",
-		        dev->name, status, dr32(MacMode), de->rx_tail, de->tx_head, de->tx_tail);
+		       dev->name, status, dr32(MacMode),
+		       de->rx_tail, de->tx_head, de->tx_tail);
 
 	dw32(MacStatus, status);
 
@@ -518,8 +531,9 @@ static irqreturn_t de_interrupt (int irq, void *dev_instance)
 
 		pci_read_config_word(de->pdev, PCI_STATUS, &pci_status);
 		pci_write_config_word(de->pdev, PCI_STATUS, pci_status);
-		printk(KERN_ERR "%s: PCI bus error, status=%08x, PCI status=%04x\n",
-		       dev->name, status, pci_status);
+		dev_err(&de->dev->dev,
+			"PCI bus error, status=%08x, PCI status=%04x\n",
+			status, pci_status);
 	}
 
 	return IRQ_HANDLED;
@@ -571,7 +585,8 @@ static void de_tx (struct de_private *de)
 				de->net_stats.tx_packets++;
 				de->net_stats.tx_bytes += skb->len;
 				if (netif_msg_tx_done(de))
-					printk(KERN_DEBUG "%s: tx done, slot %d\n", de->dev->name, tx_tail);
+					printk(KERN_DEBUG "%s: tx done, slot %d\n",
+					       de->dev->name, tx_tail);
 			}
 			dev_kfree_skb_irq(skb);
 		}
@@ -588,9 +603,10 @@ next:
 		netif_wake_queue(de->dev);
 }
 
-static int de_start_xmit (struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t de_start_xmit (struct sk_buff *skb,
+					struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	unsigned int entry, tx_free;
 	u32 mapping, len, flags = FirstFrag | LastFrag;
 	struct de_desc *txd;
@@ -601,7 +617,7 @@ static int de_start_xmit (struct sk_buff *skb, struct net_device *dev)
 	if (tx_free == 0) {
 		netif_stop_queue(dev);
 		spin_unlock_irq(&de->lock);
-		return 1;
+		return NETDEV_TX_BUSY;
 	}
 	tx_free--;
 
@@ -640,7 +656,7 @@ static int de_start_xmit (struct sk_buff *skb, struct net_device *dev)
 	dw32(TxPoll, NormalTxPoll);
 	dev->trans_start = jiffies;
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /* Set or clear the multicast filter for this adaptor.
@@ -653,7 +669,7 @@ static int de_start_xmit (struct sk_buff *skb, struct net_device *dev)
 
 static void build_setup_frame_hash(u16 *setup_frm, struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	u16 hash_table[32];
 	struct dev_mc_list *mclist;
 	int i;
@@ -662,18 +678,17 @@ static void build_setup_frame_hash(u16 *setup_frm, struct net_device *dev)
 	memset(hash_table, 0, sizeof(hash_table));
 	set_bit_le(255, hash_table); 			/* Broadcast entry */
 	/* This should work on big-endian machines as well. */
-	for (i = 0, mclist = dev->mc_list; mclist && i < dev->mc_count;
-	     i++, mclist = mclist->next) {
+	netdev_for_each_mc_addr(mclist, dev) {
 		int index = ether_crc_le(ETH_ALEN, mclist->dmi_addr) & 0x1ff;
 
 		set_bit_le(index, hash_table);
-
-		for (i = 0; i < 32; i++) {
-			*setup_frm++ = hash_table[i];
-			*setup_frm++ = hash_table[i];
-		}
-		setup_frm = &de->setup_frame[13*6];
 	}
+
+	for (i = 0; i < 32; i++) {
+		*setup_frm++ = hash_table[i];
+		*setup_frm++ = hash_table[i];
+	}
+	setup_frm = &de->setup_frame[13*6];
 
 	/* Fill the final entry with our physical address. */
 	eaddrs = (u16 *)dev->dev_addr;
@@ -684,22 +699,20 @@ static void build_setup_frame_hash(u16 *setup_frm, struct net_device *dev)
 
 static void build_setup_frame_perfect(u16 *setup_frm, struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	struct dev_mc_list *mclist;
-	int i;
 	u16 *eaddrs;
 
 	/* We have <= 14 addresses so we can use the wonderful
 	   16 address perfect filtering of the Tulip. */
-	for (i = 0, mclist = dev->mc_list; i < dev->mc_count;
-	     i++, mclist = mclist->next) {
+	netdev_for_each_mc_addr(mclist, dev) {
 		eaddrs = (u16 *)mclist->dmi_addr;
 		*setup_frm++ = *eaddrs; *setup_frm++ = *eaddrs++;
 		*setup_frm++ = *eaddrs; *setup_frm++ = *eaddrs++;
 		*setup_frm++ = *eaddrs; *setup_frm++ = *eaddrs++;
 	}
 	/* Fill the unused entries with the broadcast address. */
-	memset(setup_frm, 0xff, (15-i)*12);
+	memset(setup_frm, 0xff, (15 - netdev_mc_count(dev)) * 12);
 	setup_frm = &de->setup_frame[15*6];
 
 	/* Fill the final entry with our physical address. */
@@ -712,7 +725,7 @@ static void build_setup_frame_perfect(u16 *setup_frm, struct net_device *dev)
 
 static void __de_set_rx_mode (struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	u32 macmode;
 	unsigned int entry;
 	u32 mapping;
@@ -726,7 +739,7 @@ static void __de_set_rx_mode (struct net_device *dev)
 		goto out;
 	}
 
-	if ((dev->mc_count > 1000) || (dev->flags & IFF_ALLMULTI)) {
+	if ((netdev_mc_count(dev) > 1000) || (dev->flags & IFF_ALLMULTI)) {
 		/* Too many to filter well -- accept all multicasts. */
 		macmode |= AcceptAllMulticast;
 		goto out;
@@ -734,7 +747,7 @@ static void __de_set_rx_mode (struct net_device *dev)
 
 	/* Note that only the low-address shortword of setup_frame is valid!
 	   The values are doubled for big-endian architectures. */
-	if (dev->mc_count > 14)	/* Must use a multicast hash table. */
+	if (netdev_mc_count(dev) > 14)	/* Must use a multicast hash table. */
 		build_setup_frame_hash (de->setup_frame, dev);
 	else
 		build_setup_frame_perfect (de->setup_frame, dev);
@@ -797,7 +810,7 @@ out:
 static void de_set_rx_mode (struct net_device *dev)
 {
 	unsigned long flags;
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	spin_lock_irqsave (&de->lock, flags);
 	__de_set_rx_mode(dev);
@@ -821,7 +834,7 @@ static void __de_get_stats(struct de_private *de)
 
 static struct net_device_stats *de_get_stats(struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	/* The chip only need report frame silently dropped. */
 	spin_lock_irq(&de->lock);
@@ -858,7 +871,7 @@ static void de_stop_rxtx (struct de_private *de)
 		udelay(100);
 	}
 
-	printk(KERN_WARNING "%s: timeout expired stopping DMA\n", de->dev->name);
+	dev_warn(&de->dev->dev, "timeout expired stopping DMA\n");
 }
 
 static inline void de_start_rxtx (struct de_private *de)
@@ -893,8 +906,8 @@ static void de_link_up(struct de_private *de)
 	if (!netif_carrier_ok(de->dev)) {
 		netif_carrier_on(de->dev);
 		if (netif_msg_link(de))
-			printk(KERN_INFO "%s: link up, media %s\n",
-			       de->dev->name, media_name[de->media_type]);
+			dev_info(&de->dev->dev, "link up, media %s\n",
+				 media_name[de->media_type]);
 	}
 }
 
@@ -903,7 +916,7 @@ static void de_link_down(struct de_private *de)
 	if (netif_carrier_ok(de->dev)) {
 		netif_carrier_off(de->dev);
 		if (netif_msg_link(de))
-			printk(KERN_INFO "%s: link down\n", de->dev->name);
+			dev_info(&de->dev->dev, "link down\n");
 	}
 }
 
@@ -913,7 +926,8 @@ static void de_set_media (struct de_private *de)
 	u32 macmode = dr32(MacMode);
 
 	if (de_is_running(de))
-		printk(KERN_WARNING "%s: chip is running while changing media!\n", de->dev->name);
+		dev_warn(&de->dev->dev,
+			 "chip is running while changing media!\n");
 
 	if (de->de21040)
 		dw32(CSR11, FULL_DUPLEX_MAGIC);
@@ -933,14 +947,15 @@ static void de_set_media (struct de_private *de)
 		macmode &= ~FullDuplex;
 
 	if (netif_msg_link(de)) {
-		printk(KERN_INFO "%s: set link %s\n"
-		       KERN_INFO "%s:    mode 0x%x, sia 0x%x,0x%x,0x%x,0x%x\n"
-		       KERN_INFO "%s:    set mode 0x%x, set sia 0x%x,0x%x,0x%x\n",
-		       de->dev->name, media_name[media],
-		       de->dev->name, dr32(MacMode), dr32(SIAStatus),
-		       dr32(CSR13), dr32(CSR14), dr32(CSR15),
-		       de->dev->name, macmode, de->media[media].csr13,
-		       de->media[media].csr14, de->media[media].csr15);
+		dev_info(&de->dev->dev, "set link %s\n", media_name[media]);
+		dev_info(&de->dev->dev, "mode 0x%x, sia 0x%x,0x%x,0x%x,0x%x\n",
+			 dr32(MacMode), dr32(SIAStatus),
+			 dr32(CSR13), dr32(CSR14), dr32(CSR15));
+
+		dev_info(&de->dev->dev,
+			 "set mode 0x%x, set sia 0x%x,0x%x,0x%x\n",
+			 macmode, de->media[media].csr13,
+			 de->media[media].csr14, de->media[media].csr15);
 	}
 	if (macmode != dr32(MacMode))
 		dw32(MacMode, macmode);
@@ -979,9 +994,8 @@ static void de21040_media_timer (unsigned long data)
 			de_link_up(de);
 		else
 			if (netif_msg_timer(de))
-				printk(KERN_INFO "%s: %s link ok, status %x\n",
-				       dev->name, media_name[de->media_type],
-				       status);
+				dev_info(&dev->dev, "%s link ok, status %x\n",
+					 media_name[de->media_type], status);
 		return;
 	}
 
@@ -1009,8 +1023,8 @@ no_link_yet:
 	add_timer(&de->media_timer);
 
 	if (netif_msg_timer(de))
-		printk(KERN_INFO "%s: no link, trying media %s, status %x\n",
-		       dev->name, media_name[de->media_type], status);
+		dev_info(&dev->dev, "no link, trying media %s, status %x\n",
+			 media_name[de->media_type], status);
 }
 
 static unsigned int de_ok_to_advertise (struct de_private *de, u32 new_media)
@@ -1066,9 +1080,10 @@ static void de21041_media_timer (unsigned long data)
 			de_link_up(de);
 		else
 			if (netif_msg_timer(de))
-				printk(KERN_INFO "%s: %s link ok, mode %x status %x\n",
-				       dev->name, media_name[de->media_type],
-				       dr32(MacMode), status);
+				dev_info(&dev->dev,
+					 "%s link ok, mode %x status %x\n",
+					 media_name[de->media_type],
+					 dr32(MacMode), status);
 		return;
 	}
 
@@ -1137,8 +1152,8 @@ no_link_yet:
 	add_timer(&de->media_timer);
 
 	if (netif_msg_timer(de))
-		printk(KERN_INFO "%s: no link, trying media %s, status %x\n",
-		       dev->name, media_name[de->media_type], status);
+		dev_info(&dev->dev, "no link, trying media %s, status %x\n",
+			 media_name[de->media_type], status);
 }
 
 static void de_media_interrupt (struct de_private *de, u32 status)
@@ -1355,7 +1370,7 @@ static void de_free_rings (struct de_private *de)
 
 static int de_open (struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	int rc;
 
 	if (netif_msg_ifup(de))
@@ -1365,8 +1380,7 @@ static int de_open (struct net_device *dev)
 
 	rc = de_alloc_rings(de);
 	if (rc) {
-		printk(KERN_ERR "%s: ring allocation failure, err=%d\n",
-		       dev->name, rc);
+		dev_err(&dev->dev, "ring allocation failure, err=%d\n", rc);
 		return rc;
 	}
 
@@ -1374,15 +1388,14 @@ static int de_open (struct net_device *dev)
 
 	rc = request_irq(dev->irq, de_interrupt, IRQF_SHARED, dev->name, dev);
 	if (rc) {
-		printk(KERN_ERR "%s: IRQ %d request failure, err=%d\n",
-		       dev->name, dev->irq, rc);
+		dev_err(&dev->dev, "IRQ %d request failure, err=%d\n",
+			dev->irq, rc);
 		goto err_out_free;
 	}
 
 	rc = de_init_hw(de);
 	if (rc) {
-		printk(KERN_ERR "%s: h/w init failure, err=%d\n",
-		       dev->name, rc);
+		dev_err(&dev->dev, "h/w init failure, err=%d\n", rc);
 		goto err_out_free_irq;
 	}
 
@@ -1400,7 +1413,7 @@ err_out_free:
 
 static int de_close (struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	unsigned long flags;
 
 	if (netif_msg_ifdown(de))
@@ -1423,7 +1436,7 @@ static int de_close (struct net_device *dev)
 
 static void de_tx_timeout (struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	printk(KERN_DEBUG "%s: NIC status %08x mode %08x sia %08x desc %u/%u/%u\n",
 	       dev->name, dr32(MacStatus), dr32(MacMode), dr32(SIAStatus),
@@ -1574,7 +1587,7 @@ static int __de_set_settings(struct de_private *de, struct ethtool_cmd *ecmd)
 
 static void de_get_drvinfo (struct net_device *dev,struct ethtool_drvinfo *info)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	strcpy (info->driver, DRV_NAME);
 	strcpy (info->version, DRV_VERSION);
@@ -1589,7 +1602,7 @@ static int de_get_regs_len(struct net_device *dev)
 
 static int de_get_settings(struct net_device *dev, struct ethtool_cmd *ecmd)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	int rc;
 
 	spin_lock_irq(&de->lock);
@@ -1601,7 +1614,7 @@ static int de_get_settings(struct net_device *dev, struct ethtool_cmd *ecmd)
 
 static int de_set_settings(struct net_device *dev, struct ethtool_cmd *ecmd)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	int rc;
 
 	spin_lock_irq(&de->lock);
@@ -1613,14 +1626,14 @@ static int de_set_settings(struct net_device *dev, struct ethtool_cmd *ecmd)
 
 static u32 de_get_msglevel(struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	return de->msg_enable;
 }
 
 static void de_set_msglevel(struct net_device *dev, u32 msglvl)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	de->msg_enable = msglvl;
 }
@@ -1628,7 +1641,7 @@ static void de_set_msglevel(struct net_device *dev, u32 msglvl)
 static int de_get_eeprom(struct net_device *dev,
 			 struct ethtool_eeprom *eeprom, u8 *data)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	if (!de->ee_data)
 		return -EOPNOTSUPP;
@@ -1642,7 +1655,7 @@ static int de_get_eeprom(struct net_device *dev,
 
 static int de_nway_reset(struct net_device *dev)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	u32 status;
 
 	if (de->media_type != DE_MEDIA_TP_AUTO)
@@ -1653,15 +1666,15 @@ static int de_nway_reset(struct net_device *dev)
 	status = dr32(SIAStatus);
 	dw32(SIAStatus, (status & ~NWayState) | NWayRestart);
 	if (netif_msg_link(de))
-		printk(KERN_INFO "%s: link nway restart, status %x,%x\n",
-		       de->dev->name, status, dr32(SIAStatus));
+		dev_info(&de->dev->dev, "link nway restart, status %x,%x\n",
+			 status, dr32(SIAStatus));
 	return 0;
 }
 
 static void de_get_regs(struct net_device *dev, struct ethtool_regs *regs,
 			void *data)
 {
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	regs->version = (DE_REGS_VER << 2) | de->de21040;
 
@@ -1692,13 +1705,13 @@ static void __devinit de21040_get_mac_address (struct de_private *de)
 
 	for (i = 0; i < 6; i++) {
 		int value, boguscnt = 100000;
-		do
+		do {
 			value = dr32(ROMCmd);
-		while (value < 0 && --boguscnt > 0);
+		} while (value < 0 && --boguscnt > 0);
 		de->dev->dev_addr[i] = value;
 		udelay(1);
 		if (boguscnt <= 0)
-			printk(KERN_WARNING PFX "timeout reading 21040 MAC address byte %u\n", i);
+			pr_warning(PFX "timeout reading 21040 MAC address byte %u\n", i);
 	}
 }
 
@@ -1817,9 +1830,8 @@ static void __devinit de21041_get_srom_info (struct de_private *de)
 	}
 
 	if (netif_msg_probe(de))
-		printk(KERN_INFO "de%d: SROM leaf offset %u, default media %s\n",
-		       de->board_idx, ofs,
-		       media_name[de->media_type]);
+		pr_info("de%d: SROM leaf offset %u, default media %s\n",
+		       de->board_idx, ofs, media_name[de->media_type]);
 
 	/* init SIA register values to defaults */
 	for (i = 0; i < DE_MAX_MEDIA; i++) {
@@ -1866,9 +1878,9 @@ static void __devinit de21041_get_srom_info (struct de_private *de)
 		de->media[idx].type = idx;
 
 		if (netif_msg_probe(de))
-			printk(KERN_INFO "de%d:   media block #%u: %s",
-			       de->board_idx, i,
-			       media_name[de->media[idx].type]);
+			pr_info("de%d:   media block #%u: %s",
+				de->board_idx, i,
+				media_name[de->media[idx].type]);
 
 		bufp += sizeof (ib->opts);
 
@@ -1880,13 +1892,13 @@ static void __devinit de21041_get_srom_info (struct de_private *de)
 				sizeof(ib->csr15);
 
 			if (netif_msg_probe(de))
-				printk(" (%x,%x,%x)\n",
-				       de->media[idx].csr13,
-				       de->media[idx].csr14,
-				       de->media[idx].csr15);
+				pr_cont(" (%x,%x,%x)\n",
+					de->media[idx].csr13,
+					de->media[idx].csr14,
+					de->media[idx].csr15);
 
 		} else if (netif_msg_probe(de))
-			printk("\n");
+			pr_cont("\n");
 
 		if (bufp > ((void *)&ee_data[DE_EEPROM_SIZE - 3]))
 			break;
@@ -1923,6 +1935,18 @@ bad_srom:
 	goto fill_defaults;
 }
 
+static const struct net_device_ops de_netdev_ops = {
+	.ndo_open		= de_open,
+	.ndo_stop		= de_close,
+	.ndo_set_multicast_list = de_set_rx_mode,
+	.ndo_start_xmit		= de_start_xmit,
+	.ndo_get_stats		= de_get_stats,
+	.ndo_tx_timeout 	= de_tx_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
 static int __devinit de_init_one (struct pci_dev *pdev,
 				  const struct pci_device_id *ent)
 {
@@ -1932,7 +1956,6 @@ static int __devinit de_init_one (struct pci_dev *pdev,
 	void __iomem *regs;
 	unsigned long pciaddr;
 	static int board_idx = -1;
-	DECLARE_MAC_BUF(mac);
 
 	board_idx++;
 
@@ -1946,17 +1969,12 @@ static int __devinit de_init_one (struct pci_dev *pdev,
 	if (!dev)
 		return -ENOMEM;
 
+	dev->netdev_ops = &de_netdev_ops;
 	SET_NETDEV_DEV(dev, &pdev->dev);
-	dev->open = de_open;
-	dev->stop = de_close;
-	dev->set_multicast_list = de_set_rx_mode;
-	dev->hard_start_xmit = de_start_xmit;
-	dev->get_stats = de_get_stats;
 	dev->ethtool_ops = &de_ethtool_ops;
-	dev->tx_timeout = de_tx_timeout;
 	dev->watchdog_timeo = TX_TIMEOUT;
 
-	de = dev->priv;
+	de = netdev_priv(dev);
 	de->de21040 = ent->driver_data == 0 ? 1 : 0;
 	de->pdev = pdev;
 	de->dev = dev;
@@ -1986,7 +2004,7 @@ static int __devinit de_init_one (struct pci_dev *pdev,
 	/* check for invalid IRQ value */
 	if (pdev->irq < 2) {
 		rc = -EIO;
-		printk(KERN_ERR PFX "invalid irq (%d) for pci dev %s\n",
+		pr_err(PFX "invalid irq (%d) for pci dev %s\n",
 		       pdev->irq, pci_name(pdev));
 		goto err_out_res;
 	}
@@ -1997,14 +2015,14 @@ static int __devinit de_init_one (struct pci_dev *pdev,
 	pciaddr = pci_resource_start(pdev, 1);
 	if (!pciaddr) {
 		rc = -EIO;
-		printk(KERN_ERR PFX "no MMIO resource for pci dev %s\n",
-		       pci_name(pdev));
+		pr_err(PFX "no MMIO resource for pci dev %s\n", pci_name(pdev));
 		goto err_out_res;
 	}
 	if (pci_resource_len(pdev, 1) < DE_REGS_SIZE) {
 		rc = -EIO;
-		printk(KERN_ERR PFX "MMIO resource (%llx) too small on pci dev %s\n",
-		       (unsigned long long)pci_resource_len(pdev, 1), pci_name(pdev));
+		pr_err(PFX "MMIO resource (%llx) too small on pci dev %s\n",
+		       (unsigned long long)pci_resource_len(pdev, 1),
+		       pci_name(pdev));
 		goto err_out_res;
 	}
 
@@ -2012,9 +2030,9 @@ static int __devinit de_init_one (struct pci_dev *pdev,
 	regs = ioremap_nocache(pciaddr, DE_REGS_SIZE);
 	if (!regs) {
 		rc = -EIO;
-		printk(KERN_ERR PFX "Cannot map PCI MMIO (%llx@%lx) on pci dev %s\n",
-			(unsigned long long)pci_resource_len(pdev, 1),
-			pciaddr, pci_name(pdev));
+		pr_err(PFX "Cannot map PCI MMIO (%llx@%lx) on pci dev %s\n",
+		       (unsigned long long)pci_resource_len(pdev, 1),
+		       pciaddr, pci_name(pdev));
 		goto err_out_res;
 	}
 	dev->base_addr = (unsigned long) regs;
@@ -2025,8 +2043,7 @@ static int __devinit de_init_one (struct pci_dev *pdev,
 	/* make sure hardware is not running */
 	rc = de_reset_mac(de);
 	if (rc) {
-		printk(KERN_ERR PFX "Cannot reset MAC, pci dev %s\n",
-		       pci_name(pdev));
+		pr_err(PFX "Cannot reset MAC, pci dev %s\n", pci_name(pdev));
 		goto err_out_iomap;
 	}
 
@@ -2046,12 +2063,11 @@ static int __devinit de_init_one (struct pci_dev *pdev,
 		goto err_out_iomap;
 
 	/* print info about board and interface just registered */
-	printk (KERN_INFO "%s: %s at 0x%lx, %s, IRQ %d\n",
-		dev->name,
-		de->de21040 ? "21040" : "21041",
-		dev->base_addr,
-		print_mac(mac, dev->dev_addr),
-		dev->irq);
+	dev_info(&dev->dev, "%s at 0x%lx, %pM, IRQ %d\n",
+		 de->de21040 ? "21040" : "21041",
+		 dev->base_addr,
+		 dev->dev_addr,
+		 dev->irq);
 
 	pci_set_drvdata(pdev, dev);
 
@@ -2078,7 +2094,7 @@ err_out_free:
 static void __devexit de_remove_one (struct pci_dev *pdev)
 {
 	struct net_device *dev = pci_get_drvdata(pdev);
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	BUG_ON(!dev);
 	unregister_netdev(dev);
@@ -2095,7 +2111,7 @@ static void __devexit de_remove_one (struct pci_dev *pdev)
 static int de_suspend (struct pci_dev *pdev, pm_message_t state)
 {
 	struct net_device *dev = pci_get_drvdata (pdev);
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 
 	rtnl_lock();
 	if (netif_running (dev)) {
@@ -2130,7 +2146,7 @@ static int de_suspend (struct pci_dev *pdev, pm_message_t state)
 static int de_resume (struct pci_dev *pdev)
 {
 	struct net_device *dev = pci_get_drvdata (pdev);
-	struct de_private *de = dev->priv;
+	struct de_private *de = netdev_priv(dev);
 	int retval = 0;
 
 	rtnl_lock();
@@ -2139,8 +2155,7 @@ static int de_resume (struct pci_dev *pdev)
 	if (!netif_running(dev))
 		goto out_attach;
 	if ((retval = pci_enable_device(pdev))) {
-		printk (KERN_ERR "%s: pci_enable_device failed in resume\n",
-			dev->name);
+		dev_err(&dev->dev, "pci_enable_device failed in resume\n");
 		goto out;
 	}
 	de_init_hw(de);

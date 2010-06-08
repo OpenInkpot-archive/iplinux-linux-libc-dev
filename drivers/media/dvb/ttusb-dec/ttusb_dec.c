@@ -1198,7 +1198,7 @@ static int ttusb_init_rc( struct ttusb_dec *dec)
 	int err;
 
 	usb_make_path(dec->udev, dec->rc_phys, sizeof(dec->rc_phys));
-	strlcpy(dec->rc_phys, "/input0", sizeof(dec->rc_phys));
+	strlcat(dec->rc_phys, "/input0", sizeof(dec->rc_phys));
 
 	input_dev = input_allocate_device();
 	if (!input_dev)
@@ -1384,7 +1384,7 @@ static int ttusb_dec_boot_dsp(struct ttusb_dec *dec)
 static int ttusb_dec_init_stb(struct ttusb_dec *dec)
 {
 	int result;
-	unsigned int mode, model, version;
+	unsigned int mode = 0, model = 0, version = 0;
 
 	dprintk("%s\n", __func__);
 

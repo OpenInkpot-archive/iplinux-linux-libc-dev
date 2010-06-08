@@ -43,7 +43,6 @@
  * 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 
@@ -59,13 +58,22 @@
 #include "transport.h"
 #include "protocol.h"
 
+/* Vendor IDs for companies that seem to include the READ CAPACITY bug
+ * in all their devices
+ */
+#define VENDOR_ID_NOKIA		0x0421
+#define VENDOR_ID_NIKON		0x04b0
+#define VENDOR_ID_PENTAX	0x0a17
+#define VENDOR_ID_MOTOROLA	0x22b8
+
 /***********************************************************************
  * Host functions 
  ***********************************************************************/
 
 static const char* host_info(struct Scsi_Host *host)
 {
-	return "SCSI emulation for USB Mass Storage devices";
+	struct us_data *us = host_to_us(host);
+	return us->scsi_name;
 }
 
 static int slave_alloc (struct scsi_device *sdev)
@@ -124,15 +132,46 @@ static int slave_configure(struct scsi_device *sdev)
 
 		if (us->fflags & US_FL_MAX_SECTORS_MIN)
 			max_sectors = PAGE_CACHE_SIZE >> 9;
-		if (sdev->request_queue->max_sectors > max_sectors)
-			blk_queue_max_sectors(sdev->request_queue,
+		if (queue_max_hw_sectors(sdev->request_queue) > max_sectors)
+			blk_queue_max_hw_sectors(sdev->request_queue,
 					      max_sectors);
+	} else if (sdev->type == TYPE_TAPE) {
+		/* Tapes need much higher max_sector limits, so just
+		 * raise it to the maximum possible (4 GB / 512) and
+		 * let the queue segment size sort out the real limit.
+		 */
+		blk_queue_max_hw_sectors(sdev->request_queue, 0x7FFFFF);
 	}
+
+	/* Some USB host controllers can't do DMA; they have to use PIO.
+	 * They indicate this by setting their dma_mask to NULL.  For
+	 * such controllers we need to make sure the block layer sets
+	 * up bounce buffers in addressable memory.
+	 */
+	if (!us->pusb_dev->bus->controller->dma_mask)
+		blk_queue_bounce_limit(sdev->request_queue, BLK_BOUNCE_HIGH);
 
 	/* We can't put these settings in slave_alloc() because that gets
 	 * called before the device type is known.  Consequently these
 	 * settings can't be overridden via the scsi devinfo mechanism. */
 	if (sdev->type == TYPE_DISK) {
+
+		/* Some vendors seem to put the READ CAPACITY bug into
+		 * all their devices -- primarily makers of cell phones
+		 * and digital cameras.  Since these devices always use
+		 * flash media and can be expected to have an even number
+		 * of sectors, we will always enable the CAPACITY_HEURISTICS
+		 * flag unless told otherwise. */
+		switch (le16_to_cpu(us->pusb_dev->descriptor.idVendor)) {
+		case VENDOR_ID_NOKIA:
+		case VENDOR_ID_NIKON:
+		case VENDOR_ID_PENTAX:
+		case VENDOR_ID_MOTOROLA:
+			if (!(us->fflags & (US_FL_FIX_CAPACITY |
+					US_FL_CAPACITY_OK)))
+				us->fflags |= US_FL_CAPACITY_HEURISTICS;
+			break;
+		}
 
 		/* Disk-type devices use MODE SENSE(6) if the protocol
 		 * (SubClass) is Transparent SCSI, otherwise they use
@@ -170,6 +209,10 @@ static int slave_configure(struct scsi_device *sdev)
 		if (us->fflags & US_FL_CAPACITY_HEURISTICS)
 			sdev->guess_capacity = 1;
 
+		/* assume SPC3 or latter devices support sense size > 18 */
+		if (sdev->scsi_level > SCSI_SPC_2)
+			us->fflags |= US_FL_SANE_SENSE;
+
 		/* Some devices report a SCSI revision level above 2 but are
 		 * unable to handle the REPORT LUNS command (for which
 		 * support is mandatory at level 3).  Since we already have
@@ -196,6 +239,14 @@ static int slave_configure(struct scsi_device *sdev)
 		 * sector in a larger then 1 sector read, since the performance
 		 * impact is negible we set this flag for all USB disks */
 		sdev->last_sector_bug = 1;
+
+		/* Enable last-sector hacks for single-target devices using
+		 * the Bulk-only transport, unless we already know the
+		 * capacity will be decremented or is correct. */
+		if (!(us->fflags & (US_FL_FIX_CAPACITY | US_FL_CAPACITY_OK |
+					US_FL_SCM_MULT_TARG)) &&
+				us->protocol == US_PR_BULK)
+			us->use_last_sector_hacks = 1;
 	} else {
 
 		/* Non-disk-type devices don't need to blacklist any pages
@@ -432,7 +483,7 @@ static ssize_t show_max_sectors(struct device *dev, struct device_attribute *att
 {
 	struct scsi_device *sdev = to_scsi_device(dev);
 
-	return sprintf(buf, "%u\n", sdev->request_queue->max_sectors);
+	return sprintf(buf, "%u\n", queue_max_hw_sectors(sdev->request_queue));
 }
 
 /* Input routine for the sysfs max_sectors file */
@@ -442,9 +493,9 @@ static ssize_t store_max_sectors(struct device *dev, struct device_attribute *at
 	struct scsi_device *sdev = to_scsi_device(dev);
 	unsigned short ms;
 
-	if (sscanf(buf, "%hu", &ms) > 0 && ms <= SCSI_DEFAULT_MAX_SECTORS) {
-		blk_queue_max_sectors(sdev->request_queue, ms);
-		return strlen(buf);
+	if (sscanf(buf, "%hu", &ms) > 0) {
+		blk_queue_max_hw_sectors(sdev->request_queue, ms);
+		return count;
 	}
 	return -EINVAL;	
 }
@@ -487,7 +538,7 @@ struct scsi_host_template usb_stor_host_template = {
 	.slave_configure =		slave_configure,
 
 	/* lots of sg segments can be handled */
-	.sg_tablesize =			SG_ALL,
+	.sg_tablesize =			SCSI_MAX_SG_CHAIN_SEGMENTS,
 
 	/* limit the total size of a transfer to 120 KB */
 	.max_sectors =                  240,
@@ -518,4 +569,4 @@ unsigned char usb_stor_sense_invalidCDB[18] = {
 	[7]	= 0x0a,			    /* additional length */
 	[12]	= 0x24			    /* Invalid Field in CDB */
 };
-
+EXPORT_SYMBOL_GPL(usb_stor_sense_invalidCDB);

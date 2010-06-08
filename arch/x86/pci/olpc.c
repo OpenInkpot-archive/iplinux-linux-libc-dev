@@ -29,7 +29,7 @@
 #include <linux/init.h>
 #include <asm/olpc.h>
 #include <asm/geode.h>
-#include "pci.h"
+#include <asm/pci_x86.h>
 
 /*
  * In the tables below, the first two line (8 longwords) are the
@@ -304,9 +304,6 @@ static struct pci_raw_ops pci_olpc_conf = {
 
 int __init pci_olpc_init(void)
 {
-	if (!machine_is_olpc() || olpc_has_vsa())
-		return -ENODEV;
-
 	printk(KERN_INFO "PCI: Using configuration type OLPC\n");
 	raw_pci_ops = &pci_olpc_conf;
 	is_lx = is_geode_lx();

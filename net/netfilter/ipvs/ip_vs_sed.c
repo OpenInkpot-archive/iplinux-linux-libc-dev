@@ -35,6 +35,9 @@
  *
  */
 
+#define KMSG_COMPONENT "IPVS"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 
@@ -61,7 +64,7 @@ ip_vs_sed_schedule(struct ip_vs_service *svc, const struct sk_buff *skb)
 	struct ip_vs_dest *dest, *least;
 	unsigned int loh, doh;
 
-	IP_VS_DBG(6, "ip_vs_sed_schedule(): Scheduling...\n");
+	IP_VS_DBG(6, "%s(): Scheduling...\n", __func__);
 
 	/*
 	 * We calculate the load of each dest server as follows:
@@ -84,6 +87,7 @@ ip_vs_sed_schedule(struct ip_vs_service *svc, const struct sk_buff *skb)
 			goto nextstage;
 		}
 	}
+	IP_VS_ERR_RL("SED: no destination available\n");
 	return NULL;
 
 	/*
@@ -118,9 +122,6 @@ static struct ip_vs_scheduler ip_vs_sed_scheduler =
 	.refcnt =		ATOMIC_INIT(0),
 	.module =		THIS_MODULE,
 	.n_list =		LIST_HEAD_INIT(ip_vs_sed_scheduler.n_list),
-#ifdef CONFIG_IP_VS_IPV6
-	.supports_ipv6 =	1,
-#endif
 	.schedule =		ip_vs_sed_schedule,
 };
 

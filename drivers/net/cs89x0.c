@@ -138,12 +138,12 @@
 #include <linux/ioport.h>
 #include <linux/in.h>
 #include <linux/skbuff.h>
-#include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/init.h>
 #include <linux/bitops.h>
 #include <linux/delay.h>
+#include <linux/gfp.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
@@ -170,24 +170,17 @@ static char version[] __initdata =
 /* The cs8900 has 4 IRQ pins, software selectable. cs8900_irq_map maps
    them to system IRQ numbers. This mapping is card specific and is set to
    the configuration of the Cirrus Eval board for this chip. */
-#ifdef CONFIG_ARCH_CLPS7500
-static unsigned int netcard_portlist[] __used __initdata =
-   { 0x80090303, 0x300, 0x320, 0x340, 0x360, 0x200, 0x220, 0x240, 0x260, 0x280, 0x2a0, 0x2c0, 0x2e0, 0};
-static unsigned int cs8900_irq_map[] = {12,0,0,0};
-#elif defined(CONFIG_SH_HICOSH4)
+#if defined(CONFIG_SH_HICOSH4)
 static unsigned int netcard_portlist[] __used __initdata =
    { 0x0300, 0};
 static unsigned int cs8900_irq_map[] = {1,0,0,0};
 #elif defined(CONFIG_MACH_IXDP2351)
 static unsigned int netcard_portlist[] __used __initdata = {IXDP2351_VIRT_CS8900_BASE, 0};
 static unsigned int cs8900_irq_map[] = {IRQ_IXDP2351_CS8900, 0, 0, 0};
-#include <asm/irq.h>
 #elif defined(CONFIG_ARCH_IXDP2X01)
-#include <asm/irq.h>
 static unsigned int netcard_portlist[] __used __initdata = {IXDP2X01_CS8900_VIRT_BASE, 0};
 static unsigned int cs8900_irq_map[] = {IRQ_IXDP2X01_CS8900, 0, 0, 0};
 #elif defined(CONFIG_ARCH_PNX010X)
-#include <asm/irq.h>
 #include <mach/gpio.h>
 #define CIRRUS_DEFAULT_BASE	IO_ADDRESS(EXT_STATIC2_s0_BASE + 0x200000)	/* = Physical address 0x48200000 */
 #define CIRRUS_DEFAULT_IRQ	VH_INTC_INT_NUM_CASCADED_INTERRUPT_1 /* Event inputs bank 1 - ID 35/bit 3 */
@@ -253,7 +246,7 @@ struct net_local {
 
 static int cs89x0_probe1(struct net_device *dev, int ioaddr, int modular);
 static int net_open(struct net_device *dev);
-static int net_send_packet(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t net_send_packet(struct sk_buff *skb, struct net_device *dev);
 static irqreturn_t net_interrupt(int irq, void *dev_id);
 static void set_multicast_list(struct net_device *dev);
 static void net_timeout(struct net_device *dev);
@@ -505,6 +498,21 @@ static void net_poll_controller(struct net_device *dev)
 }
 #endif
 
+static const struct net_device_ops net_ops = {
+	.ndo_open		= net_open,
+	.ndo_stop		= net_close,
+	.ndo_tx_timeout		= net_timeout,
+	.ndo_start_xmit 	= net_send_packet,
+	.ndo_get_stats		= net_get_stats,
+	.ndo_set_multicast_list = set_multicast_list,
+	.ndo_set_mac_address 	= set_mac_address,
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	.ndo_poll_controller	= net_poll_controller,
+#endif
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
 /* This is the real probe routine.  Linux has a history of friendly device
    probes on the ISA bus.  A good device probes avoids doing writes, and
    verifies that the correct device exists and functions.
@@ -521,7 +529,6 @@ cs89x0_probe1(struct net_device *dev, int ioaddr, int modular)
 	unsigned rev_type = 0;
 	int eeprom_buff[CHKSUM_LEN];
 	int retval;
-	DECLARE_MAC_BUF(mac);
 
 	/* Initialize the device structure. */
 	if (!modular) {
@@ -573,7 +580,7 @@ cs89x0_probe1(struct net_device *dev, int ioaddr, int modular)
 	}
 
 #ifdef CONFIG_SH_HICOSH4
-	/* truely reset the chip */
+	/* truly reset the chip */
 	writeword(ioaddr, ADD_PORT, 0x0114);
 	writeword(ioaddr, DATA_PORT, 0x0040);
 #endif
@@ -846,19 +853,10 @@ cs89x0_probe1(struct net_device *dev, int ioaddr, int modular)
 	}
 
 	/* print the ethernet address. */
-	printk(", MAC %s", print_mac(mac, dev->dev_addr));
+	printk(", MAC %pM", dev->dev_addr);
 
-	dev->open		= net_open;
-	dev->stop		= net_close;
-	dev->tx_timeout		= net_timeout;
-	dev->watchdog_timeo	= HZ;
-	dev->hard_start_xmit 	= net_send_packet;
-	dev->get_stats		= net_get_stats;
-	dev->set_multicast_list = set_multicast_list;
-	dev->set_mac_address 	= set_mac_address;
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	dev->poll_controller	= net_poll_controller;
-#endif
+	dev->netdev_ops	= &net_ops;
+	dev->watchdog_timeo = HZ;
 
 	printk("\n");
 	if (net_debug)
@@ -1025,14 +1023,13 @@ skip_this_frame:
 	}
         skb->protocol=eth_type_trans(skb,dev);
 	netif_rx(skb);
-	dev->last_rx = jiffies;
 	lp->stats.rx_packets++;
 	lp->stats.rx_bytes += length;
 }
 
 #endif	/* ALLOW_DMA */
 
-void  __init reset_chip(struct net_device *dev)
+static void __init reset_chip(struct net_device *dev)
 {
 #if !defined(CONFIG_MACH_MX31ADS)
 #if !defined(CONFIG_MACH_IXDP2351) && !defined(CONFIG_ARCH_IXDP2X01)
@@ -1326,10 +1323,9 @@ net_open(struct net_device *dev)
 		writereg(dev, PP_BusCTL, ENABLE_IRQ | MEMORY_ON);
 #endif
 		write_irq(dev, lp->chip_type, dev->irq);
-		ret = request_irq(dev->irq, &net_interrupt, 0, dev->name, dev);
+		ret = request_irq(dev->irq, net_interrupt, 0, dev->name, dev);
 		if (ret) {
-			if (net_debug)
-				printk(KERN_DEBUG "cs89x0: request_irq(%d) failed\n", dev->irq);
+			printk(KERN_ERR "cs89x0: request_irq(%d) failed\n", dev->irq);
 			goto bad_out;
 		}
 	}
@@ -1367,7 +1363,7 @@ net_open(struct net_device *dev)
 			spin_lock_irqsave(&lp->lock, flags);
 			disable_dma(dev->dma);
 			clear_dma_ff(dev->dma);
-			set_dma_mode(dev->dma, 0x14); /* auto_init as well */
+			set_dma_mode(dev->dma, DMA_RX_MODE); /* auto_init as well */
 			set_dma_addr(dev->dma, isa_virt_to_bus(lp->dma_buff));
 			set_dma_count(dev->dma, lp->dmasize*1024);
 			enable_dma(dev->dma);
@@ -1521,9 +1517,10 @@ static void net_timeout(struct net_device *dev)
 	netif_wake_queue(dev);
 }
 
-static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t net_send_packet(struct sk_buff *skb,struct net_device *dev)
 {
 	struct net_local *lp = netdev_priv(dev);
+	unsigned long flags;
 
 	if (net_debug > 3) {
 		printk("%s: sent %d byte packet of type %x\n",
@@ -1535,7 +1532,7 @@ static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
                   ask the chip to start transmitting before the
                   whole packet has been completely uploaded. */
 
-	spin_lock_irq(&lp->lock);
+	spin_lock_irqsave(&lp->lock, flags);
 	netif_stop_queue(dev);
 
 	/* initiate a transmit sequence */
@@ -1549,13 +1546,13 @@ static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 		 * we're waiting for TxOk, so return 1 and requeue this packet.
 		 */
 
-		spin_unlock_irq(&lp->lock);
+		spin_unlock_irqrestore(&lp->lock, flags);
 		if (net_debug) printk("cs89x0: Tx buffer not free!\n");
-		return 1;
+		return NETDEV_TX_BUSY;
 	}
 	/* Write the contents of the packet */
 	writewords(dev->base_addr, TX_FRAME_PORT,skb->data,(skb->len+1) >>1);
-	spin_unlock_irq(&lp->lock);
+	spin_unlock_irqrestore(&lp->lock, flags);
 	lp->stats.tx_bytes += skb->len;
 	dev->trans_start = jiffies;
 	dev_kfree_skb (skb);
@@ -1571,7 +1568,7 @@ static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 	 * to restart the netdevice layer
 	 */
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /* The typical workload of the driver:
@@ -1719,7 +1716,6 @@ net_rx(struct net_device *dev)
 
         skb->protocol=eth_type_trans(skb,dev);
 	netif_rx(skb);
-	dev->last_rx = jiffies;
 	lp->stats.rx_packets++;
 	lp->stats.rx_bytes += length;
 }
@@ -1789,7 +1785,7 @@ static void set_multicast_list(struct net_device *dev)
 	{
 		lp->rx_mode = RX_ALL_ACCEPT;
 	}
-	else if((dev->flags&IFF_ALLMULTI)||dev->mc_list)
+	else if ((dev->flags & IFF_ALLMULTI) || !netdev_mc_empty(dev))
 	{
 		/* The multicast-accept list is initialized to accept-all, and we
 		   rely on higher-level filtering for now. */
@@ -1817,11 +1813,10 @@ static int set_mac_address(struct net_device *dev, void *p)
 
 	memcpy(dev->dev_addr, addr->sa_data, dev->addr_len);
 
-	if (net_debug) {
-		DECLARE_MAC_BUF(mac);
-		printk("%s: Setting MAC address to %s.\n",
-		       dev->name, print_mac(mac, dev->dev_addr));
-	}
+	if (net_debug)
+		printk("%s: Setting MAC address to %pM.\n",
+		       dev->name, dev->dev_addr);
+
 	/* set the Ethernet address */
 	for (i=0; i < ETH_ALEN/2; i++)
 		writereg(dev, PP_IA+i*2, dev->dev_addr[i*2] | (dev->dev_addr[i*2+1] << 8));

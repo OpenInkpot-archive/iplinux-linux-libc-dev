@@ -11,6 +11,7 @@
 #include <linux/rwsem.h>
 #include <linux/completion.h>
 #include <linux/cpumask.h>
+#include <linux/page-debug-flags.h>
 #include <asm/page.h>
 #include <asm/mmu.h>
 
@@ -22,12 +23,6 @@
 struct address_space;
 
 #define USE_SPLIT_PTLOCKS	(NR_CPUS >= CONFIG_SPLIT_PTLOCK_CPUS)
-
-#if USE_SPLIT_PTLOCKS
-typedef atomic_long_t mm_counter_t;
-#else  /* !USE_SPLIT_PTLOCKS */
-typedef unsigned long mm_counter_t;
-#endif /* !USE_SPLIT_PTLOCKS */
 
 /*
  * Each physical page in the system has a struct page associated with
@@ -94,6 +89,36 @@ struct page {
 	void *virtual;			/* Kernel virtual address (NULL if
 					   not kmapped, ie. highmem) */
 #endif /* WANT_PAGE_VIRTUAL */
+#ifdef CONFIG_WANT_PAGE_DEBUG_FLAGS
+	unsigned long debug_flags;	/* Use atomic bitops on this */
+#endif
+
+#ifdef CONFIG_KMEMCHECK
+	/*
+	 * kmemcheck wants to track the status of each byte in a page; this
+	 * is a pointer to such a status block. NULL if not tracked.
+	 */
+	void *shadow;
+#endif
+};
+
+/*
+ * A region containing a mapping of a non-memory backed file under NOMMU
+ * conditions.  These are held in a global tree and are pinned by the VMAs that
+ * map parts of them.
+ */
+struct vm_region {
+	struct rb_node	vm_rb;		/* link in global region tree */
+	unsigned long	vm_flags;	/* VMA vm_flags */
+	unsigned long	vm_start;	/* start address of region */
+	unsigned long	vm_end;		/* region initialised to here */
+	unsigned long	vm_top;		/* region allocated to here */
+	unsigned long	vm_pgoff;	/* the offset in vm_file corresponding to vm_start */
+	struct file	*vm_file;	/* the backing file or NULL */
+
+	int		vm_usage;	/* region usage count (access under nommu_region_sem) */
+	bool		vm_icache_flushed : 1; /* true if the icache has been flushed for
+						* this region */
 };
 
 /*
@@ -138,11 +163,12 @@ struct vm_area_struct {
 	 * can only be in the i_mmap tree.  An anonymous MAP_PRIVATE, stack
 	 * or brk vma (with NULL file) can only be in an anon_vma list.
 	 */
-	struct list_head anon_vma_node;	/* Serialized by anon_vma->lock */
+	struct list_head anon_vma_chain; /* Serialized by mmap_sem &
+					  * page_table_lock */
 	struct anon_vma *anon_vma;	/* Serialized by page_table_lock */
 
 	/* Function pointers to deal with this struct. */
-	struct vm_operations_struct * vm_ops;
+	const struct vm_operations_struct *vm_ops;
 
 	/* Information about our backing store: */
 	unsigned long vm_pgoff;		/* Offset (within vm_file) in PAGE_SIZE
@@ -152,7 +178,7 @@ struct vm_area_struct {
 	unsigned long vm_truncate_count;/* truncate_count or restart_addr */
 
 #ifndef CONFIG_MMU
-	atomic_t vm_usage;		/* refcount (VMAs shared if !MMU) */
+	struct vm_region *vm_region;	/* NOMMU mapping region */
 #endif
 #ifdef CONFIG_NUMA
 	struct mempolicy *vm_policy;	/* NUMA policy for the VMA */
@@ -170,14 +196,39 @@ struct core_state {
 	struct completion startup;
 };
 
+enum {
+	MM_FILEPAGES,
+	MM_ANONPAGES,
+	MM_SWAPENTS,
+	NR_MM_COUNTERS
+};
+
+#if USE_SPLIT_PTLOCKS && defined(CONFIG_MMU)
+#define SPLIT_RSS_COUNTING
+struct mm_rss_stat {
+	atomic_long_t count[NR_MM_COUNTERS];
+};
+/* per-thread cached information, */
+struct task_rss_stat {
+	int events;	/* for synchronization threshold */
+	int count[NR_MM_COUNTERS];
+};
+#else  /* !USE_SPLIT_PTLOCKS */
+struct mm_rss_stat {
+	unsigned long count[NR_MM_COUNTERS];
+};
+#endif /* !USE_SPLIT_PTLOCKS */
+
 struct mm_struct {
 	struct vm_area_struct * mmap;		/* list of VMAs */
 	struct rb_root mm_rb;
 	struct vm_area_struct * mmap_cache;	/* last find_vma result */
+#ifdef CONFIG_MMU
 	unsigned long (*get_unmapped_area) (struct file *filp,
 				unsigned long addr, unsigned long len,
 				unsigned long pgoff, unsigned long flags);
 	void (*unmap_area) (struct mm_struct *mm, unsigned long addr);
+#endif
 	unsigned long mmap_base;		/* base of mmap area */
 	unsigned long task_size;		/* size of task vm space */
 	unsigned long cached_hole_size; 	/* if non-zero, the largest hole below free_area_cache */
@@ -194,11 +245,6 @@ struct mm_struct {
 						 * by mmlist_lock
 						 */
 
-	/* Special counters, in some configurations protected by the
-	 * page_table_lock, in other configurations by being atomic.
-	 */
-	mm_counter_t _file_rss;
-	mm_counter_t _anon_rss;
 
 	unsigned long hiwater_rss;	/* High-watermark of RSS usage */
 	unsigned long hiwater_vm;	/* High-water virtual memory usage */
@@ -210,6 +256,14 @@ struct mm_struct {
 	unsigned long arg_start, arg_end, env_start, env_end;
 
 	unsigned long saved_auxv[AT_VECTOR_SIZE]; /* for /proc/PID/auxv */
+
+	/*
+	 * Special counters, in some configurations protected by the
+	 * page_table_lock, in other configurations by being atomic.
+	 */
+	struct mm_rss_stat rss_stat;
+
+	struct linux_binfmt *binfmt;
 
 	cpumask_t cpu_vm_mask;
 
@@ -230,10 +284,10 @@ struct mm_struct {
 	unsigned long flags; /* Must use atomic bitops to access the bits */
 
 	struct core_state *core_state; /* coredumping support */
-
-	/* aio bits */
-	rwlock_t		ioctx_list_lock;	/* aio lock */
-	struct kioctx		*ioctx_list;
+#ifdef CONFIG_AIO
+	spinlock_t		ioctx_lock;
+	struct hlist_head	ioctx_list;
+#endif
 #ifdef CONFIG_MM_OWNER
 	/*
 	 * "owner" points to a task that is regarded as the canonical
@@ -257,5 +311,8 @@ struct mm_struct {
 	struct mmu_notifier_mm *mmu_notifier_mm;
 #endif
 };
+
+/* Future-safe accessor for struct mm_struct's cpu_vm_mask. */
+#define mm_cpumask(mm) (&(mm)->cpu_vm_mask)
 
 #endif /* _LINUX_MM_TYPES_H */

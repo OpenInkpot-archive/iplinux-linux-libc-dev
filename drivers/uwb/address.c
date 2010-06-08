@@ -23,12 +23,13 @@
  * FIXME: docs
  */
 
+#include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/random.h>
 #include <linux/etherdevice.h>
-#include <linux/uwb/debug.h>
+
 #include "uwb-internal.h"
 
 

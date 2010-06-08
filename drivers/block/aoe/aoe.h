@@ -18,6 +18,7 @@
 enum {
 	AOECMD_ATA,
 	AOECMD_CFG,
+	AOECMD_VEND_MIN = 0xf0,
 
 	AOEFL_RSP = (1<<3),
 	AOEFL_ERR = (1<<2),
@@ -154,7 +155,7 @@ struct aoedev {
 	u16 fw_ver;		/* version of blade's firmware */
 	struct work_struct work;/* disk create work struct */
 	struct gendisk *gd;
-	struct request_queue blkq;
+	struct request_queue *blkq;
 	struct hd_geometry geo; 
 	sector_t ssize;
 	struct timer_list timer;
@@ -200,4 +201,3 @@ void aoenet_xmit(struct sk_buff_head *);
 int is_aoe_netif(struct net_device *ifp);
 int set_aoe_iflist(const char __user *str, size_t size);
 
-unsigned long long mac_addr(char addr[6]);

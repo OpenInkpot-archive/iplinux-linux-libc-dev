@@ -9,28 +9,34 @@
 #include <linux/delay.h>
 #include <linux/clocksource.h>
 #include <linux/percpu.h>
+#include <linux/timex.h>
 
 #include <asm/hpet.h>
 #include <asm/timer.h>
 #include <asm/vgtod.h>
 #include <asm/time.h>
 #include <asm/delay.h>
+#include <asm/hypervisor.h>
+#include <asm/nmi.h>
+#include <asm/x86_init.h>
 
-unsigned int cpu_khz;           /* TSC clocks / usec, not used here */
+unsigned int __read_mostly cpu_khz;	/* TSC clocks / usec, not used here */
 EXPORT_SYMBOL(cpu_khz);
-unsigned int tsc_khz;
+
+unsigned int __read_mostly tsc_khz;
 EXPORT_SYMBOL(tsc_khz);
 
 /*
  * TSC can be unstable due to cpufreq or due to unsynced TSCs
  */
-static int tsc_unstable;
+static int __read_mostly tsc_unstable;
 
 /* native_sched_clock() is called before tsc_init(), so
    we must start with the TSC soft disabled to prevent
    erroneous rdtsc usage on !cpu_has_tsc processors */
-static int tsc_disabled = -1;
+static int __read_mostly tsc_disabled = -1;
 
+static int tsc_clocksource_reliable;
 /*
  * Scheduler clock - returns current time in nanosec units.
  */
@@ -44,7 +50,7 @@ u64 native_sched_clock(void)
 	 *   unstable. We do this because unlike Time Of Day,
 	 *   the scheduler clock tolerates small errors and it's
 	 *   very important for it to be as fast as the platform
-	 *   can achive it. )
+	 *   can achieve it. )
 	 */
 	if (unlikely(tsc_disabled)) {
 		/* No locking but a rare wrong value is not a big deal: */
@@ -97,6 +103,15 @@ int __init notsc_setup(char *str)
 #endif
 
 __setup("notsc", notsc_setup);
+
+static int __init tsc_setup(char *str)
+{
+	if (!strcmp(str, "reliable"))
+		tsc_clocksource_reliable = 1;
+	return 1;
+}
+
+__setup("tsc=", tsc_setup);
 
 #define MAX_RETRIES     5
 #define SMI_TRESHOLD    50000
@@ -262,30 +277,48 @@ static unsigned long pit_calibrate_tsc(u32 latch, unsigned long ms, int loopmin)
  * use the TSC value at the transitions to calculate a pretty
  * good value for the TSC frequencty.
  */
-static inline int pit_expect_msb(unsigned char val)
+static inline int pit_verify_msb(unsigned char val)
 {
-	int count = 0;
+	/* Ignore LSB */
+	inb(0x42);
+	return inb(0x42) == val;
+}
+
+static inline int pit_expect_msb(unsigned char val, u64 *tscp, unsigned long *deltap)
+{
+	int count;
+	u64 tsc = 0;
 
 	for (count = 0; count < 50000; count++) {
-		/* Ignore LSB */
-		inb(0x42);
-		if (inb(0x42) != val)
+		if (!pit_verify_msb(val))
 			break;
+		tsc = get_cycles();
 	}
-	return count > 50;
+	*deltap = get_cycles() - tsc;
+	*tscp = tsc;
+
+	/*
+	 * We require _some_ success, but the quality control
+	 * will be based on the error terms on the TSC values.
+	 */
+	return count > 5;
 }
 
 /*
- * How many MSB values do we want to see? We aim for a
- * 15ms calibration, which assuming a 2us counter read
- * error should give us roughly 150 ppm precision for
- * the calibration.
+ * How many MSB values do we want to see? We aim for
+ * a maximum error rate of 500ppm (in practice the
+ * real error is much smaller), but refuse to spend
+ * more than 25ms on it.
  */
-#define QUICK_PIT_MS 15
-#define QUICK_PIT_ITERATIONS (QUICK_PIT_MS * PIT_TICK_RATE / 1000 / 256)
+#define MAX_QUICK_PIT_MS 25
+#define MAX_QUICK_PIT_ITERATIONS (MAX_QUICK_PIT_MS * PIT_TICK_RATE / 1000 / 256)
 
 static unsigned long quick_pit_calibrate(void)
 {
+	int i;
+	u64 tsc, delta;
+	unsigned long d1, d2;
+
 	/* Set the Gate high, disable speaker */
 	outb((inb(0x61) & ~0x02) | 0x01, 0x61);
 
@@ -304,45 +337,62 @@ static unsigned long quick_pit_calibrate(void)
 	outb(0xff, 0x42);
 	outb(0xff, 0x42);
 
-	if (pit_expect_msb(0xff)) {
-		int i;
-		u64 t1, t2, delta;
-		unsigned char expect = 0xfe;
+	/*
+	 * The PIT starts counting at the next edge, so we
+	 * need to delay for a microsecond. The easiest way
+	 * to do that is to just read back the 16-bit counter
+	 * once from the PIT.
+	 */
+	pit_verify_msb(0);
 
-		t1 = get_cycles();
-		for (i = 0; i < QUICK_PIT_ITERATIONS; i++, expect--) {
-			if (!pit_expect_msb(expect))
-				goto failed;
+	if (pit_expect_msb(0xff, &tsc, &d1)) {
+		for (i = 1; i <= MAX_QUICK_PIT_ITERATIONS; i++) {
+			if (!pit_expect_msb(0xff-i, &delta, &d2))
+				break;
+
+			/*
+			 * Iterate until the error is less than 500 ppm
+			 */
+			delta -= tsc;
+			if (d1+d2 >= delta >> 11)
+				continue;
+
+			/*
+			 * Check the PIT one more time to verify that
+			 * all TSC reads were stable wrt the PIT.
+			 *
+			 * This also guarantees serialization of the
+			 * last cycle read ('d2') in pit_expect_msb.
+			 */
+			if (!pit_verify_msb(0xfe - i))
+				break;
+			goto success;
 		}
-		t2 = get_cycles();
-
-		/*
-		 * Make sure we can rely on the second TSC timestamp:
-		 */
-		if (!pit_expect_msb(expect))
-			goto failed;
-
-		/*
-		 * Ok, if we get here, then we've seen the
-		 * MSB of the PIT decrement QUICK_PIT_ITERATIONS
-		 * times, and each MSB had many hits, so we never
-		 * had any sudden jumps.
-		 *
-		 * As a result, we can depend on there not being
-		 * any odd delays anywhere, and the TSC reads are
-		 * reliable.
-		 *
-		 * kHz = ticks / time-in-seconds / 1000;
-		 * kHz = (t2 - t1) / (QPI * 256 / PIT_TICK_RATE) / 1000
-		 * kHz = ((t2 - t1) * PIT_TICK_RATE) / (QPI * 256 * 1000)
-		 */
-		delta = (t2 - t1)*PIT_TICK_RATE;
-		do_div(delta, QUICK_PIT_ITERATIONS*256*1000);
-		printk("Fast TSC calibration using PIT\n");
-		return delta;
 	}
-failed:
+	printk("Fast TSC calibration failed\n");
 	return 0;
+
+success:
+	/*
+	 * Ok, if we get here, then we've seen the
+	 * MSB of the PIT decrement 'i' times, and the
+	 * error has shrunk to less than 500 ppm.
+	 *
+	 * As a result, we can depend on there not being
+	 * any odd delays anywhere, and the TSC reads are
+	 * reliable (within the error). We also adjust the
+	 * delta to the middle of the error bars, just
+	 * because it looks nicer.
+	 *
+	 * kHz = ticks / time-in-seconds / 1000;
+	 * kHz = (t2 - t1) / (I * 256 / PIT_TICK_RATE) / 1000
+	 * kHz = ((t2 - t1) * PIT_TICK_RATE) / (I * 256 * 1000)
+	 */
+	delta += (long)(d2 - d1)/2;
+	delta *= PIT_TICK_RATE;
+	do_div(delta, i*256*1000);
+	printk("Fast TSC calibration using PIT\n");
+	return delta;
 }
 
 /**
@@ -506,15 +556,13 @@ unsigned long native_calibrate_tsc(void)
 	return tsc_pit_min;
 }
 
-#ifdef CONFIG_X86_32
-/* Only called from the Powernow K7 cpu freq driver */
 int recalibrate_cpu_khz(void)
 {
 #ifndef CONFIG_SMP
 	unsigned long cpu_khz_old = cpu_khz;
 
 	if (cpu_has_tsc) {
-		tsc_khz = calibrate_tsc();
+		tsc_khz = x86_platform.calibrate_tsc();
 		cpu_khz = tsc_khz;
 		cpu_data(0).loops_per_jiffy =
 			cpufreq_scale(cpu_data(0).loops_per_jiffy,
@@ -529,7 +577,6 @@ int recalibrate_cpu_khz(void)
 
 EXPORT_SYMBOL(recalibrate_cpu_khz);
 
-#endif /* CONFIG_X86_32 */
 
 /* Accelerators for sched_clock()
  * convert from cycles(64bits) => nanoseconds (64bits)
@@ -554,22 +601,26 @@ EXPORT_SYMBOL(recalibrate_cpu_khz);
  */
 
 DEFINE_PER_CPU(unsigned long, cyc2ns);
+DEFINE_PER_CPU(unsigned long long, cyc2ns_offset);
 
 static void set_cyc2ns_scale(unsigned long cpu_khz, int cpu)
 {
-	unsigned long long tsc_now, ns_now;
+	unsigned long long tsc_now, ns_now, *offset;
 	unsigned long flags, *scale;
 
 	local_irq_save(flags);
 	sched_clock_idle_sleep_event();
 
 	scale = &per_cpu(cyc2ns, cpu);
+	offset = &per_cpu(cyc2ns_offset, cpu);
 
 	rdtscll(tsc_now);
 	ns_now = __cycles_2_ns(tsc_now);
 
-	if (cpu_khz)
+	if (cpu_khz) {
 		*scale = (NSEC_PER_MSEC << CYC2NS_SCALE_FACTOR)/cpu_khz;
+		*offset = ns_now - (tsc_now * *scale >> CYC2NS_SCALE_FACTOR);
+	}
 
 	sched_clock_idle_wakeup_event(0);
 	local_irq_restore(flags);
@@ -596,17 +647,15 @@ static int time_cpufreq_notifier(struct notifier_block *nb, unsigned long val,
 				void *data)
 {
 	struct cpufreq_freqs *freq = data;
-	unsigned long *lpj, dummy;
+	unsigned long *lpj;
 
 	if (cpu_has(&cpu_data(freq->cpu), X86_FEATURE_CONSTANT_TSC))
 		return 0;
 
-	lpj = &dummy;
-	if (!(freq->flags & CPUFREQ_CONST_LOOPS))
-#ifdef CONFIG_SMP
-		lpj = &cpu_data(freq->cpu).loops_per_jiffy;
-#else
 	lpj = &boot_cpu_data.loops_per_jiffy;
+#ifdef CONFIG_SMP
+	if (!(freq->flags & CPUFREQ_CONST_LOOPS))
+		lpj = &cpu_data(freq->cpu).loops_per_jiffy;
 #endif
 
 	if (!ref_freq) {
@@ -617,7 +666,7 @@ static int time_cpufreq_notifier(struct notifier_block *nb, unsigned long val,
 	if ((val == CPUFREQ_PRECHANGE  && freq->old < freq->new) ||
 			(val == CPUFREQ_POSTCHANGE && freq->old > freq->new) ||
 			(val == CPUFREQ_RESUMECHANGE)) {
-		*lpj = 	cpufreq_scale(loops_per_jiffy_ref, ref_freq, freq->new);
+		*lpj = cpufreq_scale(loops_per_jiffy_ref, ref_freq, freq->new);
 
 		tsc_khz = cpufreq_scale(tsc_khz_ref, ref_freq, freq->new);
 		if (!(freq->flags & CPUFREQ_CONST_LOOPS))
@@ -664,7 +713,7 @@ static struct clocksource clocksource_tsc;
  * code, which is necessary to support wrapping clocksources like pm
  * timer.
  */
-static cycle_t read_tsc(void)
+static cycle_t read_tsc(struct clocksource *cs)
 {
 	cycle_t ret = (cycle_t)get_cycles();
 
@@ -675,17 +724,32 @@ static cycle_t read_tsc(void)
 #ifdef CONFIG_X86_64
 static cycle_t __vsyscall_fn vread_tsc(void)
 {
-	cycle_t ret = (cycle_t)vget_cycles();
+	cycle_t ret;
+
+	/*
+	 * Surround the RDTSC by barriers, to make sure it's not
+	 * speculated to outside the seqlock critical section and
+	 * does not cause time warps:
+	 */
+	rdtsc_barrier();
+	ret = (cycle_t)vget_cycles();
+	rdtsc_barrier();
 
 	return ret >= __vsyscall_gtod_data.clock.cycle_last ?
 		ret : __vsyscall_gtod_data.clock.cycle_last;
 }
 #endif
 
+static void resume_tsc(struct clocksource *cs)
+{
+	clocksource_tsc.cycle_last = 0;
+}
+
 static struct clocksource clocksource_tsc = {
 	.name                   = "tsc",
 	.rating                 = 300,
 	.read                   = read_tsc,
+	.resume			= resume_tsc,
 	.mask                   = CLOCKSOURCE_MASK(64),
 	.shift                  = 22,
 	.flags                  = CLOCK_SOURCE_IS_CONTINUOUS |
@@ -699,12 +763,15 @@ void mark_tsc_unstable(char *reason)
 {
 	if (!tsc_unstable) {
 		tsc_unstable = 1;
-		printk("Marking TSC unstable due to %s\n", reason);
+		sched_clock_stable = 0;
+		printk(KERN_INFO "Marking TSC unstable due to %s\n", reason);
 		/* Change only the rating, when not registered */
 		if (clocksource_tsc.mult)
-			clocksource_change_rating(&clocksource_tsc, 0);
-		else
+			clocksource_mark_unstable(&clocksource_tsc);
+		else {
+			clocksource_tsc.flags |= CLOCK_SOURCE_UNSTABLE;
 			clocksource_tsc.rating = 0;
+		}
 	}
 }
 
@@ -731,24 +798,21 @@ static struct dmi_system_id __initdata bad_tsc_dmi_table[] = {
 	{}
 };
 
-/*
- * Geode_LX - the OLPC CPU has a possibly a very reliable TSC
- */
-#ifdef CONFIG_MGEODE_LX
-/* RTSC counts during suspend */
-#define RTSC_SUSP 0x100
-
-static void __init check_geode_tsc_reliable(void)
+static void __init check_system_tsc_reliable(void)
 {
+#ifdef CONFIG_MGEODE_LX
+	/* RTSC counts during suspend */
+#define RTSC_SUSP 0x100
 	unsigned long res_low, res_high;
 
 	rdmsr_safe(MSR_GEODE_BUSCONT_CONF0, &res_low, &res_high);
+	/* Geode_LX - the OLPC CPU has a very reliable TSC */
 	if (res_low & RTSC_SUSP)
-		clocksource_tsc.flags &= ~CLOCK_SOURCE_MUST_VERIFY;
-}
-#else
-static inline void check_geode_tsc_reliable(void) { }
+		tsc_clocksource_reliable = 1;
 #endif
+	if (boot_cpu_has(X86_FEATURE_TSC_RELIABLE))
+		tsc_clocksource_reliable = 1;
+}
 
 /*
  * Make an educated guess if the TSC is trustworthy and synchronized
@@ -759,7 +823,7 @@ __cpuinit int unsynchronized_tsc(void)
 	if (!cpu_has_tsc || tsc_unstable)
 		return 1;
 
-#ifdef CONFIG_X86_SMP
+#ifdef CONFIG_SMP
 	if (apic_is_clustered_box())
 		return 1;
 #endif
@@ -783,6 +847,8 @@ static void __init init_tsc_clocksource(void)
 {
 	clocksource_tsc.mult = clocksource_khz2mult(tsc_khz,
 			clocksource_tsc.shift);
+	if (tsc_clocksource_reliable)
+		clocksource_tsc.flags &= ~CLOCK_SOURCE_MUST_VERIFY;
 	/* lower the rating if we already know its unstable: */
 	if (check_tsc_unstable()) {
 		clocksource_tsc.rating = 0;
@@ -791,15 +857,71 @@ static void __init init_tsc_clocksource(void)
 	clocksource_register(&clocksource_tsc);
 }
 
+#ifdef CONFIG_X86_64
+/*
+ * calibrate_cpu is used on systems with fixed rate TSCs to determine
+ * processor frequency
+ */
+#define TICK_COUNT 100000000
+static unsigned long __init calibrate_cpu(void)
+{
+	int tsc_start, tsc_now;
+	int i, no_ctr_free;
+	unsigned long evntsel3 = 0, pmc3 = 0, pmc_now = 0;
+	unsigned long flags;
+
+	for (i = 0; i < 4; i++)
+		if (avail_to_resrv_perfctr_nmi_bit(i))
+			break;
+	no_ctr_free = (i == 4);
+	if (no_ctr_free) {
+		WARN(1, KERN_WARNING "Warning: AMD perfctrs busy ... "
+		     "cpu_khz value may be incorrect.\n");
+		i = 3;
+		rdmsrl(MSR_K7_EVNTSEL3, evntsel3);
+		wrmsrl(MSR_K7_EVNTSEL3, 0);
+		rdmsrl(MSR_K7_PERFCTR3, pmc3);
+	} else {
+		reserve_perfctr_nmi(MSR_K7_PERFCTR0 + i);
+		reserve_evntsel_nmi(MSR_K7_EVNTSEL0 + i);
+	}
+	local_irq_save(flags);
+	/* start measuring cycles, incrementing from 0 */
+	wrmsrl(MSR_K7_PERFCTR0 + i, 0);
+	wrmsrl(MSR_K7_EVNTSEL0 + i, 1 << 22 | 3 << 16 | 0x76);
+	rdtscl(tsc_start);
+	do {
+		rdmsrl(MSR_K7_PERFCTR0 + i, pmc_now);
+		tsc_now = get_cycles();
+	} while ((tsc_now - tsc_start) < TICK_COUNT);
+
+	local_irq_restore(flags);
+	if (no_ctr_free) {
+		wrmsrl(MSR_K7_EVNTSEL3, 0);
+		wrmsrl(MSR_K7_PERFCTR3, pmc3);
+		wrmsrl(MSR_K7_EVNTSEL3, evntsel3);
+	} else {
+		release_perfctr_nmi(MSR_K7_PERFCTR0 + i);
+		release_evntsel_nmi(MSR_K7_EVNTSEL0 + i);
+	}
+
+	return pmc_now * tsc_khz / (tsc_now - tsc_start);
+}
+#else
+static inline unsigned long calibrate_cpu(void) { return cpu_khz; }
+#endif
+
 void __init tsc_init(void)
 {
 	u64 lpj;
 	int cpu;
 
+	x86_init.timers.tsc_pre_init();
+
 	if (!cpu_has_tsc)
 		return;
 
-	tsc_khz = calibrate_tsc();
+	tsc_khz = x86_platform.calibrate_tsc();
 	cpu_khz = tsc_khz;
 
 	if (!tsc_khz) {
@@ -807,11 +929,9 @@ void __init tsc_init(void)
 		return;
 	}
 
-#ifdef CONFIG_X86_64
 	if (cpu_has(&boot_cpu_data, X86_FEATURE_CONSTANT_TSC) &&
 			(boot_cpu_data.x86_vendor == X86_VENDOR_AMD))
 		cpu_khz = calibrate_cpu();
-#endif
 
 	printk("Detected %lu.%03lu MHz processor.\n",
 			(unsigned long)cpu_khz / 1000,
@@ -843,7 +963,7 @@ void __init tsc_init(void)
 	if (unsynchronized_tsc())
 		mark_tsc_unstable("TSCs unsynchronized");
 
-	check_geode_tsc_reliable();
+	check_system_tsc_reliable();
 	init_tsc_clocksource();
 }
 

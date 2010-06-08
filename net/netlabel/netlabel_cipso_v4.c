@@ -33,6 +33,7 @@
 #include <linux/string.h>
 #include <linux/skbuff.h>
 #include <linux/audit.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 #include <net/netlink.h>
 #include <net/genetlink.h>
@@ -130,6 +131,7 @@ static int netlbl_cipsov4_add_common(struct genl_info *info,
 /**
  * netlbl_cipsov4_add_std - Adds a CIPSO V4 DOI definition
  * @info: the Generic NETLINK info block
+ * @audit_info: NetLabel audit information
  *
  * Description:
  * Create a new CIPSO_V4_MAP_TRANS DOI definition based on the given ADD
@@ -137,7 +139,8 @@ static int netlbl_cipsov4_add_common(struct genl_info *info,
  * non-zero on error.
  *
  */
-static int netlbl_cipsov4_add_std(struct genl_info *info)
+static int netlbl_cipsov4_add_std(struct genl_info *info,
+				  struct netlbl_audit *audit_info)
 {
 	int ret_val = -EINVAL;
 	struct cipso_v4_doi *doi_def = NULL;
@@ -316,7 +319,7 @@ static int netlbl_cipsov4_add_std(struct genl_info *info)
 			}
 	}
 
-	ret_val = cipso_v4_doi_add(doi_def);
+	ret_val = cipso_v4_doi_add(doi_def, audit_info);
 	if (ret_val != 0)
 		goto add_std_failure;
 	return 0;
@@ -330,6 +333,7 @@ add_std_failure:
 /**
  * netlbl_cipsov4_add_pass - Adds a CIPSO V4 DOI definition
  * @info: the Generic NETLINK info block
+ * @audit_info: NetLabel audit information
  *
  * Description:
  * Create a new CIPSO_V4_MAP_PASS DOI definition based on the given ADD message
@@ -337,7 +341,8 @@ add_std_failure:
  * error.
  *
  */
-static int netlbl_cipsov4_add_pass(struct genl_info *info)
+static int netlbl_cipsov4_add_pass(struct genl_info *info,
+				   struct netlbl_audit *audit_info)
 {
 	int ret_val;
 	struct cipso_v4_doi *doi_def = NULL;
@@ -354,7 +359,7 @@ static int netlbl_cipsov4_add_pass(struct genl_info *info)
 	if (ret_val != 0)
 		goto add_pass_failure;
 
-	ret_val = cipso_v4_doi_add(doi_def);
+	ret_val = cipso_v4_doi_add(doi_def, audit_info);
 	if (ret_val != 0)
 		goto add_pass_failure;
 	return 0;
@@ -367,6 +372,7 @@ add_pass_failure:
 /**
  * netlbl_cipsov4_add_local - Adds a CIPSO V4 DOI definition
  * @info: the Generic NETLINK info block
+ * @audit_info: NetLabel audit information
  *
  * Description:
  * Create a new CIPSO_V4_MAP_LOCAL DOI definition based on the given ADD
@@ -374,7 +380,8 @@ add_pass_failure:
  * non-zero on error.
  *
  */
-static int netlbl_cipsov4_add_local(struct genl_info *info)
+static int netlbl_cipsov4_add_local(struct genl_info *info,
+				    struct netlbl_audit *audit_info)
 {
 	int ret_val;
 	struct cipso_v4_doi *doi_def = NULL;
@@ -391,7 +398,7 @@ static int netlbl_cipsov4_add_local(struct genl_info *info)
 	if (ret_val != 0)
 		goto add_local_failure;
 
-	ret_val = cipso_v4_doi_add(doi_def);
+	ret_val = cipso_v4_doi_add(doi_def, audit_info);
 	if (ret_val != 0)
 		goto add_local_failure;
 	return 0;
@@ -415,47 +422,30 @@ static int netlbl_cipsov4_add(struct sk_buff *skb, struct genl_info *info)
 
 {
 	int ret_val = -EINVAL;
-	u32 type;
-	u32 doi;
 	const char *type_str = "(unknown)";
-	struct audit_buffer *audit_buf;
 	struct netlbl_audit audit_info;
 
 	if (!info->attrs[NLBL_CIPSOV4_A_DOI] ||
 	    !info->attrs[NLBL_CIPSOV4_A_MTYPE])
 		return -EINVAL;
 
-	doi = nla_get_u32(info->attrs[NLBL_CIPSOV4_A_DOI]);
 	netlbl_netlink_auditinfo(skb, &audit_info);
-
-	type = nla_get_u32(info->attrs[NLBL_CIPSOV4_A_MTYPE]);
-	switch (type) {
+	switch (nla_get_u32(info->attrs[NLBL_CIPSOV4_A_MTYPE])) {
 	case CIPSO_V4_MAP_TRANS:
 		type_str = "trans";
-		ret_val = netlbl_cipsov4_add_std(info);
+		ret_val = netlbl_cipsov4_add_std(info, &audit_info);
 		break;
 	case CIPSO_V4_MAP_PASS:
 		type_str = "pass";
-		ret_val = netlbl_cipsov4_add_pass(info);
+		ret_val = netlbl_cipsov4_add_pass(info, &audit_info);
 		break;
 	case CIPSO_V4_MAP_LOCAL:
 		type_str = "local";
-		ret_val = netlbl_cipsov4_add_local(info);
+		ret_val = netlbl_cipsov4_add_local(info, &audit_info);
 		break;
 	}
 	if (ret_val == 0)
 		atomic_inc(&netlabel_mgmt_protocount);
-
-	audit_buf = netlbl_audit_start_common(AUDIT_MAC_CIPSOV4_ADD,
-					      &audit_info);
-	if (audit_buf != NULL) {
-		audit_log_format(audit_buf,
-				 " cipso_doi=%u cipso_type=%s res=%u",
-				 doi,
-				 type_str,
-				 ret_val == 0 ? 1 : 0);
-		audit_log_end(audit_buf);
-	}
 
 	return ret_val;
 }
@@ -725,9 +715,7 @@ static int netlbl_cipsov4_remove_cb(struct netlbl_dom_map *entry, void *arg)
 static int netlbl_cipsov4_remove(struct sk_buff *skb, struct genl_info *info)
 {
 	int ret_val = -EINVAL;
-	u32 doi = 0;
 	struct netlbl_domhsh_walk_arg cb_arg;
-	struct audit_buffer *audit_buf;
 	struct netlbl_audit audit_info;
 	u32 skip_bkt = 0;
 	u32 skip_chain = 0;
@@ -735,27 +723,15 @@ static int netlbl_cipsov4_remove(struct sk_buff *skb, struct genl_info *info)
 	if (!info->attrs[NLBL_CIPSOV4_A_DOI])
 		return -EINVAL;
 
-	doi = nla_get_u32(info->attrs[NLBL_CIPSOV4_A_DOI]);
 	netlbl_netlink_auditinfo(skb, &audit_info);
-
-	cb_arg.doi = doi;
+	cb_arg.doi = nla_get_u32(info->attrs[NLBL_CIPSOV4_A_DOI]);
 	cb_arg.audit_info = &audit_info;
 	ret_val = netlbl_domhsh_walk(&skip_bkt, &skip_chain,
 				     netlbl_cipsov4_remove_cb, &cb_arg);
 	if (ret_val == 0 || ret_val == -ENOENT) {
-		ret_val = cipso_v4_doi_remove(doi, &audit_info);
+		ret_val = cipso_v4_doi_remove(cb_arg.doi, &audit_info);
 		if (ret_val == 0)
 			atomic_dec(&netlabel_mgmt_protocount);
-	}
-
-	audit_buf = netlbl_audit_start_common(AUDIT_MAC_CIPSOV4_DEL,
-					      &audit_info);
-	if (audit_buf != NULL) {
-		audit_log_format(audit_buf,
-				 " cipso_doi=%u res=%u",
-				 doi,
-				 ret_val == 0 ? 1 : 0);
-		audit_log_end(audit_buf);
 	}
 
 	return ret_val;
@@ -810,18 +786,6 @@ static struct genl_ops netlbl_cipsov4_ops[] = {
  */
 int __init netlbl_cipsov4_genl_init(void)
 {
-	int ret_val, i;
-
-	ret_val = genl_register_family(&netlbl_cipsov4_gnl_family);
-	if (ret_val != 0)
-		return ret_val;
-
-	for (i = 0; i < ARRAY_SIZE(netlbl_cipsov4_ops); i++) {
-		ret_val = genl_register_ops(&netlbl_cipsov4_gnl_family,
-				&netlbl_cipsov4_ops[i]);
-		if (ret_val != 0)
-			return ret_val;
-	}
-
-	return 0;
+	return genl_register_family_with_ops(&netlbl_cipsov4_gnl_family,
+		netlbl_cipsov4_ops, ARRAY_SIZE(netlbl_cipsov4_ops));
 }

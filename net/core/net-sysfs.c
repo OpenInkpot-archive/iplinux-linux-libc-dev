@@ -13,10 +13,11 @@
 #include <linux/kernel.h>
 #include <linux/netdevice.h>
 #include <linux/if_arp.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 #include <linux/rtnetlink.h>
 #include <linux/wireless.h>
-#include <net/iw_handler.h>
+#include <net/wext.h>
 
 #include "net-sysfs.h"
 
@@ -77,7 +78,9 @@ static ssize_t netdev_store(struct device *dev, struct device_attribute *attr,
 	if (endp == buf)
 		goto err;
 
-	rtnl_lock();
+	if (!rtnl_trylock())
+		return restart_syscall();
+
 	if (dev_isalive(net)) {
 		if ((ret = (*set)(net, new)) == 0)
 			ret = len;
@@ -128,6 +131,48 @@ static ssize_t show_carrier(struct device *dev,
 	return -EINVAL;
 }
 
+static ssize_t show_speed(struct device *dev,
+			  struct device_attribute *attr, char *buf)
+{
+	struct net_device *netdev = to_net_dev(dev);
+	int ret = -EINVAL;
+
+	if (!rtnl_trylock())
+		return restart_syscall();
+
+	if (netif_running(netdev) &&
+	    netdev->ethtool_ops &&
+	    netdev->ethtool_ops->get_settings) {
+		struct ethtool_cmd cmd = { ETHTOOL_GSET };
+
+		if (!netdev->ethtool_ops->get_settings(netdev, &cmd))
+			ret = sprintf(buf, fmt_dec, ethtool_cmd_speed(&cmd));
+	}
+	rtnl_unlock();
+	return ret;
+}
+
+static ssize_t show_duplex(struct device *dev,
+			   struct device_attribute *attr, char *buf)
+{
+	struct net_device *netdev = to_net_dev(dev);
+	int ret = -EINVAL;
+
+	if (!rtnl_trylock())
+		return restart_syscall();
+
+	if (netif_running(netdev) &&
+	    netdev->ethtool_ops &&
+	    netdev->ethtool_ops->get_settings) {
+		struct ethtool_cmd cmd = { ETHTOOL_GSET };
+
+		if (!netdev->ethtool_ops->get_settings(netdev, &cmd))
+			ret = sprintf(buf, "%s\n", cmd.duplex ? "full" : "half");
+	}
+	rtnl_unlock();
+	return ret;
+}
+
 static ssize_t show_dormant(struct device *dev,
 			    struct device_attribute *attr, char *buf)
 {
@@ -139,7 +184,7 @@ static ssize_t show_dormant(struct device *dev,
 	return -EINVAL;
 }
 
-static const char *operstates[] = {
+static const char *const operstates[] = {
 	"unknown",
 	"notpresent", /* currently unused */
 	"down",
@@ -223,7 +268,8 @@ static ssize_t store_ifalias(struct device *dev, struct device_attribute *attr,
 	if (len >  0 && buf[len - 1] == '\n')
 		--count;
 
-	rtnl_lock();
+	if (!rtnl_trylock())
+		return restart_syscall();
 	ret = dev_set_alias(netdev, buf, count);
 	rtnl_unlock();
 
@@ -236,7 +282,8 @@ static ssize_t show_ifalias(struct device *dev,
 	const struct net_device *netdev = to_net_dev(dev);
 	ssize_t ret = 0;
 
-	rtnl_lock();
+	if (!rtnl_trylock())
+		return restart_syscall();
 	if (netdev->ifalias)
 		ret = sprintf(buf, "%s\n", netdev->ifalias);
 	rtnl_unlock();
@@ -255,6 +302,8 @@ static struct device_attribute net_class_attributes[] = {
 	__ATTR(address, S_IRUGO, show_address, NULL),
 	__ATTR(broadcast, S_IRUGO, show_broadcast, NULL),
 	__ATTR(carrier, S_IRUGO, show_carrier, NULL),
+	__ATTR(speed, S_IRUGO, show_speed, NULL),
+	__ATTR(duplex, S_IRUGO, show_duplex, NULL),
 	__ATTR(dormant, S_IRUGO, show_dormant, NULL),
 	__ATTR(operstate, S_IRUGO, show_operstate, NULL),
 	__ATTR(mtu, S_IRUGO | S_IWUSR, show_mtu, store_mtu),
@@ -270,7 +319,6 @@ static ssize_t netstat_show(const struct device *d,
 			    unsigned long offset)
 {
 	struct net_device *dev = to_net_dev(d);
-	struct net_device_stats *stats;
 	ssize_t ret = -EINVAL;
 
 	WARN_ON(offset > sizeof(struct net_device_stats) ||
@@ -278,7 +326,7 @@ static ssize_t netstat_show(const struct device *d,
 
 	read_lock(&dev_base_lock);
 	if (dev_isalive(dev)) {
-		stats = dev->get_stats(dev);
+		const struct net_device_stats *stats = dev_get_stats(dev);
 		ret = sprintf(buf, fmt_ulong,
 			      *(unsigned long *)(((u8 *) stats) + offset));
 	}
@@ -360,18 +408,17 @@ static ssize_t wireless_show(struct device *d, char *buf,
 					       char *))
 {
 	struct net_device *dev = to_net_dev(d);
-	const struct iw_statistics *iw = NULL;
+	const struct iw_statistics *iw;
 	ssize_t ret = -EINVAL;
 
-	read_lock(&dev_base_lock);
+	if (!rtnl_trylock())
+		return restart_syscall();
 	if (dev_isalive(dev)) {
-		if (dev->wireless_handlers &&
-		    dev->wireless_handlers->get_wireless_stats)
-			iw = dev->wireless_handlers->get_wireless_stats(dev);
-		if (iw != NULL)
+		iw = get_wireless_stats(dev);
+		if (iw)
 			ret = (*format)(iw, buf);
 	}
-	read_unlock(&dev_base_lock);
+	rtnl_unlock();
 
 	return ret;
 }
@@ -428,6 +475,9 @@ static int netdev_uevent(struct device *d, struct kobj_uevent_env *env)
 	struct net_device *dev = to_net_dev(d);
 	int retval;
 
+	if (!net_eq(dev_net(dev), &init_net))
+		return 0;
+
 	/* pass interface to uevent. */
 	retval = add_uevent_var(env, "INTERFACE=%s", dev->name);
 	if (retval)
@@ -476,6 +526,10 @@ void netdev_unregister_kobject(struct net_device * net)
 	struct device *dev = &(net->dev);
 
 	kobject_get(&dev->kobj);
+
+	if (!net_eq(dev_net(net), &init_net))
+		return;
+
 	device_del(dev);
 }
 
@@ -483,23 +537,32 @@ void netdev_unregister_kobject(struct net_device * net)
 int netdev_register_kobject(struct net_device *net)
 {
 	struct device *dev = &(net->dev);
-	struct attribute_group **groups = net->sysfs_groups;
+	const struct attribute_group **groups = net->sysfs_groups;
 
 	dev->class = &net_class;
 	dev->platform_data = net;
 	dev->groups = groups;
 
-	BUILD_BUG_ON(BUS_ID_SIZE < IFNAMSIZ);
-	strlcpy(dev->bus_id, net->name, BUS_ID_SIZE);
+	dev_set_name(dev, "%s", net->name);
 
 #ifdef CONFIG_SYSFS
-	*groups++ = &netstat_group;
+	/* Allow for a device specific group */
+	if (*groups)
+		groups++;
 
+	*groups++ = &netstat_group;
 #ifdef CONFIG_WIRELESS_EXT_SYSFS
-	if (net->wireless_handlers && net->wireless_handlers->get_wireless_stats)
+	if (net->ieee80211_ptr)
+		*groups++ = &wireless_group;
+#ifdef CONFIG_WIRELESS_EXT
+	else if (net->wireless_handlers)
 		*groups++ = &wireless_group;
 #endif
+#endif
 #endif /* CONFIG_SYSFS */
+
+	if (!net_eq(dev_net(net), &init_net))
+		return 0;
 
 	return device_add(dev);
 }

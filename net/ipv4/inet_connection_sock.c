@@ -93,24 +93,40 @@ int inet_csk_get_port(struct sock *sk, unsigned short snum)
 	struct inet_bind_hashbucket *head;
 	struct hlist_node *node;
 	struct inet_bind_bucket *tb;
-	int ret;
+	int ret, attempts = 5;
 	struct net *net = sock_net(sk);
+	int smallest_size = -1, smallest_rover;
 
 	local_bh_disable();
 	if (!snum) {
 		int remaining, rover, low, high;
 
+again:
 		inet_get_local_port_range(&low, &high);
 		remaining = (high - low) + 1;
-		rover = net_random() % remaining + low;
+		smallest_rover = rover = net_random() % remaining + low;
 
+		smallest_size = -1;
 		do {
 			head = &hashinfo->bhash[inet_bhashfn(net, rover,
 					hashinfo->bhash_size)];
 			spin_lock(&head->lock);
 			inet_bind_bucket_for_each(tb, node, &head->chain)
-				if (tb->ib_net == net && tb->port == rover)
+				if (net_eq(ib_net(tb), net) && tb->port == rover) {
+					if (tb->fastreuse > 0 &&
+					    sk->sk_reuse &&
+					    sk->sk_state != TCP_LISTEN &&
+					    (tb->num_owners < smallest_size || smallest_size == -1)) {
+						smallest_size = tb->num_owners;
+						smallest_rover = rover;
+						if (atomic_read(&hashinfo->bsockets) > (high - low) + 1) {
+							spin_unlock(&head->lock);
+							snum = smallest_rover;
+							goto have_snum;
+						}
+					}
 					goto next;
+				}
 			break;
 		next:
 			spin_unlock(&head->lock);
@@ -125,19 +141,24 @@ int inet_csk_get_port(struct sock *sk, unsigned short snum)
 		 * the top level, not from the 'break;' statement.
 		 */
 		ret = 1;
-		if (remaining <= 0)
+		if (remaining <= 0) {
+			if (smallest_size != -1) {
+				snum = smallest_rover;
+				goto have_snum;
+			}
 			goto fail;
-
+		}
 		/* OK, here is the one we will use.  HEAD is
 		 * non-NULL and we hold it's mutex.
 		 */
 		snum = rover;
 	} else {
+have_snum:
 		head = &hashinfo->bhash[inet_bhashfn(net, snum,
 				hashinfo->bhash_size)];
 		spin_lock(&head->lock);
 		inet_bind_bucket_for_each(tb, node, &head->chain)
-			if (tb->ib_net == net && tb->port == snum)
+			if (net_eq(ib_net(tb), net) && tb->port == snum)
 				goto tb_found;
 	}
 	tb = NULL;
@@ -145,12 +166,19 @@ int inet_csk_get_port(struct sock *sk, unsigned short snum)
 tb_found:
 	if (!hlist_empty(&tb->owners)) {
 		if (tb->fastreuse > 0 &&
-		    sk->sk_reuse && sk->sk_state != TCP_LISTEN) {
+		    sk->sk_reuse && sk->sk_state != TCP_LISTEN &&
+		    smallest_size == -1) {
 			goto success;
 		} else {
 			ret = 1;
-			if (inet_csk(sk)->icsk_af_ops->bind_conflict(sk, tb))
+			if (inet_csk(sk)->icsk_af_ops->bind_conflict(sk, tb)) {
+				if (sk->sk_reuse && sk->sk_state != TCP_LISTEN &&
+				    smallest_size != -1 && --attempts >= 0) {
+					spin_unlock(&head->lock);
+					goto again;
+				}
 				goto fail_unlock;
+			}
 		}
 	}
 tb_not_found:
@@ -323,13 +351,14 @@ void inet_csk_reset_keepalive_timer(struct sock *sk, unsigned long len)
 
 EXPORT_SYMBOL(inet_csk_reset_keepalive_timer);
 
-struct dst_entry* inet_csk_route_req(struct sock *sk,
+struct dst_entry *inet_csk_route_req(struct sock *sk,
 				     const struct request_sock *req)
 {
 	struct rtable *rt;
 	const struct inet_request_sock *ireq = inet_rsk(req);
 	struct ip_options *opt = inet_rsk(req)->opt;
 	struct flowi fl = { .oif = sk->sk_bound_dev_if,
+			    .mark = sk->sk_mark,
 			    .nl_u = { .ip4_u =
 				      { .daddr = ((opt && opt->srr) ?
 						  opt->faddr :
@@ -339,21 +368,22 @@ struct dst_entry* inet_csk_route_req(struct sock *sk,
 			    .proto = sk->sk_protocol,
 			    .flags = inet_sk_flowi_flags(sk),
 			    .uli_u = { .ports =
-				       { .sport = inet_sk(sk)->sport,
+				       { .sport = inet_sk(sk)->inet_sport,
 					 .dport = ireq->rmt_port } } };
 	struct net *net = sock_net(sk);
 
 	security_req_classify_flow(req, &fl);
-	if (ip_route_output_flow(net, &rt, &fl, sk, 0)) {
-		IP_INC_STATS_BH(net, IPSTATS_MIB_OUTNOROUTES);
-		return NULL;
-	}
-	if (opt && opt->is_strictroute && rt->rt_dst != rt->rt_gateway) {
-		ip_rt_put(rt);
-		IP_INC_STATS_BH(net, IPSTATS_MIB_OUTNOROUTES);
-		return NULL;
-	}
+	if (ip_route_output_flow(net, &rt, &fl, sk, 0))
+		goto no_route;
+	if (opt && opt->is_strictroute && rt->rt_dst != rt->rt_gateway)
+		goto route_err;
 	return &rt->u.dst;
+
+route_err:
+	ip_rt_put(rt);
+no_route:
+	IP_INC_STATS_BH(net, IPSTATS_MIB_OUTNOROUTES);
+	return NULL;
 }
 
 EXPORT_SYMBOL_GPL(inet_csk_route_req);
@@ -417,6 +447,28 @@ extern int sysctl_tcp_synack_retries;
 
 EXPORT_SYMBOL_GPL(inet_csk_reqsk_queue_hash_add);
 
+/* Decide when to expire the request and when to resend SYN-ACK */
+static inline void syn_ack_recalc(struct request_sock *req, const int thresh,
+				  const int max_retries,
+				  const u8 rskq_defer_accept,
+				  int *expire, int *resend)
+{
+	if (!rskq_defer_accept) {
+		*expire = req->retrans >= thresh;
+		*resend = 1;
+		return;
+	}
+	*expire = req->retrans >= thresh &&
+		  (!inet_rsk(req)->acked || req->retrans >= max_retries);
+	/*
+	 * Do not resend while waiting for data after ACK,
+	 * start to resend on end of deferring period to give
+	 * last chance for data or ACK to create established socket.
+	 */
+	*resend = !inet_rsk(req)->acked ||
+		  req->retrans >= rskq_defer_accept - 1;
+}
+
 void inet_csk_reqsk_queue_prune(struct sock *parent,
 				const unsigned long interval,
 				const unsigned long timeout,
@@ -472,9 +524,17 @@ void inet_csk_reqsk_queue_prune(struct sock *parent,
 		reqp=&lopt->syn_table[i];
 		while ((req = *reqp) != NULL) {
 			if (time_after_eq(now, req->expires)) {
-				if ((req->retrans < thresh ||
-				     (inet_rsk(req)->acked && req->retrans < max_retries))
-				    && !req->rsk_ops->rtx_syn_ack(parent, req)) {
+				int expire = 0, resend = 0;
+
+				syn_ack_recalc(req, thresh, max_retries,
+					       queue->rskq_defer_accept,
+					       &expire, &resend);
+				if (req->rsk_ops->syn_ack_timeout)
+					req->rsk_ops->syn_ack_timeout(parent, req);
+				if (!expire &&
+				    (!resend ||
+				     !req->rsk_ops->rtx_syn_ack(parent, req, NULL) ||
+				     inet_rsk(req)->acked)) {
 					unsigned long timeo;
 
 					if (req->retrans++ == 0)
@@ -517,9 +577,9 @@ struct sock *inet_csk_clone(struct sock *sk, const struct request_sock *req,
 		newsk->sk_state = TCP_SYN_RECV;
 		newicsk->icsk_bind_hash = NULL;
 
-		inet_sk(newsk)->dport = inet_rsk(req)->rmt_port;
-		inet_sk(newsk)->num = ntohs(inet_rsk(req)->loc_port);
-		inet_sk(newsk)->sport = inet_rsk(req)->loc_port;
+		inet_sk(newsk)->inet_dport = inet_rsk(req)->rmt_port;
+		inet_sk(newsk)->inet_num = ntohs(inet_rsk(req)->loc_port);
+		inet_sk(newsk)->inet_sport = inet_rsk(req)->loc_port;
 		newsk->sk_write_space = sk_stream_write_space;
 
 		newicsk->icsk_retransmits = 0;
@@ -550,8 +610,8 @@ void inet_csk_destroy_sock(struct sock *sk)
 	/* It cannot be in hash table! */
 	WARN_ON(!sk_unhashed(sk));
 
-	/* If it has not 0 inet_sk(sk)->num, it must be bound */
-	WARN_ON(inet_sk(sk)->num && !inet_csk(sk)->icsk_bind_hash);
+	/* If it has not 0 inet_sk(sk)->inet_num, it must be bound */
+	WARN_ON(inet_sk(sk)->inet_num && !inet_csk(sk)->icsk_bind_hash);
 
 	sk->sk_prot->destroy(sk);
 
@@ -561,7 +621,7 @@ void inet_csk_destroy_sock(struct sock *sk)
 
 	sk_refcnt_debug_release(sk);
 
-	atomic_dec(sk->sk_prot->orphan_count);
+	percpu_counter_dec(sk->sk_prot->orphan_count);
 	sock_put(sk);
 }
 
@@ -586,8 +646,8 @@ int inet_csk_listen_start(struct sock *sk, const int nr_table_entries)
 	 * after validation is complete.
 	 */
 	sk->sk_state = TCP_LISTEN;
-	if (!sk->sk_prot->get_port(sk, inet->num)) {
-		inet->sport = htons(inet->num);
+	if (!sk->sk_prot->get_port(sk, inet->inet_num)) {
+		inet->inet_sport = htons(inet->inet_num);
 
 		sk_dst_reset(sk);
 		sk->sk_prot->hash(sk);
@@ -641,7 +701,7 @@ void inet_csk_listen_stop(struct sock *sk)
 
 		sock_orphan(child);
 
-		atomic_inc(sk->sk_prot->orphan_count);
+		percpu_counter_inc(sk->sk_prot->orphan_count);
 
 		inet_csk_destroy_sock(child);
 
@@ -663,8 +723,8 @@ void inet_csk_addr2sockaddr(struct sock *sk, struct sockaddr *uaddr)
 	const struct inet_sock *inet = inet_sk(sk);
 
 	sin->sin_family		= AF_INET;
-	sin->sin_addr.s_addr	= inet->daddr;
-	sin->sin_port		= inet->dport;
+	sin->sin_addr.s_addr	= inet->inet_daddr;
+	sin->sin_port		= inet->inet_dport;
 }
 
 EXPORT_SYMBOL_GPL(inet_csk_addr2sockaddr);
@@ -685,7 +745,7 @@ int inet_csk_compat_getsockopt(struct sock *sk, int level, int optname,
 EXPORT_SYMBOL_GPL(inet_csk_compat_getsockopt);
 
 int inet_csk_compat_setsockopt(struct sock *sk, int level, int optname,
-			       char __user *optval, int optlen)
+			       char __user *optval, unsigned int optlen)
 {
 	const struct inet_connection_sock *icsk = inet_csk(sk);
 

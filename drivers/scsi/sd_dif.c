@@ -142,7 +142,7 @@ static int sd_dif_type1_verify_ip(struct blk_integrity_exchg *bix)
 static void sd_dif_type1_set_tag(void *prot, void *tag_buf, unsigned int sectors)
 {
 	struct sd_dif_tuple *sdt = prot;
-	char *tag = tag_buf;
+	u8 *tag = tag_buf;
 	unsigned int i, j;
 
 	for (i = 0, j = 0 ; i < sectors ; i++, j += 2, sdt++) {
@@ -154,7 +154,7 @@ static void sd_dif_type1_set_tag(void *prot, void *tag_buf, unsigned int sectors
 static void sd_dif_type1_get_tag(void *prot, void *tag_buf, unsigned int sectors)
 {
 	struct sd_dif_tuple *sdt = prot;
-	char *tag = tag_buf;
+	u8 *tag = tag_buf;
 	unsigned int i, j;
 
 	for (i = 0, j = 0 ; i < sectors ; i++, j += 2, sdt++) {
@@ -256,7 +256,7 @@ static int sd_dif_type3_verify_ip(struct blk_integrity_exchg *bix)
 static void sd_dif_type3_set_tag(void *prot, void *tag_buf, unsigned int sectors)
 {
 	struct sd_dif_tuple *sdt = prot;
-	char *tag = tag_buf;
+	u8 *tag = tag_buf;
 	unsigned int i, j;
 
 	for (i = 0, j = 0 ; i < sectors ; i++, j += 6, sdt++) {
@@ -269,7 +269,7 @@ static void sd_dif_type3_set_tag(void *prot, void *tag_buf, unsigned int sectors
 static void sd_dif_type3_get_tag(void *prot, void *tag_buf, unsigned int sectors)
 {
 	struct sd_dif_tuple *sdt = prot;
-	char *tag = tag_buf;
+	u8 *tag = tag_buf;
 	unsigned int i, j;
 
 	for (i = 0, j = 0 ; i < sectors ; i++, j += 2, sdt++) {
@@ -320,15 +320,6 @@ void sd_dif_config_host(struct scsi_disk *sdkp)
 		dif = 0; dix = 1;
 	}
 
-	if (type) {
-		if (dif)
-			sd_printk(KERN_NOTICE, sdkp,
-				  "Enabling DIF Type %d protection\n", type);
-		else
-			sd_printk(KERN_NOTICE, sdkp,
-				  "Disabling DIF Type %d protection\n", type);
-	}
-
 	if (!dix)
 		return;
 
@@ -357,58 +348,6 @@ void sd_dif_config_host(struct scsi_disk *sdkp)
 		sd_printk(KERN_NOTICE, sdkp, "DIF application tag size %u\n",
 			  disk->integrity->tag_size);
 	}
-}
-
-/*
- * DIF DMA operation magic decoder ring.
- */
-void sd_dif_op(struct scsi_cmnd *scmd, unsigned int dif, unsigned int dix, unsigned int type)
-{
-	int csum_convert, prot_op;
-
-	prot_op = 0;
-
-	/* Convert checksum? */
-	if (scsi_host_get_guard(scmd->device->host) != SHOST_DIX_GUARD_CRC)
-		csum_convert = 1;
-	else
-		csum_convert = 0;
-
-	switch (scmd->cmnd[0]) {
-	case READ_10:
-	case READ_12:
-	case READ_16:
-		if (dif && dix)
-			if (csum_convert)
-				prot_op = SCSI_PROT_READ_CONVERT;
-			else
-				prot_op = SCSI_PROT_READ_PASS;
-		else if (dif && !dix)
-			prot_op = SCSI_PROT_READ_STRIP;
-		else if (!dif && dix)
-			prot_op = SCSI_PROT_READ_INSERT;
-
-		break;
-
-	case WRITE_10:
-	case WRITE_12:
-	case WRITE_16:
-		if (dif && dix)
-			if (csum_convert)
-				prot_op = SCSI_PROT_WRITE_CONVERT;
-			else
-				prot_op = SCSI_PROT_WRITE_PASS;
-		else if (dif && !dix)
-			prot_op = SCSI_PROT_WRITE_INSERT;
-		else if (!dif && dix)
-			prot_op = SCSI_PROT_WRITE_STRIP;
-
-		break;
-	}
-
-	scsi_set_prot_op(scmd, prot_op);
-	if (dif)
-		scsi_set_prot_type(scmd, type);
 }
 
 /*
@@ -475,10 +414,11 @@ int sd_dif_prepare(struct request *rq, sector_t hw_sector, unsigned int sector_s
 
 error:
 	kunmap_atomic(sdt, KM_USER0);
-	sd_printk(KERN_ERR, sdkp, "%s: virt %u, phys %u, ref %u\n",
-		  __func__, virt, phys, be32_to_cpu(sdt->ref_tag));
+	sd_printk(KERN_ERR, sdkp, "%s: virt %u, phys %u, ref %u, app %4x\n",
+		  __func__, virt, phys, be32_to_cpu(sdt->ref_tag),
+		  be16_to_cpu(sdt->app_tag));
 
-	return -EIO;
+	return -EILSEQ;
 }
 
 /*
@@ -502,7 +442,7 @@ void sd_dif_complete(struct scsi_cmnd *scmd, unsigned int good_bytes)
 	sector_sz = scmd->device->sector_size;
 	sectors = good_bytes / sector_sz;
 
-	phys = scmd->request->sector & 0xffffffff;
+	phys = blk_rq_pos(scmd->request) & 0xffffffff;
 	if (sector_sz == 4096)
 		phys >>= 3;
 

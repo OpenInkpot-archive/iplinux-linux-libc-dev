@@ -31,7 +31,6 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/ioport.h>
-#include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/netdevice.h>
 #include <linux/init.h>
@@ -72,7 +71,10 @@ static int __devinit com20020pci_probe(struct pci_dev *pdev, const struct pci_de
 	dev = alloc_arcdev(device);
 	if (!dev)
 		return -ENOMEM;
-	lp = dev->priv;
+
+	dev->netdev_ops = &com20020_netdev_ops;
+
+	lp = netdev_priv(dev);
 
 	pci_set_drvdata(pdev, dev);
 
@@ -141,7 +143,7 @@ static void __devexit com20020pci_remove(struct pci_dev *pdev)
 	free_netdev(dev);
 }
 
-static struct pci_device_id com20020pci_id_table[] = {
+static DEFINE_PCI_DEVICE_TABLE(com20020pci_id_table) = {
 	{ 0x1571, 0xa001, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ 0x1571, 0xa002, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ 0x1571, 0xa003, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },

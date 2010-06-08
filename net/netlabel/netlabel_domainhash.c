@@ -35,6 +35,7 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/audit.h>
+#include <linux/slab.h>
 #include <net/netlabel.h>
 #include <net/cipso_ipv4.h>
 #include <asm/bug.h>
@@ -50,9 +51,12 @@ struct netlbl_domhsh_tbl {
 };
 
 /* Domain hash table */
-/* XXX - updates should be so rare that having one spinlock for the entire
- * hash table should be okay */
+/* updates should be so rare that having one spinlock for the entire hash table
+ * should be okay */
 static DEFINE_SPINLOCK(netlbl_domhsh_lock);
+#define netlbl_domhsh_rcu_deref(p) \
+	rcu_dereference_check(p, rcu_read_lock_held() || \
+				 lockdep_is_held(&netlbl_domhsh_lock))
 static struct netlbl_domhsh_tbl *netlbl_domhsh = NULL;
 static struct netlbl_dom_map *netlbl_domhsh_def = NULL;
 
@@ -106,7 +110,8 @@ static void netlbl_domhsh_free_entry(struct rcu_head *entry)
  * Description:
  * This is the hashing function for the domain hash table, it returns the
  * correct bucket number for the domain.  The caller is responsibile for
- * calling the rcu_read_[un]lock() functions.
+ * ensuring that the hash table is protected with either a RCU read lock or the
+ * hash table lock.
  *
  */
 static u32 netlbl_domhsh_hash(const char *key)
@@ -120,7 +125,7 @@ static u32 netlbl_domhsh_hash(const char *key)
 
 	for (iter = 0, val = 0, len = strlen(key); iter < len; iter++)
 		val = (val << 4 | (val >> (8 * sizeof(u32) - 4))) ^ key[iter];
-	return val & (rcu_dereference(netlbl_domhsh)->size - 1);
+	return val & (netlbl_domhsh_rcu_deref(netlbl_domhsh)->size - 1);
 }
 
 /**
@@ -130,7 +135,8 @@ static u32 netlbl_domhsh_hash(const char *key)
  * Description:
  * Searches the domain hash table and returns a pointer to the hash table
  * entry if found, otherwise NULL is returned.  The caller is responsibile for
- * the rcu hash table locks (i.e. the caller much call rcu_read_[un]lock()).
+ * ensuring that the hash table is protected with either a RCU read lock or the
+ * hash table lock.
  *
  */
 static struct netlbl_dom_map *netlbl_domhsh_search(const char *domain)
@@ -141,7 +147,7 @@ static struct netlbl_dom_map *netlbl_domhsh_search(const char *domain)
 
 	if (domain != NULL) {
 		bkt = netlbl_domhsh_hash(domain);
-		bkt_list = &rcu_dereference(netlbl_domhsh)->tbl[bkt];
+		bkt_list = &netlbl_domhsh_rcu_deref(netlbl_domhsh)->tbl[bkt];
 		list_for_each_entry_rcu(iter, bkt_list, list)
 			if (iter->valid && strcmp(iter->domain, domain) == 0)
 				return iter;
@@ -159,8 +165,8 @@ static struct netlbl_dom_map *netlbl_domhsh_search(const char *domain)
  * Searches the domain hash table and returns a pointer to the hash table
  * entry if an exact match is found, if an exact match is not present in the
  * hash table then the default entry is returned if valid otherwise NULL is
- * returned.  The caller is responsibile for the rcu hash table locks
- * (i.e. the caller much call rcu_read_[un]lock()).
+ * returned.  The caller is responsibile ensuring that the hash table is
+ * protected with either a RCU read lock or the hash table lock.
  *
  */
 static struct netlbl_dom_map *netlbl_domhsh_search_def(const char *domain)
@@ -169,7 +175,7 @@ static struct netlbl_dom_map *netlbl_domhsh_search_def(const char *domain)
 
 	entry = netlbl_domhsh_search(domain);
 	if (entry == NULL) {
-		entry = rcu_dereference(netlbl_domhsh_def);
+		entry = netlbl_domhsh_rcu_deref(netlbl_domhsh_def);
 		if (entry != NULL && !entry->valid)
 			entry = NULL;
 	}
@@ -306,8 +312,11 @@ int netlbl_domhsh_add(struct netlbl_dom_map *entry,
 	struct netlbl_af6list *tmp6;
 #endif /* IPv6 */
 
+	/* XXX - we can remove this RCU read lock as the spinlock protects the
+	 *       entire function, but before we do we need to fixup the
+	 *       netlbl_af[4,6]list RCU functions to do "the right thing" with
+	 *       respect to rcu_dereference() when only a spinlock is held. */
 	rcu_read_lock();
-
 	spin_lock(&netlbl_domhsh_lock);
 	if (entry->domain != NULL)
 		entry_old = netlbl_domhsh_search(entry->domain);
@@ -315,7 +324,6 @@ int netlbl_domhsh_add(struct netlbl_dom_map *entry,
 		entry_old = netlbl_domhsh_search_def(entry->domain);
 	if (entry_old == NULL) {
 		entry->valid = 1;
-		INIT_RCU_HEAD(&entry->rcu);
 
 		if (entry->domain != NULL) {
 			u32 bkt = netlbl_domhsh_hash(entry->domain);
@@ -483,6 +491,73 @@ int netlbl_domhsh_remove_entry(struct netlbl_dom_map *entry,
 }
 
 /**
+ * netlbl_domhsh_remove_af4 - Removes an address selector entry
+ * @domain: the domain
+ * @addr: IPv4 address
+ * @mask: IPv4 address mask
+ * @audit_info: NetLabel audit information
+ *
+ * Description:
+ * Removes an individual address selector from a domain mapping and potentially
+ * the entire mapping if it is empty.  Returns zero on success, negative values
+ * on failure.
+ *
+ */
+int netlbl_domhsh_remove_af4(const char *domain,
+			     const struct in_addr *addr,
+			     const struct in_addr *mask,
+			     struct netlbl_audit *audit_info)
+{
+	struct netlbl_dom_map *entry_map;
+	struct netlbl_af4list *entry_addr;
+	struct netlbl_af4list *iter4;
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+	struct netlbl_af6list *iter6;
+#endif /* IPv6 */
+	struct netlbl_domaddr4_map *entry;
+
+	rcu_read_lock();
+
+	if (domain)
+		entry_map = netlbl_domhsh_search(domain);
+	else
+		entry_map = netlbl_domhsh_search_def(domain);
+	if (entry_map == NULL || entry_map->type != NETLBL_NLTYPE_ADDRSELECT)
+		goto remove_af4_failure;
+
+	spin_lock(&netlbl_domhsh_lock);
+	entry_addr = netlbl_af4list_remove(addr->s_addr, mask->s_addr,
+					   &entry_map->type_def.addrsel->list4);
+	spin_unlock(&netlbl_domhsh_lock);
+
+	if (entry_addr == NULL)
+		goto remove_af4_failure;
+	netlbl_af4list_foreach_rcu(iter4, &entry_map->type_def.addrsel->list4)
+		goto remove_af4_single_addr;
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+	netlbl_af6list_foreach_rcu(iter6, &entry_map->type_def.addrsel->list6)
+		goto remove_af4_single_addr;
+#endif /* IPv6 */
+	/* the domain mapping is empty so remove it from the mapping table */
+	netlbl_domhsh_remove_entry(entry_map, audit_info);
+
+remove_af4_single_addr:
+	rcu_read_unlock();
+	/* yick, we can't use call_rcu here because we don't have a rcu head
+	 * pointer but hopefully this should be a rare case so the pause
+	 * shouldn't be a problem */
+	synchronize_rcu();
+	entry = netlbl_domhsh_addr4_entry(entry_addr);
+	cipso_v4_doi_putdef(entry->type_def.cipsov4);
+	kfree(entry);
+	return 0;
+
+remove_af4_failure:
+	rcu_read_unlock();
+	return -ENOENT;
+}
+
+/**
  * netlbl_domhsh_remove - Removes an entry from the domain hash table
  * @domain: the domain to remove
  * @audit_info: NetLabel audit information
@@ -615,7 +690,7 @@ struct netlbl_domaddr6_map *netlbl_domhsh_getentry_af6(const char *domain,
  * buckets and @skip_chain entries.  For each entry in the table call
  * @callback, if @callback returns a negative value stop 'walking' through the
  * table and return.  Updates the values in @skip_bkt and @skip_chain on
- * return.  Returns zero on succcess, negative values on failure.
+ * return.  Returns zero on success, negative values on failure.
  *
  */
 int netlbl_domhsh_walk(u32 *skip_bkt,

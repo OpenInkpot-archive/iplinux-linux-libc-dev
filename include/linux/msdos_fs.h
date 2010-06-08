@@ -1,6 +1,7 @@
 #ifndef _LINUX_MSDOS_FS_H
 #define _LINUX_MSDOS_FS_H
 
+#include <linux/types.h>
 #include <linux/magic.h>
 #include <asm/byteorder.h>
 
@@ -14,6 +15,7 @@
 #define MSDOS_DPB_BITS	4		/* log2(MSDOS_DPB) */
 #define MSDOS_DPS	(SECTOR_SIZE / sizeof(struct msdos_dir_entry))
 #define MSDOS_DPS_BITS	4		/* log2(MSDOS_DPS) */
+#define MSDOS_LONGNAME	256		/* maximum name length */
 #define CF_LE_W(v)	le16_to_cpu(v)
 #define CF_LE_L(v)	le32_to_cpu(v)
 #define CT_LE_W(v)	cpu_to_le16(v)
@@ -46,8 +48,8 @@
 #define DELETED_FLAG	0xe5	/* marks file as deleted when in name[0] */
 #define IS_FREE(n)	(!*(n) || *(n) == DELETED_FLAG)
 
+#define FAT_LFN_LEN	255	/* maximum long name length */
 #define MSDOS_NAME	11	/* maximum name length */
-#define MSDOS_LONGNAME	256	/* maximum name length */
 #define MSDOS_SLOTS	21	/* max # of slots for short and long names */
 #define MSDOS_DOT	".          "	/* ".", padded to MSDOS_NAME chars */
 #define MSDOS_DOTDOT	"..         "	/* "..", padded to MSDOS_NAME chars */

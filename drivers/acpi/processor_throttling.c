@@ -28,6 +28,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/cpufreq.h>
@@ -41,9 +42,19 @@
 #include <acpi/acpi_drivers.h>
 #include <acpi/processor.h>
 
+#define PREFIX "ACPI: "
+
 #define ACPI_PROCESSOR_CLASS            "processor"
 #define _COMPONENT              ACPI_PROCESSOR_COMPONENT
 ACPI_MODULE_NAME("processor_throttling");
+
+/* ignore_tpc:
+ *  0 -> acpi processor driver doesn't ignore _TPC values
+ *  1 -> acpi processor driver ignores _TPC values
+ */
+static int ignore_tpc;
+module_param(ignore_tpc, int, 0644);
+MODULE_PARM_DESC(ignore_tpc, "Disable broken BIOS _TPC throttling support");
 
 struct throttling_tstate {
 	unsigned int cpu;		/* cpu nr */
@@ -54,17 +65,21 @@ struct throttling_tstate {
 #define THROTTLING_POSTCHANGE      (2)
 
 static int acpi_processor_get_throttling(struct acpi_processor *pr);
-int acpi_processor_set_throttling(struct acpi_processor *pr, int state);
+int acpi_processor_set_throttling(struct acpi_processor *pr,
+						int state, bool force);
 
 static int acpi_processor_update_tsd_coord(void)
 {
 	int count, count_target;
 	int retval = 0;
 	unsigned int i, j;
-	cpumask_t covered_cpus;
+	cpumask_var_t covered_cpus;
 	struct acpi_processor *pr, *match_pr;
 	struct acpi_tsd_package *pdomain, *match_pdomain;
 	struct acpi_processor_throttling *pthrottling, *match_pthrottling;
+
+	if (!zalloc_cpumask_var(&covered_cpus, GFP_KERNEL))
+		return -ENOMEM;
 
 	/*
 	 * Now that we have _TSD data from all CPUs, lets setup T-state
@@ -91,19 +106,18 @@ static int acpi_processor_update_tsd_coord(void)
 	if (retval)
 		goto err_ret;
 
-	cpus_clear(covered_cpus);
 	for_each_possible_cpu(i) {
 		pr = per_cpu(processors, i);
 		if (!pr)
 			continue;
 
-		if (cpu_isset(i, covered_cpus))
+		if (cpumask_test_cpu(i, covered_cpus))
 			continue;
 		pthrottling = &pr->throttling;
 
 		pdomain = &(pthrottling->domain_info);
-		cpu_set(i, pthrottling->shared_cpu_map);
-		cpu_set(i, covered_cpus);
+		cpumask_set_cpu(i, pthrottling->shared_cpu_map);
+		cpumask_set_cpu(i, covered_cpus);
 		/*
 		 * If the number of processor in the TSD domain is 1, it is
 		 * unnecessary to parse the coordination for this CPU.
@@ -144,8 +158,8 @@ static int acpi_processor_update_tsd_coord(void)
 				goto err_ret;
 			}
 
-			cpu_set(j, covered_cpus);
-			cpu_set(j, pthrottling->shared_cpu_map);
+			cpumask_set_cpu(j, covered_cpus);
+			cpumask_set_cpu(j, pthrottling->shared_cpu_map);
 			count++;
 		}
 		for_each_possible_cpu(j) {
@@ -165,12 +179,14 @@ static int acpi_processor_update_tsd_coord(void)
 			 * If some CPUS have the same domain, they
 			 * will have the same shared_cpu_map.
 			 */
-			match_pthrottling->shared_cpu_map =
-				pthrottling->shared_cpu_map;
+			cpumask_copy(match_pthrottling->shared_cpu_map,
+				     pthrottling->shared_cpu_map);
 		}
 	}
 
 err_ret:
+	free_cpumask_var(covered_cpus);
+
 	for_each_possible_cpu(i) {
 		pr = per_cpu(processors, i);
 		if (!pr)
@@ -182,8 +198,8 @@ err_ret:
 		 */
 		if (retval) {
 			pthrottling = &(pr->throttling);
-			cpus_clear(pthrottling->shared_cpu_map);
-			cpu_set(i, pthrottling->shared_cpu_map);
+			cpumask_clear(pthrottling->shared_cpu_map);
+			cpumask_set_cpu(i, pthrottling->shared_cpu_map);
 			pthrottling->shared_type = DOMAIN_COORD_TYPE_SW_ALL;
 		}
 	}
@@ -278,6 +294,10 @@ static int acpi_processor_get_platform_limit(struct acpi_processor *pr)
 
 	if (!pr)
 		return -EINVAL;
+
+	if (ignore_tpc)
+		goto end;
+
 	status = acpi_evaluate_integer(pr->handle, "_TPC", NULL, &tpc);
 	if (ACPI_FAILURE(status)) {
 		if (status != AE_NOT_FOUND) {
@@ -285,6 +305,8 @@ static int acpi_processor_get_platform_limit(struct acpi_processor *pr)
 		}
 		return -ENODEV;
 	}
+
+end:
 	pr->throttling_platform_limit = (int)tpc;
 	return 0;
 }
@@ -296,6 +318,9 @@ int acpi_processor_tstate_has_changed(struct acpi_processor *pr)
 	int current_state;
 	struct acpi_processor_limit *limit;
 	int target_state;
+
+	if (ignore_tpc)
+		return 0;
 
 	result = acpi_processor_get_platform_limit(pr);
 	if (result) {
@@ -339,7 +364,7 @@ int acpi_processor_tstate_has_changed(struct acpi_processor *pr)
 		 */
 		target_state = throttling_limit;
 	}
-	return acpi_processor_set_throttling(pr, target_state);
+	return acpi_processor_set_throttling(pr, target_state, false);
 }
 
 /*
@@ -567,7 +592,7 @@ static int acpi_processor_get_tsd(struct acpi_processor *pr)
 	pthrottling = &pr->throttling;
 	pthrottling->tsd_valid_flag = 1;
 	pthrottling->shared_type = pdomain->coord_type;
-	cpu_set(pr->id, pthrottling->shared_cpu_map);
+	cpumask_set_cpu(pr->id, pthrottling->shared_cpu_map);
 	/*
 	 * If the coordination type is not defined in ACPI spec,
 	 * the tsd_valid_flag will be clear and coordination type
@@ -636,7 +661,7 @@ static int acpi_processor_get_throttling_fadt(struct acpi_processor *pr)
 
 #ifdef CONFIG_X86
 static int acpi_throttling_rdmsr(struct acpi_processor *pr,
-					acpi_integer * value)
+					u64 *value)
 {
 	struct cpuinfo_x86 *c;
 	u64 msr_high, msr_low;
@@ -657,13 +682,13 @@ static int acpi_throttling_rdmsr(struct acpi_processor *pr,
 		rdmsr_safe(MSR_IA32_THERM_CONTROL,
 			(u32 *)&msr_low , (u32 *) &msr_high);
 		msr = (msr_high << 32) | msr_low;
-		*value = (acpi_integer) msr;
+		*value = (u64) msr;
 		ret = 0;
 	}
 	return ret;
 }
 
-static int acpi_throttling_wrmsr(struct acpi_processor *pr, acpi_integer value)
+static int acpi_throttling_wrmsr(struct acpi_processor *pr, u64 value)
 {
 	struct cpuinfo_x86 *c;
 	unsigned int cpu;
@@ -687,14 +712,14 @@ static int acpi_throttling_wrmsr(struct acpi_processor *pr, acpi_integer value)
 }
 #else
 static int acpi_throttling_rdmsr(struct acpi_processor *pr,
-				acpi_integer * value)
+				u64 *value)
 {
 	printk(KERN_ERR PREFIX
 		"HARDWARE addr space,NOT supported yet\n");
 	return -1;
 }
 
-static int acpi_throttling_wrmsr(struct acpi_processor *pr, acpi_integer value)
+static int acpi_throttling_wrmsr(struct acpi_processor *pr, u64 value)
 {
 	printk(KERN_ERR PREFIX
 		"HARDWARE addr space,NOT supported yet\n");
@@ -703,7 +728,7 @@ static int acpi_throttling_wrmsr(struct acpi_processor *pr, acpi_integer value)
 #endif
 
 static int acpi_read_throttling_status(struct acpi_processor *pr,
-					acpi_integer *value)
+					u64 *value)
 {
 	u32 bit_width, bit_offset;
 	u64 ptc_value;
@@ -722,7 +747,7 @@ static int acpi_read_throttling_status(struct acpi_processor *pr,
 				  address, (u32 *) &ptc_value,
 				  (u32) (bit_width + bit_offset));
 		ptc_mask = (1 << bit_width) - 1;
-		*value = (acpi_integer) ((ptc_value >> bit_offset) & ptc_mask);
+		*value = (u64) ((ptc_value >> bit_offset) & ptc_mask);
 		ret = 0;
 		break;
 	case ACPI_ADR_SPACE_FIXED_HARDWARE:
@@ -736,7 +761,7 @@ static int acpi_read_throttling_status(struct acpi_processor *pr,
 }
 
 static int acpi_write_throttling_state(struct acpi_processor *pr,
-				acpi_integer value)
+				u64 value)
 {
 	u32 bit_width, bit_offset;
 	u64 ptc_value;
@@ -769,7 +794,7 @@ static int acpi_write_throttling_state(struct acpi_processor *pr,
 }
 
 static int acpi_get_throttling_state(struct acpi_processor *pr,
-				acpi_integer value)
+				u64 value)
 {
 	int i;
 
@@ -778,15 +803,13 @@ static int acpi_get_throttling_state(struct acpi_processor *pr,
 		    (struct acpi_processor_tx_tss *)&(pr->throttling.
 						      states_tss[i]);
 		if (tx->control == value)
-			break;
+			return i;
 	}
-	if (i > pr->throttling.state_count)
-		i = -1;
-	return i;
+	return -1;
 }
 
 static int acpi_get_throttling_value(struct acpi_processor *pr,
-			int state, acpi_integer *value)
+			int state, u64 *value)
 {
 	int ret = -1;
 
@@ -804,7 +827,7 @@ static int acpi_processor_get_throttling_ptc(struct acpi_processor *pr)
 {
 	int state = 0;
 	int ret;
-	acpi_integer value;
+	u64 value;
 
 	if (!pr)
 		return -EINVAL;
@@ -818,6 +841,14 @@ static int acpi_processor_get_throttling_ptc(struct acpi_processor *pr)
 	ret = acpi_read_throttling_status(pr, &value);
 	if (ret >= 0) {
 		state = acpi_get_throttling_state(pr, value);
+		if (state == -1) {
+			ACPI_DEBUG_PRINT((ACPI_DB_INFO,
+				"Invalid throttling state, reset\n"));
+			state = 0;
+			ret = acpi_processor_set_throttling(pr, state, true);
+			if (ret)
+				return ret;
+		}
 		pr->throttling.state = state;
 	}
 
@@ -826,7 +857,7 @@ static int acpi_processor_get_throttling_ptc(struct acpi_processor *pr)
 
 static int acpi_processor_get_throttling(struct acpi_processor *pr)
 {
-	cpumask_t saved_mask;
+	cpumask_var_t saved_mask;
 	int ret;
 
 	if (!pr)
@@ -834,14 +865,20 @@ static int acpi_processor_get_throttling(struct acpi_processor *pr)
 
 	if (!pr->flags.throttling)
 		return -ENODEV;
+
+	if (!alloc_cpumask_var(&saved_mask, GFP_KERNEL))
+		return -ENOMEM;
+
 	/*
 	 * Migrate task to the cpu pointed by pr.
 	 */
-	saved_mask = current->cpus_allowed;
-	set_cpus_allowed_ptr(current, &cpumask_of_cpu(pr->id));
+	cpumask_copy(saved_mask, &current->cpus_allowed);
+	/* FIXME: use work_on_cpu() */
+	set_cpus_allowed_ptr(current, cpumask_of(pr->id));
 	ret = pr->throttling.acpi_processor_get_throttling(pr);
 	/* restore the previous state */
-	set_cpus_allowed_ptr(current, &saved_mask);
+	set_cpus_allowed_ptr(current, saved_mask);
+	free_cpumask_var(saved_mask);
 
 	return ret;
 }
@@ -881,7 +918,7 @@ static int acpi_processor_get_fadt_info(struct acpi_processor *pr)
 }
 
 static int acpi_processor_set_throttling_fadt(struct acpi_processor *pr,
-					      int state)
+					      int state, bool force)
 {
 	u32 value = 0;
 	u32 duty_mask = 0;
@@ -896,7 +933,7 @@ static int acpi_processor_set_throttling_fadt(struct acpi_processor *pr,
 	if (!pr->flags.throttling)
 		return -ENODEV;
 
-	if (state == pr->throttling.state)
+	if (!force && (state == pr->throttling.state))
 		return 0;
 
 	if (state < pr->throttling_platform_limit)
@@ -954,10 +991,10 @@ static int acpi_processor_set_throttling_fadt(struct acpi_processor *pr,
 }
 
 static int acpi_processor_set_throttling_ptc(struct acpi_processor *pr,
-					     int state)
+					     int state, bool force)
 {
 	int ret;
-	acpi_integer value;
+	u64 value;
 
 	if (!pr)
 		return -EINVAL;
@@ -968,7 +1005,7 @@ static int acpi_processor_set_throttling_ptc(struct acpi_processor *pr,
 	if (!pr->flags.throttling)
 		return -ENODEV;
 
-	if (state == pr->throttling.state)
+	if (!force && (state == pr->throttling.state))
 		return 0;
 
 	if (state < pr->throttling_platform_limit)
@@ -984,15 +1021,16 @@ static int acpi_processor_set_throttling_ptc(struct acpi_processor *pr,
 	return 0;
 }
 
-int acpi_processor_set_throttling(struct acpi_processor *pr, int state)
+int acpi_processor_set_throttling(struct acpi_processor *pr,
+						int state, bool force)
 {
-	cpumask_t saved_mask;
+	cpumask_var_t saved_mask;
 	int ret = 0;
 	unsigned int i;
 	struct acpi_processor *match_pr;
 	struct acpi_processor_throttling *p_throttling;
 	struct throttling_tstate t_state;
-	cpumask_t online_throttling_cpus;
+	cpumask_var_t online_throttling_cpus;
 
 	if (!pr)
 		return -EINVAL;
@@ -1003,17 +1041,25 @@ int acpi_processor_set_throttling(struct acpi_processor *pr, int state)
 	if ((state < 0) || (state > (pr->throttling.state_count - 1)))
 		return -EINVAL;
 
-	saved_mask = current->cpus_allowed;
+	if (!alloc_cpumask_var(&saved_mask, GFP_KERNEL))
+		return -ENOMEM;
+
+	if (!alloc_cpumask_var(&online_throttling_cpus, GFP_KERNEL)) {
+		free_cpumask_var(saved_mask);
+		return -ENOMEM;
+	}
+
+	cpumask_copy(saved_mask, &current->cpus_allowed);
 	t_state.target_state = state;
 	p_throttling = &(pr->throttling);
-	cpus_and(online_throttling_cpus, cpu_online_map,
-			p_throttling->shared_cpu_map);
+	cpumask_and(online_throttling_cpus, cpu_online_mask,
+		    p_throttling->shared_cpu_map);
 	/*
 	 * The throttling notifier will be called for every
 	 * affected cpu in order to get one proper T-state.
 	 * The notifier event is THROTTLING_PRECHANGE.
 	 */
-	for_each_cpu_mask_nr(i, online_throttling_cpus) {
+	for_each_cpu(i, online_throttling_cpus) {
 		t_state.cpu = i;
 		acpi_processor_throttling_notifier(THROTTLING_PRECHANGE,
 							&t_state);
@@ -1025,16 +1071,17 @@ int acpi_processor_set_throttling(struct acpi_processor *pr, int state)
 	 * it can be called only for the cpu pointed by pr.
 	 */
 	if (p_throttling->shared_type == DOMAIN_COORD_TYPE_SW_ANY) {
-		set_cpus_allowed_ptr(current, &cpumask_of_cpu(pr->id));
+		/* FIXME: use work_on_cpu() */
+		set_cpus_allowed_ptr(current, cpumask_of(pr->id));
 		ret = p_throttling->acpi_processor_set_throttling(pr,
-						t_state.target_state);
+						t_state.target_state, force);
 	} else {
 		/*
 		 * When the T-state coordination is SW_ALL or HW_ALL,
 		 * it is necessary to set T-state for every affected
 		 * cpus.
 		 */
-		for_each_cpu_mask_nr(i, online_throttling_cpus) {
+		for_each_cpu(i, online_throttling_cpus) {
 			match_pr = per_cpu(processors, i);
 			/*
 			 * If the pointer is invalid, we will report the
@@ -1056,10 +1103,11 @@ int acpi_processor_set_throttling(struct acpi_processor *pr, int state)
 				continue;
 			}
 			t_state.cpu = i;
-			set_cpus_allowed_ptr(current, &cpumask_of_cpu(i));
+			/* FIXME: use work_on_cpu() */
+			set_cpus_allowed_ptr(current, cpumask_of(i));
 			ret = match_pr->throttling.
 				acpi_processor_set_throttling(
-				match_pr, t_state.target_state);
+				match_pr, t_state.target_state, force);
 		}
 	}
 	/*
@@ -1068,13 +1116,16 @@ int acpi_processor_set_throttling(struct acpi_processor *pr, int state)
 	 * affected cpu to update the T-states.
 	 * The notifier event is THROTTLING_POSTCHANGE
 	 */
-	for_each_cpu_mask_nr(i, online_throttling_cpus) {
+	for_each_cpu(i, online_throttling_cpus) {
 		t_state.cpu = i;
 		acpi_processor_throttling_notifier(THROTTLING_POSTCHANGE,
 							&t_state);
 	}
 	/* restore the previous state */
-	set_cpus_allowed_ptr(current, &saved_mask);
+	/* FIXME: use work_on_cpu() */
+	set_cpus_allowed_ptr(current, saved_mask);
+	free_cpumask_var(online_throttling_cpus);
+	free_cpumask_var(saved_mask);
 	return ret;
 }
 
@@ -1088,9 +1139,6 @@ int acpi_processor_get_throttling_info(struct acpi_processor *pr)
 			  pr->throttling.address,
 			  pr->throttling.duty_offset,
 			  pr->throttling.duty_width));
-
-	if (!pr)
-		return -EINVAL;
 
 	/*
 	 * Evaluate _PTC, _TSS and _TPC
@@ -1120,7 +1168,7 @@ int acpi_processor_get_throttling_info(struct acpi_processor *pr)
 	if (acpi_processor_get_tsd(pr)) {
 		pthrottling = &pr->throttling;
 		pthrottling->tsd_valid_flag = 0;
-		cpu_set(pr->id, pthrottling->shared_cpu_map);
+		cpumask_set_cpu(pr->id, pthrottling->shared_cpu_map);
 		pthrottling->shared_type = DOMAIN_COORD_TYPE_SW_ALL;
 	}
 
@@ -1154,7 +1202,7 @@ int acpi_processor_get_throttling_info(struct acpi_processor *pr)
 		ACPI_DEBUG_PRINT((ACPI_DB_INFO,
 				  "Disabling throttling (was T%d)\n",
 				  pr->throttling.state));
-		result = acpi_processor_set_throttling(pr, 0);
+		result = acpi_processor_set_throttling(pr, 0, false);
 		if (result)
 			goto end;
 	}
@@ -1167,7 +1215,7 @@ int acpi_processor_get_throttling_info(struct acpi_processor *pr)
 }
 
 /* proc interface */
-
+#ifdef CONFIG_ACPI_PROCFS
 static int acpi_processor_throttling_seq_show(struct seq_file *seq,
 					      void *offset)
 {
@@ -1260,14 +1308,14 @@ static ssize_t acpi_processor_write_throttling(struct file *file,
 	if (strcmp(tmpbuf, charp) != 0)
 		return -EINVAL;
 
-	result = acpi_processor_set_throttling(pr, state_val);
+	result = acpi_processor_set_throttling(pr, state_val, false);
 	if (result)
 		return result;
 
 	return count;
 }
 
-struct file_operations acpi_processor_throttling_fops = {
+const struct file_operations acpi_processor_throttling_fops = {
 	.owner = THIS_MODULE,
 	.open = acpi_processor_throttling_open_fs,
 	.read = seq_read,
@@ -1275,3 +1323,4 @@ struct file_operations acpi_processor_throttling_fops = {
 	.llseek = seq_lseek,
 	.release = single_release,
 };
+#endif

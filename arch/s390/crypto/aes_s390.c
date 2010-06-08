@@ -17,6 +17,9 @@
  *
  */
 
+#define KMSG_COMPONENT "aes_s390"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+
 #include <crypto/aes.h>
 #include <crypto/algapi.h>
 #include <linux/err.h>
@@ -75,14 +78,14 @@ static int setkey_fallback_cip(struct crypto_tfm *tfm, const u8 *in_key,
 	struct s390_aes_ctx *sctx = crypto_tfm_ctx(tfm);
 	int ret;
 
-	sctx->fallback.blk->base.crt_flags &= ~CRYPTO_TFM_REQ_MASK;
-	sctx->fallback.blk->base.crt_flags |= (tfm->crt_flags &
+	sctx->fallback.cip->base.crt_flags &= ~CRYPTO_TFM_REQ_MASK;
+	sctx->fallback.cip->base.crt_flags |= (tfm->crt_flags &
 			CRYPTO_TFM_REQ_MASK);
 
 	ret = crypto_cipher_setkey(sctx->fallback.cip, in_key, key_len);
 	if (ret) {
 		tfm->crt_flags &= ~CRYPTO_TFM_RES_MASK;
-		tfm->crt_flags |= (sctx->fallback.blk->base.crt_flags &
+		tfm->crt_flags |= (sctx->fallback.cip->base.crt_flags &
 				CRYPTO_TFM_RES_MASK);
 	}
 	return ret;
@@ -169,8 +172,9 @@ static int fallback_init_cip(struct crypto_tfm *tfm)
 			CRYPTO_ALG_ASYNC | CRYPTO_ALG_NEED_FALLBACK);
 
 	if (IS_ERR(sctx->fallback.cip)) {
-		printk(KERN_ERR "Error allocating fallback algo %s\n", name);
-		return PTR_ERR(sctx->fallback.blk);
+		pr_err("Allocating AES fallback algorithm %s failed\n",
+		       name);
+		return PTR_ERR(sctx->fallback.cip);
 	}
 
 	return 0;
@@ -349,7 +353,8 @@ static int fallback_init_blk(struct crypto_tfm *tfm)
 			CRYPTO_ALG_ASYNC | CRYPTO_ALG_NEED_FALLBACK);
 
 	if (IS_ERR(sctx->fallback.blk)) {
-		printk(KERN_ERR "Error allocating fallback algo %s\n", name);
+		pr_err("Allocating AES fallback algorithm %s failed\n",
+		       name);
 		return PTR_ERR(sctx->fallback.blk);
 	}
 
@@ -515,9 +520,8 @@ static int __init aes_s390_init(void)
 
 	/* z9 109 and z9 BC/EC only support 128 bit key length */
 	if (keylen_flag == AES_KEYLEN_128)
-		printk(KERN_INFO
-		       "aes_s390: hardware acceleration only available for "
-		       "128 bit keys\n");
+		pr_info("AES hardware acceleration is only available for"
+			" 128-bit keys\n");
 
 	ret = crypto_register_alg(&aes_alg);
 	if (ret)
@@ -552,7 +556,7 @@ static void __exit aes_s390_fini(void)
 module_init(aes_s390_init);
 module_exit(aes_s390_fini);
 
-MODULE_ALIAS("aes");
+MODULE_ALIAS("aes-all");
 
 MODULE_DESCRIPTION("Rijndael (AES) Cipher Algorithm");
 MODULE_LICENSE("GPL");

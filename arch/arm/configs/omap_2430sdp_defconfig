@@ -197,7 +197,6 @@ CONFIG_MACH_OMAP_2430SDP=y
 #
 # Processor Type
 #
-CONFIG_CPU_32=y
 CONFIG_CPU_V6=y
 # CONFIG_CPU_32v6K is not set
 CONFIG_CPU_32v6=y
@@ -710,7 +709,7 @@ CONFIG_I2C_OMAP=y
 # CONFIG_SENSORS_DS1337 is not set
 # CONFIG_SENSORS_DS1374 is not set
 # CONFIG_DS1682 is not set
-# CONFIG_SENSORS_EEPROM is not set
+# CONFIG_EEPROM_LEGACY is not set
 # CONFIG_SENSORS_PCF8574 is not set
 # CONFIG_SENSORS_PCA9539 is not set
 # CONFIG_SENSORS_PCF8591 is not set
@@ -743,7 +742,7 @@ CONFIG_SPI_MASTER=y
 #
 # SPI Protocol Masters
 #
-# CONFIG_SPI_AT25 is not set
+# CONFIG_EEPROM_AT25 is not set
 # CONFIG_SPI_TSC2101 is not set
 # CONFIG_SPI_TSC2102 is not set
 # CONFIG_SPI_TSC210X is not set

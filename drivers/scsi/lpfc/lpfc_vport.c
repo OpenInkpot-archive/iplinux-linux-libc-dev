@@ -26,14 +26,17 @@
 #include <linux/interrupt.h>
 #include <linux/kthread.h>
 #include <linux/pci.h>
+#include <linux/slab.h>
 #include <linux/spinlock.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_device.h>
 #include <scsi/scsi_host.h>
 #include <scsi/scsi_transport_fc.h>
+#include "lpfc_hw4.h"
 #include "lpfc_hw.h"
 #include "lpfc_sli.h"
+#include "lpfc_sli4.h"
 #include "lpfc_nl.h"
 #include "lpfc_disc.h"
 #include "lpfc_scsi.h"
@@ -89,6 +92,8 @@ lpfc_alloc_vpi(struct lpfc_hba *phba)
 		vpi = 0;
 	else
 		set_bit(vpi, phba->vpi_bmask);
+	if (phba->sli_rev == LPFC_SLI_REV4)
+		phba->sli4_hba.max_cfg_param.vpi_used++;
 	spin_unlock_irq(&phba->hbalock);
 	return vpi;
 }
@@ -96,8 +101,12 @@ lpfc_alloc_vpi(struct lpfc_hba *phba)
 static void
 lpfc_free_vpi(struct lpfc_hba *phba, int vpi)
 {
+	if (vpi == 0)
+		return;
 	spin_lock_irq(&phba->hbalock);
 	clear_bit(vpi, phba->vpi_bmask);
+	if (phba->sli_rev == LPFC_SLI_REV4)
+		phba->sli4_hba.max_cfg_param.vpi_used--;
 	spin_unlock_irq(&phba->hbalock);
 }
 
@@ -113,9 +122,14 @@ lpfc_vport_sparm(struct lpfc_hba *phba, struct lpfc_vport *vport)
 	if (!pmb) {
 		return -ENOMEM;
 	}
-	mb = &pmb->mb;
+	mb = &pmb->u.mb;
 
-	lpfc_read_sparam(phba, pmb, vport->vpi);
+	rc = lpfc_read_sparam(phba, pmb, vport->vpi);
+	if (rc) {
+		mempool_free(pmb, phba->mbox_mem_pool);
+		return -ENOMEM;
+	}
+
 	/*
 	 * Grab buffer pointer and clear context1 so we can use
 	 * lpfc_sli_issue_box_wait
@@ -206,7 +220,7 @@ lpfc_unique_wwpn(struct lpfc_hba *phba, struct lpfc_vport *new_vport)
 }
 
 /**
- * lpfc_discovery_wait: Wait for driver discovery to quiesce.
+ * lpfc_discovery_wait - Wait for driver discovery to quiesce
  * @vport: The virtual port for which this call is being executed.
  *
  * This driver calls this routine specifically from lpfc_vport_delete
@@ -243,23 +257,22 @@ static void lpfc_discovery_wait(struct lpfc_vport *vport)
 		    (vport->fc_flag & wait_flags)  ||
 		    ((vport->port_state > LPFC_VPORT_FAILED) &&
 		     (vport->port_state < LPFC_VPORT_READY))) {
-			lpfc_printf_log(phba, KERN_INFO, LOG_VPORT,
+			lpfc_printf_vlog(vport, KERN_INFO, LOG_VPORT,
 					"1833 Vport discovery quiesce Wait:"
-					" vpi x%x state x%x fc_flags x%x"
+					" state x%x fc_flags x%x"
 					" num_nodes x%x, waiting 1000 msecs"
 					" total wait msecs x%x\n",
-					vport->vpi, vport->port_state,
-					vport->fc_flag, vport->num_disc_nodes,
+					vport->port_state, vport->fc_flag,
+					vport->num_disc_nodes,
 					jiffies_to_msecs(jiffies - start_time));
 			msleep(1000);
 		} else {
 			/* Base case.  Wait variants satisfied.  Break out */
-			lpfc_printf_log(phba, KERN_INFO, LOG_VPORT,
+			lpfc_printf_vlog(vport, KERN_INFO, LOG_VPORT,
 					 "1834 Vport discovery quiesced:"
-					 " vpi x%x state x%x fc_flags x%x"
+					 " state x%x fc_flags x%x"
 					 " wait msecs x%x\n",
-					 vport->vpi, vport->port_state,
-					 vport->fc_flag,
+					 vport->port_state, vport->fc_flag,
 					 jiffies_to_msecs(jiffies
 						- start_time));
 			break;
@@ -267,12 +280,10 @@ static void lpfc_discovery_wait(struct lpfc_vport *vport)
 	}
 
 	if (time_after(jiffies, wait_time_max))
-		lpfc_printf_log(phba, KERN_ERR, LOG_VPORT,
+		lpfc_printf_vlog(vport, KERN_ERR, LOG_VPORT,
 				"1835 Vport discovery quiesce failed:"
-				" vpi x%x state x%x fc_flags x%x"
-				" wait msecs x%x\n",
-				vport->vpi, vport->port_state,
-				vport->fc_flag,
+				" state x%x fc_flags x%x wait msecs x%x\n",
+				vport->port_state, vport->fc_flag,
 				jiffies_to_msecs(jiffies - start_time));
 }
 
@@ -288,10 +299,8 @@ lpfc_vport_create(struct fc_vport *fc_vport, bool disable)
 	int vpi;
 	int rc = VPORT_ERROR;
 	int status;
-	int size;
 
-	if ((phba->sli_rev < 3) ||
-		!(phba->sli3_options & LPFC_SLI3_NPIV_ENABLED)) {
+	if ((phba->sli_rev < 3) || !(phba->cfg_enable_npiv)) {
 		lpfc_printf_log(phba, KERN_ERR, LOG_VPORT,
 				"1808 Create VPORT failed: "
 				"NPIV is not enabled: SLImode:%d\n",
@@ -309,7 +318,6 @@ lpfc_vport_create(struct fc_vport *fc_vport, bool disable)
 		rc = VPORT_NORESOURCES;
 		goto error_out;
 	}
-
 
 	/* Assign an unused board number */
 	if ((instance = lpfc_get_instance()) < 0) {
@@ -349,26 +357,8 @@ lpfc_vport_create(struct fc_vport *fc_vport, bool disable)
 		goto error_out;
 	}
 
-	memcpy(vport->fc_portname.u.wwn, vport->fc_sparam.portName.u.wwn, 8);
-	memcpy(vport->fc_nodename.u.wwn, vport->fc_sparam.nodeName.u.wwn, 8);
-	size = strnlen(fc_vport->symbolic_name, LPFC_VNAME_LEN);
-	if (size) {
-		vport->vname = kzalloc(size+1, GFP_KERNEL);
-		if (!vport->vname) {
-			lpfc_printf_vlog(vport, KERN_ERR, LOG_VPORT,
-					 "1814 Create VPORT failed. "
-					 "vname allocation failed.\n");
-			rc = VPORT_ERROR;
-			lpfc_free_vpi(phba, vpi);
-			destroy_port(vport);
-			goto error_out;
-		}
-		memcpy(vport->vname, fc_vport->symbolic_name, size+1);
-	}
-	if (fc_vport->node_name != 0)
-		u64_to_wwn(fc_vport->node_name, vport->fc_nodename.u.wwn);
-	if (fc_vport->port_name != 0)
-		u64_to_wwn(fc_vport->port_name, vport->fc_portname.u.wwn);
+	u64_to_wwn(fc_vport->node_name, vport->fc_nodename.u.wwn);
+	u64_to_wwn(fc_vport->port_name, vport->fc_portname.u.wwn);
 
 	memcpy(&vport->fc_sparam.portName, vport->fc_portname.u.wwn, 8);
 	memcpy(&vport->fc_sparam.nodeName, vport->fc_nodename.u.wwn, 8);
@@ -394,10 +384,40 @@ lpfc_vport_create(struct fc_vport *fc_vport, bool disable)
 		goto error_out;
 	}
 
+	/* Create binary sysfs attribute for vport */
+	lpfc_alloc_sysfs_attr(vport);
+
 	*(struct lpfc_vport **)fc_vport->dd_data = vport;
 	vport->fc_vport = fc_vport;
 
+	/*
+	 * In SLI4, the vpi must be activated before it can be used
+	 * by the port.
+	 */
+	if ((phba->sli_rev == LPFC_SLI_REV4) &&
+		(pport->fc_flag & FC_VFI_REGISTERED)) {
+		rc = lpfc_sli4_init_vpi(phba, vpi);
+		if (rc) {
+			lpfc_printf_log(phba, KERN_ERR, LOG_VPORT,
+					"1838 Failed to INIT_VPI on vpi %d "
+					"status %d\n", vpi, rc);
+			rc = VPORT_NORESOURCES;
+			lpfc_free_vpi(phba, vpi);
+			goto error_out;
+		}
+	} else if (phba->sli_rev == LPFC_SLI_REV4) {
+		/*
+		 * Driver cannot INIT_VPI now. Set the flags to
+		 * init_vpi when reg_vfi complete.
+		 */
+		vport->fc_flag |= FC_VPORT_NEEDS_INIT_VPI;
+		lpfc_vport_set_state(vport, FC_VPORT_LINKDOWN);
+		rc = VPORT_OK;
+		goto out;
+	}
+
 	if ((phba->link_state < LPFC_LINK_UP) ||
+	    (pport->port_state < LPFC_FABRIC_CFG_LINK) ||
 	    (phba->fc_topology == TOPOLOGY_LOOP)) {
 		lpfc_vport_set_state(vport, FC_VPORT_LINKDOWN);
 		rc = VPORT_OK;
@@ -405,6 +425,7 @@ lpfc_vport_create(struct fc_vport *fc_vport, bool disable)
 	}
 
 	if (disable) {
+		lpfc_vport_set_state(vport, FC_VPORT_DISABLED);
 		rc = VPORT_OK;
 		goto out;
 	}
@@ -490,6 +511,7 @@ enable_vport(struct fc_vport *fc_vport)
 	struct lpfc_vport *vport = *(struct lpfc_vport **)fc_vport->dd_data;
 	struct lpfc_hba   *phba = vport->phba;
 	struct lpfc_nodelist *ndlp = NULL;
+	struct Scsi_Host *shost = lpfc_shost_from_vport(vport);
 
 	if ((phba->link_state < LPFC_LINK_UP) ||
 	    (phba->fc_topology == TOPOLOGY_LOOP)) {
@@ -497,8 +519,10 @@ enable_vport(struct fc_vport *fc_vport)
 		return VPORT_OK;
 	}
 
+	spin_lock_irq(shost->host_lock);
 	vport->load_flag |= FC_LOADING;
 	vport->fc_flag |= FC_VPORT_NEEDS_REG_VPI;
+	spin_unlock_irq(shost->host_lock);
 
 	/* Use the Physical nodes Fabric NDLP to determine if the link is
 	 * up and ready to FDISC.
@@ -547,6 +571,16 @@ lpfc_vport_delete(struct fc_vport *fc_vport)
 				 "physical host\n");
 		return VPORT_ERROR;
 	}
+
+	/* If the vport is a static vport fail the deletion. */
+	if ((vport->vport_flag & STATIC_VPORT) &&
+		!(phba->pport->load_flag & FC_UNLOADING)) {
+		lpfc_printf_vlog(vport, KERN_ERR, LOG_VPORT,
+				 "1837 vport_delete failed: Cannot delete "
+				 "static vport.\n");
+		return VPORT_ERROR;
+	}
+
 	/*
 	 * If we are not unloading the driver then prevent the vport_delete
 	 * from happening until after this vport's discovery is finished.
@@ -587,8 +621,12 @@ lpfc_vport_delete(struct fc_vport *fc_vport)
 	spin_lock_irq(&phba->hbalock);
 	vport->load_flag |= FC_UNLOADING;
 	spin_unlock_irq(&phba->hbalock);
-	kfree(vport->vname);
+
+	lpfc_free_sysfs_attr(vport);
+
 	lpfc_debugfs_terminate(vport);
+
+	/* Remove FC host and then SCSI host with the vport */
 	fc_remove_host(lpfc_shost_from_vport(vport));
 	scsi_remove_host(lpfc_shost_from_vport(vport));
 
@@ -639,7 +677,7 @@ lpfc_vport_delete(struct fc_vport *fc_vport)
 				lpfc_printf_log(vport->phba, KERN_WARNING,
 						LOG_VPORT,
 						"1829 CT command failed to "
-						"delete objects on fabric. \n");
+						"delete objects on fabric\n");
 		}
 		/* First look for the Fabric ndlp */
 		ndlp = lpfc_findnode_did(vport, Fabric_DID);
@@ -671,10 +709,10 @@ lpfc_vport_delete(struct fc_vport *fc_vport)
 			}
 			spin_unlock_irq(&phba->ndlp_lock);
 		}
+		if (!(vport->vpi_state & LPFC_VPI_REGISTERED))
+			goto skip_logo;
 		vport->unreg_vpi_cmpl = VPORT_INVAL;
 		timeout = msecs_to_jiffies(phba->fc_ratov * 2000);
-		if (ndlp->nlp_state == NLP_STE_UNUSED_NODE)
-			goto skip_logo;
 		if (!lpfc_issue_els_npiv_logo(vport, ndlp))
 			while (vport->unreg_vpi_cmpl == VPORT_INVAL && timeout)
 				timeout = schedule_timeout(timeout);
@@ -718,7 +756,7 @@ lpfc_create_vport_work_array(struct lpfc_hba *phba)
 	struct lpfc_vport *port_iterator;
 	struct lpfc_vport **vports;
 	int index = 0;
-	vports = kzalloc((phba->max_vpi + 1) * sizeof(struct lpfc_vport *),
+	vports = kzalloc((phba->max_vports + 1) * sizeof(struct lpfc_vport *),
 			 GFP_KERNEL);
 	if (vports == NULL)
 		return NULL;
@@ -742,14 +780,14 @@ lpfc_destroy_vport_work_array(struct lpfc_hba *phba, struct lpfc_vport **vports)
 	int i;
 	if (vports == NULL)
 		return;
-	for (i=0; vports[i] != NULL && i <= phba->max_vpi; i++)
+	for (i = 0; vports[i] != NULL && i <= phba->max_vports; i++)
 		scsi_host_put(lpfc_shost_from_vport(vports[i]));
 	kfree(vports);
 }
 
 
 /**
- * lpfc_vport_reset_stat_data: Reset the statistical data for the vport.
+ * lpfc_vport_reset_stat_data - Reset the statistical data for the vport
  * @vport: Pointer to vport object.
  *
  * This function resets the statistical data for the vport. This function
@@ -771,8 +809,7 @@ lpfc_vport_reset_stat_data(struct lpfc_vport *vport)
 
 
 /**
- * lpfc_alloc_bucket: Allocate data buffer required for collecting
- *  statistical data.
+ * lpfc_alloc_bucket - Allocate data buffer required for statistical data
  * @vport: Pointer to vport object.
  *
  * This function allocates data buffer required for all the FC
@@ -805,8 +842,7 @@ lpfc_alloc_bucket(struct lpfc_vport *vport)
 }
 
 /**
- * lpfc_free_bucket: Free data buffer required for collecting
- *  statistical data.
+ * lpfc_free_bucket - Free data buffer required for statistical data
  * @vport: Pointer to vport object.
  *
  * Th function frees statistical data buffer of all the FC

@@ -6,11 +6,13 @@
  * published by the Free Software Foundation.
  */
 
+#include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/poll.h>
 #include <linux/netdevice.h>
 #include <linux/types.h>
 #include <linux/skbuff.h>
+#include <linux/slab.h>
 
 #include <net/mac80211.h>
 #include "rate.h"
@@ -43,6 +45,7 @@ void rate_control_pid_event_tx_status(struct rc_pid_event_buffer *buf,
 {
 	union rc_pid_event_data evd;
 
+	evd.flags = stat->flags;
 	memcpy(&evd.tx_status, stat, sizeof(struct ieee80211_tx_info));
 	rate_control_pid_event(buf, RC_PID_EVENT_TYPE_TX_STATUS, &evd);
 }
@@ -167,8 +170,8 @@ static ssize_t rate_control_pid_events_read(struct file *file, char __user *buf,
 	switch (ev->type) {
 	case RC_PID_EVENT_TYPE_TX_STATUS:
 		p += snprintf(pb + p, length - p, "tx_status %u %u",
-			      ev->data.tx_status.status.excessive_retries,
-			      ev->data.tx_status.status.retry_count);
+			      !(ev->data.flags & IEEE80211_TX_STAT_ACK),
+			      ev->data.tx_status.status.rates[0].idx);
 		break;
 	case RC_PID_EVENT_TYPE_RATE_CHANGE:
 		p += snprintf(pb + p, length - p, "rate_change %d %d",
@@ -197,7 +200,7 @@ static ssize_t rate_control_pid_events_read(struct file *file, char __user *buf,
 
 #undef RC_PID_PRINT_BUF_SIZE
 
-static struct file_operations rc_pid_fop_events = {
+static const struct file_operations rc_pid_fop_events = {
 	.owner = THIS_MODULE,
 	.read = rate_control_pid_events_read,
 	.poll = rate_control_pid_events_poll,

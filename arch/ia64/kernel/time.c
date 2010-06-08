@@ -20,6 +20,7 @@
 #include <linux/efi.h>
 #include <linux/timex.h>
 #include <linux/clocksource.h>
+#include <linux/platform_device.h>
 
 #include <asm/machvec.h>
 #include <asm/delay.h>
@@ -32,7 +33,7 @@
 
 #include "fsyscall_gtod_data.h"
 
-static cycle_t itc_get_cycles(void);
+static cycle_t itc_get_cycles(struct clocksource *cs);
 
 struct fsyscall_gtod_data_t fsyscall_gtod_data = {
 	.lock = SEQLOCK_UNLOCKED,
@@ -50,8 +51,17 @@ EXPORT_SYMBOL(last_cli_ip);
 #endif
 
 #ifdef CONFIG_PARAVIRT
+/* We need to define a real function for sched_clock, to override the
+   weak default version */
+unsigned long long sched_clock(void)
+{
+        return paravirt_sched_clock();
+}
+#endif
+
+#ifdef CONFIG_PARAVIRT
 static void
-paravirt_clocksource_resume(void)
+paravirt_clocksource_resume(struct clocksource *cs)
 {
 	if (pv_time_ops.clocksource_resume)
 		pv_time_ops.clocksource_resume();
@@ -93,13 +103,14 @@ void ia64_account_on_switch(struct task_struct *prev, struct task_struct *next)
 	now = ia64_get_itc();
 
 	delta_stime = cycle_to_cputime(pi->ac_stime + (now - pi->ac_stamp));
-	account_system_time(prev, 0, delta_stime);
-	account_system_time_scaled(prev, delta_stime);
+	if (idle_task(smp_processor_id()) != prev)
+		account_system_time(prev, 0, delta_stime, delta_stime);
+	else
+		account_idle_time(delta_stime);
 
 	if (pi->ac_utime) {
 		delta_utime = cycle_to_cputime(pi->ac_utime);
-		account_user_time(prev, delta_utime);
-		account_user_time_scaled(prev, delta_utime);
+		account_user_time(prev, delta_utime, delta_utime);
 	}
 
 	pi->ac_stamp = ni->ac_stamp = now;
@@ -122,8 +133,10 @@ void account_system_vtime(struct task_struct *tsk)
 	now = ia64_get_itc();
 
 	delta_stime = cycle_to_cputime(ti->ac_stime + (now - ti->ac_stamp));
-	account_system_time(tsk, 0, delta_stime);
-	account_system_time_scaled(tsk, delta_stime);
+	if (irq_count() || idle_task(smp_processor_id()) != tsk)
+		account_system_time(tsk, 0, delta_stime, delta_stime);
+	else
+		account_idle_time(delta_stime);
 	ti->ac_stime = 0;
 
 	ti->ac_stamp = now;
@@ -143,8 +156,7 @@ void account_process_tick(struct task_struct *p, int user_tick)
 
 	if (ti->ac_utime) {
 		delta_utime = cycle_to_cputime(ti->ac_utime);
-		account_user_time(p, delta_utime);
-		account_user_time_scaled(p, delta_utime);
+		account_user_time(p, delta_utime, delta_utime);
 		ti->ac_utime = 0;
 	}
 }
@@ -371,9 +383,9 @@ ia64_init_itm (void)
 	}
 }
 
-static cycle_t itc_get_cycles(void)
+static cycle_t itc_get_cycles(struct clocksource *cs)
 {
-	u64 lcycle, now, ret;
+	unsigned long lcycle, now, ret;
 
 	if (!itc_jitter_data.itc_jitter)
 		return get_cycles();
@@ -402,6 +414,21 @@ static struct irqaction timer_irqaction = {
 	.flags =	IRQF_DISABLED | IRQF_IRQPOLL,
 	.name =		"timer"
 };
+
+static struct platform_device rtc_efi_dev = {
+	.name = "rtc-efi",
+	.id = -1,
+};
+
+static int __init rtc_init(void)
+{
+	if (platform_device_register(&rtc_efi_dev) < 0)
+		printk(KERN_ERR "unable to register rtc device...\n");
+
+	/* not necessarily an error */
+	return 0;
+}
+module_init(rtc_init);
 
 void __init
 time_init (void)
@@ -446,7 +473,7 @@ void update_vsyscall_tz(void)
 {
 }
 
-void update_vsyscall(struct timespec *wall, struct clocksource *c)
+void update_vsyscall(struct timespec *wall, struct clocksource *c, u32 mult)
 {
         unsigned long flags;
 
@@ -454,7 +481,7 @@ void update_vsyscall(struct timespec *wall, struct clocksource *c)
 
         /* copy fsyscall clock data */
         fsyscall_gtod_data.clk_mask = c->mask;
-        fsyscall_gtod_data.clk_mult = c->mult;
+        fsyscall_gtod_data.clk_mult = mult;
         fsyscall_gtod_data.clk_shift = c->shift;
         fsyscall_gtod_data.clk_fsys_mmio = c->fsys_mmio;
         fsyscall_gtod_data.clk_cycle_last = c->cycle_last;

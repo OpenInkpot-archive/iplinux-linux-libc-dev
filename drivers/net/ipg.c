@@ -22,6 +22,7 @@
  */
 #include <linux/crc32.h>
 #include <linux/ethtool.h>
+#include <linux/gfp.h>
 #include <linux/mii.h>
 #include <linux/mutex.h>
 
@@ -88,17 +89,15 @@ static const char *ipg_brand_name[] = {
 	"Sundance Technology ST2021 based NIC",
 	"Tamarack Microelectronics TC9020/9021 based NIC",
 	"Tamarack Microelectronics TC9020/9021 based NIC",
-	"D-Link NIC",
 	"D-Link NIC IP1000A"
 };
 
-static struct pci_device_id ipg_pci_tbl[] __devinitdata = {
+static DEFINE_PCI_DEVICE_TABLE(ipg_pci_tbl) = {
 	{ PCI_VDEVICE(SUNDANCE,	0x1023), 0 },
 	{ PCI_VDEVICE(SUNDANCE,	0x2021), 1 },
 	{ PCI_VDEVICE(SUNDANCE,	0x1021), 2 },
 	{ PCI_VDEVICE(DLINK,	0x9021), 3 },
-	{ PCI_VDEVICE(DLINK,	0x4000), 4 },
-	{ PCI_VDEVICE(DLINK,	0x4020), 5 },
+	{ PCI_VDEVICE(DLINK,	0x4020), 4 },
 	{ 0, }
 };
 
@@ -585,11 +584,11 @@ static void ipg_nic_set_multicast_list(struct net_device *dev)
 		receivemode = IPG_RM_RECEIVEALLFRAMES;
 	} else if ((dev->flags & IFF_ALLMULTI) ||
 		   ((dev->flags & IFF_MULTICAST) &&
-		    (dev->mc_count > IPG_MULTICAST_HASHTABLE_SIZE))) {
+		    (netdev_mc_count(dev) > IPG_MULTICAST_HASHTABLE_SIZE))) {
 		/* NIC to be configured to receive all multicast
 		 * frames. */
 		receivemode |= IPG_RM_RECEIVEMULTICAST;
-	} else if ((dev->flags & IFF_MULTICAST) && (dev->mc_count > 0)) {
+	} else if ((dev->flags & IFF_MULTICAST) && !netdev_mc_empty(dev)) {
 		/* NIC to be configured to receive selected
 		 * multicast addresses. */
 		receivemode |= IPG_RM_RECEIVEMULTICASTHASH;
@@ -610,8 +609,7 @@ static void ipg_nic_set_multicast_list(struct net_device *dev)
 	hashtable[1] = 0x00000000;
 
 	/* Cycle through all multicast addresses to filter. */
-	for (mc_list_ptr = dev->mc_list;
-	     mc_list_ptr != NULL; mc_list_ptr = mc_list_ptr->next) {
+	netdev_for_each_mc_addr(mc_list_ptr, dev) {
 		/* Calculate CRC result for each multicast address. */
 		hashindex = crc32_le(0xffffffff, mc_list_ptr->dmi_addr,
 				     ETH_ALEN);
@@ -738,16 +736,11 @@ static int ipg_get_rxbuff(struct net_device *dev, int entry)
 
 	IPG_DEBUG_MSG("_get_rxbuff\n");
 
-	skb = netdev_alloc_skb(dev, sp->rxsupport_size + NET_IP_ALIGN);
+	skb = netdev_alloc_skb_ip_align(dev, sp->rxsupport_size);
 	if (!skb) {
 		sp->rx_buff[entry] = NULL;
 		return -ENOMEM;
 	}
-
-	/* Adjust the data start location within the buffer to
-	 * align IP address field to a 16 byte boundary.
-	 */
-	skb_reserve(skb, NET_IP_ALIGN);
 
 	/* Associate the receive buffer with the IPG NIC. */
 	skb->dev = dev;
@@ -1222,7 +1215,6 @@ static void ipg_nic_rx_with_start_and_end(struct net_device *dev,
 	skb->protocol = eth_type_trans(skb, dev);
 	skb->ip_summed = CHECKSUM_NONE;
 	netif_rx(skb);
-	dev->last_rx = jiffies;
 	sp->rx_buff[entry] = NULL;
 }
 
@@ -1256,7 +1248,6 @@ static void ipg_nic_rx_with_start(struct net_device *dev,
 	jumbo->skb = skb;
 
 	sp->rx_buff[entry] = NULL;
-	dev->last_rx = jiffies;
 }
 
 static void ipg_nic_rx_with_end(struct net_device *dev,
@@ -1292,7 +1283,6 @@ static void ipg_nic_rx_with_end(struct net_device *dev,
 			}
 		}
 
-		dev->last_rx = jiffies;
 		jumbo->found_start = 0;
 		jumbo->current_size = 0;
 		jumbo->skb = NULL;
@@ -1325,7 +1315,6 @@ static void ipg_nic_rx_no_start_no_end(struct net_device *dev,
 					       skb->data, sp->rxfrag_size);
 				}
 			}
-			dev->last_rx = jiffies;
 			ipg_nic_rx_free_skb(dev);
 		}
 	} else {
@@ -1494,11 +1483,6 @@ static int ipg_nic_rx(struct net_device *dev)
 			 * when processing completes.
 			 */
 			netif_rx(skb);
-
-			/* Record frame receive time (jiffies = Linux
-			 * kernel current time stamp).
-			 */
-			dev->last_rx = jiffies;
 		}
 
 		/* Assure RX buffer is not reused by IPG. */
@@ -1765,7 +1749,7 @@ static int ipg_nic_open(struct net_device *dev)
 	/* Register the interrupt line to be used by the IPG within
 	 * the Linux system.
 	 */
-	rc = request_irq(pdev->irq, &ipg_interrupt_handler, IRQF_SHARED,
+	rc = request_irq(pdev->irq, ipg_interrupt_handler, IRQF_SHARED,
 			 dev->name, dev);
 	if (rc < 0) {
 		printk(KERN_INFO "%s: Error when requesting interrupt.\n",
@@ -1867,7 +1851,8 @@ static int ipg_nic_stop(struct net_device *dev)
 	return 0;
 }
 
-static int ipg_nic_hard_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t ipg_nic_hard_start_xmit(struct sk_buff *skb,
+					   struct net_device *dev)
 {
 	struct ipg_nic_private *sp = netdev_priv(dev);
 	void __iomem *ioaddr = sp->ioaddr;
@@ -2194,7 +2179,7 @@ static int ipg_nway_reset(struct net_device *dev)
 	return rc;
 }
 
-static struct ethtool_ops ipg_ethtool_ops = {
+static const struct ethtool_ops ipg_ethtool_ops = {
 	.get_settings = ipg_get_settings,
 	.set_settings = ipg_set_settings,
 	.nway_reset   = ipg_nway_reset,
@@ -2219,6 +2204,19 @@ static void __devexit ipg_remove(struct pci_dev *pdev)
 	pci_set_drvdata(pdev, NULL);
 }
 
+static const struct net_device_ops ipg_netdev_ops = {
+	.ndo_open		= ipg_nic_open,
+	.ndo_stop		= ipg_nic_stop,
+	.ndo_start_xmit		= ipg_nic_hard_start_xmit,
+	.ndo_get_stats		= ipg_nic_get_stats,
+	.ndo_set_multicast_list = ipg_nic_set_multicast_list,
+	.ndo_do_ioctl		= ipg_ioctl,
+	.ndo_tx_timeout 	= ipg_tx_timeout,
+	.ndo_change_mtu 	= ipg_nic_change_mtu,
+	.ndo_set_mac_address	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
 static int __devinit ipg_probe(struct pci_dev *pdev,
 			       const struct pci_device_id *id)
 {
@@ -2236,9 +2234,9 @@ static int __devinit ipg_probe(struct pci_dev *pdev,
 
 	pci_set_master(pdev);
 
-	rc = pci_set_dma_mask(pdev, DMA_40BIT_MASK);
+	rc = pci_set_dma_mask(pdev, DMA_BIT_MASK(40));
 	if (rc < 0) {
-		rc = pci_set_dma_mask(pdev, DMA_32BIT_MASK);
+		rc = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
 		if (rc < 0) {
 			printk(KERN_ERR "%s: DMA config failed.\n",
 			       pci_name(pdev));
@@ -2267,15 +2265,7 @@ static int __devinit ipg_probe(struct pci_dev *pdev,
 
 	/* Declare IPG NIC functions for Ethernet device methods.
 	 */
-	dev->open = &ipg_nic_open;
-	dev->stop = &ipg_nic_stop;
-	dev->hard_start_xmit = &ipg_nic_hard_start_xmit;
-	dev->get_stats = &ipg_nic_get_stats;
-	dev->set_multicast_list = &ipg_nic_set_multicast_list;
-	dev->do_ioctl = ipg_ioctl;
-	dev->tx_timeout = ipg_tx_timeout;
-	dev->change_mtu = &ipg_nic_change_mtu;
-
+	dev->netdev_ops = &ipg_netdev_ops;
 	SET_NETDEV_DEV(dev, &pdev->dev);
 	SET_ETHTOOL_OPS(dev, &ipg_ethtool_ops);
 

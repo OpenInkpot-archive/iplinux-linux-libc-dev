@@ -38,6 +38,7 @@
 #include <asm/time.h>
 #include <asm/serial.h>
 #include <asm/udbg.h>
+#include <asm/mmu_context.h>
 
 #include "setup.h"
 
@@ -49,11 +50,11 @@ int boot_cpuid;
 EXPORT_SYMBOL_GPL(boot_cpuid);
 int boot_cpuid_phys;
 
+int smp_hw_index[NR_CPUS];
+
 unsigned long ISA_DMA_THRESHOLD;
 unsigned int DMA_MODE_READ;
 unsigned int DMA_MODE_WRITE;
-
-int have_of = 1;
 
 #ifdef CONFIG_VGA_CONSOLE
 unsigned long vgacon_remap_base;
@@ -97,6 +98,10 @@ notrace unsigned long __init early_init(unsigned long dt_ptr)
 			  PTRRELOC(&__start___ftr_fixup),
 			  PTRRELOC(&__stop___ftr_fixup));
 
+	do_feature_fixups(spec->mmu_features,
+			  PTRRELOC(&__start___mmu_ftr_fixup),
+			  PTRRELOC(&__stop___mmu_ftr_fixup));
+
 	do_lwsync_fixups(spec->cpu_features,
 			 PTRRELOC(&__start___lwsync_fixup),
 			 PTRRELOC(&__stop___lwsync_fixup));
@@ -113,6 +118,8 @@ notrace unsigned long __init early_init(unsigned long dt_ptr)
  */
 notrace void __init machine_init(unsigned long dt_ptr)
 {
+	lockdep_init();
+
 	/* Enable early debugging if any specified (see udbg.h) */
 	udbg_early_init();
 
@@ -120,6 +127,8 @@ notrace void __init machine_init(unsigned long dt_ptr)
 	early_init_devtree(__va(dt_ptr));
 
 	probe_machine();
+
+	setup_kdump_trampoline();
 
 #ifdef CONFIG_6xx
 	if (cpu_has_feature(CPU_FTR_CAN_DOZE) ||
@@ -199,6 +208,14 @@ void nvram_write_byte(unsigned char val, int addr)
 		ppc_md.nvram_write_val(addr, val);
 }
 EXPORT_SYMBOL(nvram_write_byte);
+
+ssize_t nvram_get_size(void)
+{
+	if (ppc_md.nvram_size)
+		return ppc_md.nvram_size();
+	return -1;
+}
+EXPORT_SYMBOL(nvram_get_size);
 
 void nvram_sync(void)
 {
@@ -326,4 +343,8 @@ void __init setup_arch(char **cmdline_p)
 	if ( ppc_md.progress ) ppc_md.progress("arch: exit", 0x3eab);
 
 	paging_init();
+
+	/* Initialize the MMU context management stuff */
+	mmu_context_init();
+
 }

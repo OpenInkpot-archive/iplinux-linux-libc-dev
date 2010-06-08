@@ -13,16 +13,23 @@
 #include <linux/init.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
+#include <linux/smc91x.h>
 
 #include <mach/hardware.h>
 
-#include <mach/board.h>
+#include <plat/board.h>
 #include <mach/gpio.h>
 
 
 /* Many OMAP development platforms reuse the same "debug board"; these
  * platforms include H2, H3, H4, and Perseus2.
  */
+
+static struct smc91x_platdata smc91x_info = {
+	.flags	= SMC91X_USE_16BIT | SMC91X_NOWAIT,
+	.leda	= RPC_LED_100_10,
+	.ledb	= RPC_LED_TX_RX,
+};
 
 static struct resource smc91x_resources[] = {
 	[0] = {
@@ -36,6 +43,9 @@ static struct resource smc91x_resources[] = {
 static struct platform_device smc91x_device = {
 	.name		= "smc91x",
 	.id		= -1,
+	.dev		= {
+		.platform_data = &smc91x_info,
+	},
 	.num_resources	= ARRAY_SIZE(smc91x_resources),
 	.resource	= smc91x_resources,
 };
@@ -69,15 +79,15 @@ int __init debug_card_init(u32 addr, unsigned gpio)
 	smc91x_resources[0].start = addr + 0x300;
 	smc91x_resources[0].end   = addr + 0x30f;
 
-	smc91x_resources[1].start = OMAP_GPIO_IRQ(gpio);
-	smc91x_resources[1].end   = OMAP_GPIO_IRQ(gpio);
+	smc91x_resources[1].start = gpio_to_irq(gpio);
+	smc91x_resources[1].end   = gpio_to_irq(gpio);
 
-	status = omap_request_gpio(gpio);
+	status = gpio_request(gpio, "SMC91x irq");
 	if (status < 0) {
 		printk(KERN_ERR "GPIO%d unavailable for smc91x IRQ\n", gpio);
 		return status;
 	}
-	omap_set_gpio_direction(gpio, 1);
+	gpio_direction_input(gpio);
 
 	led_resources[0].start = addr;
 	led_resources[0].end   = addr + SZ_4K - 1;

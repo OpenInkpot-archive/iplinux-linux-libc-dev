@@ -58,6 +58,12 @@ static irqreturn_t at91rm9200_timer_interrupt(int irq, void *dev_id)
 {
 	u32	sr = at91_sys_read(AT91_ST_SR) & irqmask;
 
+	/*
+	 * irqs should be disabled here, but as the irq is shared they are only
+	 * guaranteed to be off if the timer irq is registered first.
+	 */
+	WARN_ON_ONCE(!irqs_disabled());
+
 	/* simulate "oneshot" timer with alarm */
 	if (sr & AT91_ST_ALMS) {
 		clkevt.event_handler(&clkevt);
@@ -85,7 +91,7 @@ static struct irqaction at91rm9200_timer_irq = {
 	.handler	= at91rm9200_timer_interrupt
 };
 
-static cycle_t read_clk32k(void)
+static cycle_t read_clk32k(struct clocksource *cs)
 {
 	return read_CRTR();
 }
@@ -132,14 +138,10 @@ clkevt32k_mode(enum clock_event_mode mode, struct clock_event_device *dev)
 static int
 clkevt32k_next_event(unsigned long delta, struct clock_event_device *dev)
 {
-	unsigned long	flags;
 	u32		alm;
 	int		status = 0;
 
 	BUG_ON(delta < 2);
-
-	/* Use "raw" primitives so we behave correctly on RT kernels. */
-	raw_local_irq_save(flags);
 
 	/* The alarm IRQ uses absolute time (now+delta), not the relative
 	 * time (delta) in our calling convention.  Like all clockevents
@@ -160,7 +162,6 @@ clkevt32k_next_event(unsigned long delta, struct clock_event_device *dev)
 	alm += delta;
 	at91_sys_write(AT91_ST_RTAR, alm);
 
-	raw_local_irq_restore(flags);
 	return status;
 }
 
@@ -169,7 +170,6 @@ static struct clock_event_device clkevt = {
 	.features	= CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT,
 	.shift		= 32,
 	.rating		= 150,
-	.cpumask	= CPU_MASK_CPU0,
 	.set_next_event	= clkevt32k_next_event,
 	.set_mode	= clkevt32k_mode,
 };
@@ -197,7 +197,7 @@ void __init at91rm9200_timer_init(void)
 	clkevt.mult = div_sc(AT91_SLOW_CLOCK, NSEC_PER_SEC, clkevt.shift);
 	clkevt.max_delta_ns = clockevent_delta2ns(AT91_ST_ALMV, &clkevt);
 	clkevt.min_delta_ns = clockevent_delta2ns(2, &clkevt) + 1;
-	clkevt.cpumask = cpumask_of_cpu(0);
+	clkevt.cpumask = cpumask_of(0);
 	clockevents_register_device(&clkevt);
 
 	/* register clocksource */

@@ -15,20 +15,17 @@
 
 #define PHYS_OFFSET	UL(0x00000000)
 
-/*
- * Virtual view <-> DMA view memory address translations
- * virt_to_bus: Used to translate the virtual address to an
- *		address suitable to be passed to set_dma_addr
- * bus_to_virt: Used to convert an address for DMA operations
- *		to an address that the kernel can use.
- */
 #include <mach/ixp2000-regs.h>
 
-#define __virt_to_bus(v) \
-	(((__virt_to_phys(v) - 0x0) + (*IXP2000_PCI_SDRAM_BAR & 0xfffffff0)))
+#define IXP2000_PCI_SDRAM_OFFSET	(*IXP2000_PCI_SDRAM_BAR & 0xfffffff0)
 
-#define __bus_to_virt(b) \
-	__phys_to_virt((((b - (*IXP2000_PCI_SDRAM_BAR & 0xfffffff0)) + 0x0)))
+#define __phys_to_bus(x)	((x) + (IXP2000_PCI_SDRAM_OFFSET - PHYS_OFFSET))
+#define __bus_to_phys(x)	((x) - (IXP2000_PCI_SDRAM_OFFSET - PHYS_OFFSET))
+
+#define __virt_to_bus(v)	__phys_to_bus(__virt_to_phys(v))
+#define __bus_to_virt(b)	__phys_to_virt(__bus_to_phys(b))
+#define __pfn_to_bus(p)		__phys_to_bus(__pfn_to_phys(p))
+#define __bus_to_pfn(b)		__phys_to_pfn(__bus_to_phys(b))
 
 #endif
 

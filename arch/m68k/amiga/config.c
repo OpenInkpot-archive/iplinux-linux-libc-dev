@@ -480,7 +480,7 @@ static void __init amiga_sched_init(irq_handler_t timer_routine)
 	static struct resource sched_res = {
 		.name = "timer", .start = 0x00bfd400, .end = 0x00bfd5ff,
 	};
-	jiffy_ticks = (amiga_eclock+HZ/2)/HZ;
+	jiffy_ticks = DIV_ROUND_CLOSEST(amiga_eclock, HZ);
 
 	if (request_resource(&mb_resources._ciab, &sched_res))
 		printk("Cannot allocate ciab.ta{lo,hi}\n");
@@ -493,7 +493,8 @@ static void __init amiga_sched_init(irq_handler_t timer_routine)
 	 * Please don't change this to use ciaa, as it interferes with the
 	 * SCSI code. We'll have to take a look at this later
 	 */
-	request_irq(IRQ_AMIGA_CIAB_TA, timer_routine, 0, "timer", NULL);
+	if (request_irq(IRQ_AMIGA_CIAB_TA, timer_routine, 0, "timer", NULL))
+		pr_err("Couldn't register timer interrupt\n");
 	/* start timer */
 	ciab.cra |= 0x11;
 }
@@ -573,10 +574,11 @@ static int a2000_hwclk(int op, struct rtc_time *t)
 
 	tod_2000.cntrl1 = TOD2000_CNTRL1_HOLD;
 
-	while ((tod_2000.cntrl1 & TOD2000_CNTRL1_BUSY) && cnt--) {
+	while ((tod_2000.cntrl1 & TOD2000_CNTRL1_BUSY) && cnt) {
 		tod_2000.cntrl1 &= ~TOD2000_CNTRL1_HOLD;
 		udelay(70);
 		tod_2000.cntrl1 |= TOD2000_CNTRL1_HOLD;
+		--cnt;
 	}
 
 	if (!cnt)
@@ -648,10 +650,11 @@ static int amiga_set_clock_mmss(unsigned long nowtime)
 
 		tod_2000.cntrl1 |= TOD2000_CNTRL1_HOLD;
 
-		while ((tod_2000.cntrl1 & TOD2000_CNTRL1_BUSY) && cnt--) {
+		while ((tod_2000.cntrl1 & TOD2000_CNTRL1_BUSY) && cnt) {
 			tod_2000.cntrl1 &= ~TOD2000_CNTRL1_HOLD;
 			udelay(70);
 			tod_2000.cntrl1 |= TOD2000_CNTRL1_HOLD;
+			--cnt;
 		}
 
 		if (!cnt)

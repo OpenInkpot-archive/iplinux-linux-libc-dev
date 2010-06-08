@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2006-2008 Red Hat, Inc.  All rights reserved.
+ * Copyright (C) 2006-2010 Red Hat, Inc.  All rights reserved.
  *
  * This copyrighted material is made available to anyone wishing to use,
  * modify, copy, or redistribute it subject to the terms and conditions
@@ -17,6 +17,7 @@
 #include <linux/spinlock.h>
 #include <linux/dlm.h>
 #include <linux/dlm_device.h>
+#include <linux/slab.h>
 
 #include "dlm_internal.h"
 #include "lockspace.h"
@@ -84,7 +85,7 @@ struct dlm_lock_result32 {
 
 static void compat_input(struct dlm_write_request *kb,
 			 struct dlm_write_request32 *kb32,
-			 size_t count)
+			 int namelen)
 {
 	kb->version[0] = kb32->version[0];
 	kb->version[1] = kb32->version[1];
@@ -96,8 +97,7 @@ static void compat_input(struct dlm_write_request *kb,
 	    kb->cmd == DLM_USER_REMOVE_LOCKSPACE) {
 		kb->i.lspace.flags = kb32->i.lspace.flags;
 		kb->i.lspace.minor = kb32->i.lspace.minor;
-		memcpy(kb->i.lspace.name, kb32->i.lspace.name, count -
-			offsetof(struct dlm_write_request32, i.lspace.name));
+		memcpy(kb->i.lspace.name, kb32->i.lspace.name, namelen);
 	} else if (kb->cmd == DLM_USER_PURGE) {
 		kb->i.purge.nodeid = kb32->i.purge.nodeid;
 		kb->i.purge.pid = kb32->i.purge.pid;
@@ -115,8 +115,7 @@ static void compat_input(struct dlm_write_request *kb,
 		kb->i.lock.bastaddr = (void *)(long)kb32->i.lock.bastaddr;
 		kb->i.lock.lksb = (void *)(long)kb32->i.lock.lksb;
 		memcpy(kb->i.lock.lvb, kb32->i.lock.lvb, DLM_USER_LVB_LEN);
-		memcpy(kb->i.lock.name, kb32->i.lock.name, count -
-			offsetof(struct dlm_write_request32, i.lock.name));
+		memcpy(kb->i.lock.name, kb32->i.lock.name, namelen);
 	}
 }
 
@@ -175,7 +174,7 @@ static int lkb_is_endoflife(struct dlm_lkb *lkb, int sb_status, int type)
 /* we could possibly check if the cancel of an orphan has resulted in the lkb
    being removed and then remove that lkb from the orphans list and free it */
 
-void dlm_user_add_ast(struct dlm_lkb *lkb, int type)
+void dlm_user_add_ast(struct dlm_lkb *lkb, int type, int mode)
 {
 	struct dlm_ls *ls;
 	struct dlm_user_args *ua;
@@ -208,6 +207,10 @@ void dlm_user_add_ast(struct dlm_lkb *lkb, int type)
 
 	ast_type = lkb->lkb_ast_type;
 	lkb->lkb_ast_type |= type;
+	if (type == AST_BAST)
+		lkb->lkb_bastmode = mode;
+	else
+		lkb->lkb_castmode = mode;
 
 	if (!ast_type) {
 		kref_get(&lkb->lkb_ref);
@@ -267,7 +270,7 @@ static int device_user_lock(struct dlm_user_proc *proc,
 		goto out;
 	}
 
-	ua = kzalloc(sizeof(struct dlm_user_args), GFP_KERNEL);
+	ua = kzalloc(sizeof(struct dlm_user_args), GFP_NOFS);
 	if (!ua)
 		goto out;
 	ua->proc = proc;
@@ -307,7 +310,7 @@ static int device_user_unlock(struct dlm_user_proc *proc,
 	if (!ls)
 		return -ENOENT;
 
-	ua = kzalloc(sizeof(struct dlm_user_args), GFP_KERNEL);
+	ua = kzalloc(sizeof(struct dlm_user_args), GFP_NOFS);
 	if (!ua)
 		goto out;
 	ua->proc = proc;
@@ -352,7 +355,7 @@ static int dlm_device_register(struct dlm_ls *ls, char *name)
 
 	error = -ENOMEM;
 	len = strlen(name) + strlen(name_prefix) + 2;
-	ls->ls_device.name = kzalloc(len, GFP_KERNEL);
+	ls->ls_device.name = kzalloc(len, GFP_NOFS);
 	if (!ls->ls_device.name)
 		goto fail;
 
@@ -520,7 +523,7 @@ static ssize_t device_write(struct file *file, const char __user *buf,
 #endif
 		return -EINVAL;
 
-	kbuf = kzalloc(count + 1, GFP_KERNEL);
+	kbuf = kzalloc(count + 1, GFP_NOFS);
 	if (!kbuf)
 		return -ENOMEM;
 
@@ -537,9 +540,16 @@ static ssize_t device_write(struct file *file, const char __user *buf,
 #ifdef CONFIG_COMPAT
 	if (!kbuf->is64bit) {
 		struct dlm_write_request32 *k32buf;
+		int namelen = 0;
+
+		if (count > sizeof(struct dlm_write_request32))
+			namelen = count - sizeof(struct dlm_write_request32);
+
 		k32buf = (struct dlm_write_request32 *)kbuf;
-		kbuf = kmalloc(count + 1 + (sizeof(struct dlm_write_request) -
-			       sizeof(struct dlm_write_request32)), GFP_KERNEL);
+
+		/* add 1 after namelen so that the name string is terminated */
+		kbuf = kzalloc(sizeof(struct dlm_write_request) + namelen + 1,
+			       GFP_NOFS);
 		if (!kbuf) {
 			kfree(k32buf);
 			return -ENOMEM;
@@ -547,7 +557,8 @@ static ssize_t device_write(struct file *file, const char __user *buf,
 
 		if (proc)
 			set_bit(DLM_PROC_FLAGS_COMPAT, &proc->flags);
-		compat_input(kbuf, k32buf, count + 1);
+
+		compat_input(kbuf, k32buf, namelen);
 		kfree(k32buf);
 	}
 #endif
@@ -640,7 +651,7 @@ static int device_open(struct inode *inode, struct file *file)
 	if (!ls)
 		return -ENOENT;
 
-	proc = kzalloc(sizeof(struct dlm_user_proc), GFP_KERNEL);
+	proc = kzalloc(sizeof(struct dlm_user_proc), GFP_NOFS);
 	if (!proc) {
 		dlm_put_lockspace(ls);
 		return -ENOMEM;

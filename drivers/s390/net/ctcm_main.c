@@ -1,7 +1,7 @@
 /*
  * drivers/s390/net/ctcm_main.c
  *
- * Copyright IBM Corp. 2001, 2007
+ * Copyright IBM Corp. 2001, 2009
  * Author(s):
  *	Original CTC driver(s):
  *		Fritz Elfert (felfert@millenux.com)
@@ -20,6 +20,9 @@
 #undef DEBUG
 #undef DEBUGDATA
 #undef DEBUGCCW
+
+#define KMSG_COMPONENT "ctcm"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
 #include <linux/module.h>
 #include <linux/init.h>
@@ -48,11 +51,15 @@
 
 #include <asm/idals.h>
 
-#include "cu3088.h"
 #include "ctcm_fsms.h"
 #include "ctcm_main.h"
 
 /* Some common global variables */
+
+/**
+ * The root device for ctcm group devices
+ */
+static struct device *ctcm_root_dev;
 
 /*
  * Linked list of all detected channels.
@@ -102,7 +109,8 @@ void ctcm_unpack_skb(struct channel *ch, struct sk_buff *pskb)
 			return;
 		}
 		pskb->protocol = ntohs(header->type);
-		if (header->length <= LL_HEADER_LENGTH) {
+		if ((header->length <= LL_HEADER_LENGTH) ||
+		    (len <= LL_HEADER_LENGTH)) {
 			if (!(ch->logflags & LOG_FLAG_ILLEGALSIZE)) {
 				CTCM_DBF_TEXT_(ERROR, CTC_DBF_ERROR,
 					"%s(%s): Illegal packet size %d(%d,%d)"
@@ -160,15 +168,12 @@ void ctcm_unpack_skb(struct channel *ch, struct sk_buff *pskb)
 		priv->stats.rx_packets++;
 		priv->stats.rx_bytes += skblen;
 		netif_rx_ni(skb);
-		dev->last_rx = jiffies;
 		if (len > 0) {
 			skb_pull(pskb, header->length);
 			if (skb_tailroom(pskb) < LL_HEADER_LENGTH) {
-				if (!(ch->logflags & LOG_FLAG_OVERRUN)) {
-					CTCM_DBF_DEV_NAME(TRACE, dev,
-						"Overrun in ctcm_unpack_skb");
-					ch->logflags |= LOG_FLAG_OVERRUN;
-				}
+				CTCM_DBF_DEV_NAME(TRACE, dev,
+					"Overrun in ctcm_unpack_skb");
+				ch->logflags |= LOG_FLAG_OVERRUN;
 				return;
 			}
 			skb_put(pskb, LL_HEADER_LENGTH);
@@ -245,7 +250,7 @@ static void channel_remove(struct channel *ch)
  *
  * returns Pointer to a channel or NULL if no matching channel available.
  */
-static struct channel *channel_get(enum channel_types type,
+static struct channel *channel_get(enum ctcm_channel_types type,
 					char *id, int direction)
 {
 	struct channel *ch = channels;
@@ -281,14 +286,16 @@ static long ctcm_check_irb_error(struct ccw_device *cdev, struct irb *irb)
 
 	switch (PTR_ERR(irb)) {
 	case -EIO:
-		ctcm_pr_warn("i/o-error on device %s\n", dev_name(&cdev->dev));
+		dev_err(&cdev->dev,
+			"An I/O-error occurred on the CTCM device\n");
 		break;
 	case -ETIMEDOUT:
-		ctcm_pr_warn("timeout on device %s\n", dev_name(&cdev->dev));
+		dev_err(&cdev->dev,
+			"An adapter hardware operation timed out\n");
 		break;
 	default:
-		ctcm_pr_warn("unknown error %ld on device %s\n",
-				PTR_ERR(irb), dev_name(&cdev->dev));
+		dev_err(&cdev->dev,
+			"An error occurred on the adapter hardware\n");
 	}
 	return PTR_ERR(irb);
 }
@@ -309,15 +316,17 @@ static inline void ccw_unit_check(struct channel *ch, __u8 sense)
 	if (sense & SNS0_INTERVENTION_REQ) {
 		if (sense & 0x01) {
 			if (ch->sense_rc != 0x01) {
-				ctcm_pr_debug("%s: Interface disc. or Sel. "
-					      "reset (remote)\n", ch->id);
+				pr_notice(
+					"%s: The communication peer has "
+					"disconnected\n", ch->id);
 				ch->sense_rc = 0x01;
 			}
 			fsm_event(ch->fsm, CTC_EVENT_UC_RCRESET, ch);
 		} else {
 			if (ch->sense_rc != SNS0_INTERVENTION_REQ) {
-				ctcm_pr_debug("%s: System reset (remote)\n",
-					      ch->id);
+				pr_notice(
+					"%s: The remote operating system is "
+					"not available\n", ch->id);
 				ch->sense_rc = SNS0_INTERVENTION_REQ;
 			}
 			fsm_event(ch->fsm, CTC_EVENT_UC_RSRESET, ch);
@@ -874,7 +883,7 @@ static int ctcm_tx(struct sk_buff *skb, struct net_device *dev)
 				"%s(%s): NULL sk_buff passed",
 					CTCM_FUNTAIL, dev->name);
 		priv->stats.tx_dropped++;
-		return 0;
+		return NETDEV_TX_OK;
 	}
 	if (skb_headroom(skb) < (LL_HEADER_LENGTH + 2)) {
 		CTCM_DBF_TEXT_(ERROR, CTC_DBF_ERROR,
@@ -882,7 +891,7 @@ static int ctcm_tx(struct sk_buff *skb, struct net_device *dev)
 			CTCM_FUNTAIL, dev->name, LL_HEADER_LENGTH + 2);
 		dev_kfree_skb(skb);
 		priv->stats.tx_dropped++;
-		return 0;
+		return NETDEV_TX_OK;
 	}
 
 	/*
@@ -895,16 +904,16 @@ static int ctcm_tx(struct sk_buff *skb, struct net_device *dev)
 		priv->stats.tx_dropped++;
 		priv->stats.tx_errors++;
 		priv->stats.tx_carrier_errors++;
-		return 0;
+		return NETDEV_TX_OK;
 	}
 
 	if (ctcm_test_and_set_busy(dev))
-		return -EBUSY;
+		return NETDEV_TX_BUSY;
 
 	dev->trans_start = jiffies;
 	if (ctcm_transmit_skb(priv->channel[WRITE], skb) != 0)
-		return 1;
-	return 0;
+		return NETDEV_TX_BUSY;
+	return NETDEV_TX_OK;
 }
 
 /* unmerged MPC variant of ctcm_tx */
@@ -1002,7 +1011,7 @@ done:
 	if (do_debug)
 		MPC_DBF_DEV_NAME(TRACE, dev, "exit");
 
-	return 0;	/* handle freeing of skb here */
+	return NETDEV_TX_OK;	/* handle freeing of skb here */
 }
 
 
@@ -1092,12 +1101,24 @@ static void ctcm_free_netdevice(struct net_device *dev)
 
 struct mpc_group *ctcmpc_init_mpc_group(struct ctcm_priv *priv);
 
+static const struct net_device_ops ctcm_netdev_ops = {
+	.ndo_open		= ctcm_open,
+	.ndo_stop		= ctcm_close,
+	.ndo_get_stats		= ctcm_stats,
+	.ndo_change_mtu	   	= ctcm_change_mtu,
+	.ndo_start_xmit		= ctcm_tx,
+};
+
+static const struct net_device_ops ctcm_mpc_netdev_ops = {
+	.ndo_open		= ctcm_open,
+	.ndo_stop		= ctcm_close,
+	.ndo_get_stats		= ctcm_stats,
+	.ndo_change_mtu	   	= ctcm_change_mtu,
+	.ndo_start_xmit		= ctcmpc_tx,
+};
+
 void static ctcm_dev_setup(struct net_device *dev)
 {
-	dev->open = ctcm_open;
-	dev->stop = ctcm_close;
-	dev->get_stats = ctcm_stats;
-	dev->change_mtu = ctcm_change_mtu;
 	dev->type = ARPHRD_SLIP;
 	dev->tx_queue_len = 100;
 	dev->flags = IFF_POINTOPOINT | IFF_NOARP;
@@ -1150,12 +1171,12 @@ static struct net_device *ctcm_init_netdevice(struct ctcm_priv *priv)
 		dev->mtu = MPC_BUFSIZE_DEFAULT -
 				TH_HEADER_LENGTH - PDU_HEADER_LENGTH;
 
-		dev->hard_start_xmit = ctcmpc_tx;
+		dev->netdev_ops = &ctcm_mpc_netdev_ops;
 		dev->hard_header_len = TH_HEADER_LENGTH + PDU_HEADER_LENGTH;
 		priv->buffer_size = MPC_BUFSIZE_DEFAULT;
 	} else {
 		dev->mtu = CTCM_BUFSIZE_DEFAULT - LL_HEADER_LENGTH - 2;
-		dev->hard_start_xmit = ctcm_tx;
+		dev->netdev_ops = &ctcm_netdev_ops;
 		dev->hard_header_len = LL_HEADER_LENGTH + 2;
 	}
 
@@ -1194,8 +1215,11 @@ static void ctcm_irq_handler(struct ccw_device *cdev,
 
 	/* Check for unsolicited interrupts. */
 	if (cgdev == NULL) {
-		ctcm_pr_warn("ctcm: Got unsolicited irq: c-%02x d-%02x\n",
-			     cstat, dstat);
+		CTCM_DBF_TEXT_(TRACE, CTC_DBF_ERROR,
+			"%s(%s) unsolicited irq: c-%02x d-%02x\n",
+			CTCM_FUNTAIL, dev_name(&cdev->dev), cstat, dstat);
+		dev_warn(&cdev->dev,
+			"The adapter received a non-specific IRQ\n");
 		return;
 	}
 
@@ -1207,31 +1231,34 @@ static void ctcm_irq_handler(struct ccw_device *cdev,
 	else if (priv->channel[WRITE]->cdev == cdev)
 		ch = priv->channel[WRITE];
 	else {
-		ctcm_pr_err("ctcm: Can't determine channel for interrupt, "
-			   "device %s\n", dev_name(&cdev->dev));
+		dev_err(&cdev->dev,
+			"%s: Internal error: Can't determine channel for "
+			"interrupt device %s\n",
+			__func__, dev_name(&cdev->dev));
+			/* Explain: inconsistent internal structures */
 		return;
 	}
 
 	dev = ch->netdev;
 	if (dev == NULL) {
-		ctcm_pr_crit("ctcm: %s dev=NULL bus_id=%s, ch=0x%p\n",
-				__func__, dev_name(&cdev->dev), ch);
+		dev_err(&cdev->dev,
+			"%s Internal error: net_device is NULL, ch = 0x%p\n",
+			__func__, ch);
+			/* Explain: inconsistent internal structures */
 		return;
 	}
-
-	CTCM_DBF_TEXT_(TRACE, CTC_DBF_DEBUG,
-		"%s(%s): int. for %s: cstat=%02x dstat=%02x",
-			CTCM_FUNTAIL, dev->name, ch->id, cstat, dstat);
 
 	/* Copy interruption response block. */
 	memcpy(ch->irb, irb, sizeof(struct irb));
 
+	/* Issue error message and return on subchannel error code */
 	if (irb->scsw.cmd.cstat) {
-	/* Check for good subchannel return code, otherwise error message */
 		fsm_event(ch->fsm, CTC_EVENT_SC_UNKNOWN, ch);
-		ctcm_pr_warn("%s: subchannel check for dev: %s - %02x %02x\n",
-			    dev->name, ch->id, irb->scsw.cmd.cstat,
-			    irb->scsw.cmd.dstat);
+		CTCM_DBF_TEXT_(TRACE, CTC_DBF_WARN,
+			"%s(%s): sub-ch check %s: cs=%02x ds=%02x",
+				CTCM_FUNTAIL, dev->name, ch->id, cstat, dstat);
+		dev_warn(&cdev->dev,
+				"A check occurred on the subchannel\n");
 		return;
 	}
 
@@ -1239,7 +1266,7 @@ static void ctcm_irq_handler(struct ccw_device *cdev,
 	if (irb->scsw.cmd.dstat & DEV_STAT_UNIT_CHECK) {
 		if ((irb->ecw[0] & ch->sense_rc) == 0)
 			/* print it only once */
-			CTCM_DBF_TEXT_(TRACE, CTC_DBF_INFO,
+			CTCM_DBF_TEXT_(TRACE, CTC_DBF_WARN,
 				"%s(%s): sense=%02x, ds=%02x",
 				CTCM_FUNTAIL, ch->id, irb->ecw[0], dstat);
 		ccw_unit_check(ch, irb->ecw[0]);
@@ -1319,7 +1346,7 @@ static int ctcm_probe_device(struct ccwgroup_device *cgdev)
  *
  * returns 0 on success, !0 on error.
  */
-static int add_channel(struct ccw_device *cdev, enum channel_types type,
+static int add_channel(struct ccw_device *cdev, enum ctcm_channel_types type,
 				struct ctcm_priv *priv)
 {
 	struct channel **c = &channels;
@@ -1478,13 +1505,13 @@ free_return:	/* note that all channel pointers are 0 or valid */
 /*
  * Return type of a detected device.
  */
-static enum channel_types get_channel_type(struct ccw_device_id *id)
+static enum ctcm_channel_types get_channel_type(struct ccw_device_id *id)
 {
-	enum channel_types type;
-	type = (enum channel_types)id->driver_info;
+	enum ctcm_channel_types type;
+	type = (enum ctcm_channel_types)id->driver_info;
 
-	if (type == channel_type_ficon)
-		type = channel_type_escon;
+	if (type == ctcm_channel_type_ficon)
+		type = ctcm_channel_type_escon;
 
 	return type;
 }
@@ -1502,16 +1529,21 @@ static int ctcm_new_device(struct ccwgroup_device *cgdev)
 	char read_id[CTCM_ID_SIZE];
 	char write_id[CTCM_ID_SIZE];
 	int direction;
-	enum channel_types type;
+	enum ctcm_channel_types type;
 	struct ctcm_priv *priv;
 	struct net_device *dev;
 	struct ccw_device *cdev0;
 	struct ccw_device *cdev1;
+	struct channel *readc;
+	struct channel *writec;
 	int ret;
+	int result;
 
 	priv = dev_get_drvdata(&cgdev->dev);
-	if (!priv)
-		return -ENODEV;
+	if (!priv) {
+		result = -ENODEV;
+		goto out_err_result;
+	}
 
 	cdev0 = cgdev->cdev[0];
 	cdev1 = cgdev->cdev[1];
@@ -1522,31 +1554,40 @@ static int ctcm_new_device(struct ccwgroup_device *cgdev)
 	snprintf(write_id, CTCM_ID_SIZE, "ch-%s", dev_name(&cdev1->dev));
 
 	ret = add_channel(cdev0, type, priv);
-	if (ret)
-		return ret;
+	if (ret) {
+		result = ret;
+		goto out_err_result;
+	}
 	ret = add_channel(cdev1, type, priv);
-	if (ret)
-		return ret;
+	if (ret) {
+		result = ret;
+		goto out_remove_channel1;
+	}
 
 	ret = ccw_device_set_online(cdev0);
 	if (ret != 0) {
-		/* may be ok to fail now - can be done later */
 		CTCM_DBF_TEXT_(TRACE, CTC_DBF_NOTICE,
 			"%s(%s) set_online rc=%d",
 				CTCM_FUNTAIL, read_id, ret);
+		result = -EIO;
+		goto out_remove_channel2;
 	}
 
 	ret = ccw_device_set_online(cdev1);
 	if (ret != 0) {
-		/* may be ok to fail now - can be done later */
 		CTCM_DBF_TEXT_(TRACE, CTC_DBF_NOTICE,
 			"%s(%s) set_online rc=%d",
 				CTCM_FUNTAIL, write_id, ret);
+
+		result = -EIO;
+		goto out_ccw1;
 	}
 
 	dev = ctcm_init_netdevice(priv);
-	if (dev == NULL)
-			goto out;
+	if (dev == NULL) {
+		result = -ENODEV;
+		goto out_ccw2;
+	}
 
 	for (direction = READ; direction <= WRITE; direction++) {
 		priv->channel[direction] =
@@ -1564,15 +1605,22 @@ static int ctcm_new_device(struct ccwgroup_device *cgdev)
 	/* sysfs magic */
 	SET_NETDEV_DEV(dev, &cgdev->dev);
 
-	if (register_netdev(dev))
-			goto out_dev;
+	if (register_netdev(dev)) {
+		result = -ENODEV;
+		goto out_dev;
+	}
 
 	if (ctcm_add_attributes(&cgdev->dev)) {
-		unregister_netdev(dev);
-			goto out_dev;
+		result = -ENODEV;
+		goto out_unregister;
 	}
 
 	strlcpy(priv->fsm->name, dev->name, sizeof(priv->fsm->name));
+
+	dev_info(&dev->dev,
+		"setup OK : r/w = %s/%s, protocol : %d\n",
+			priv->channel[READ]->id,
+			priv->channel[WRITE]->id, priv->protocol);
 
 	CTCM_DBF_TEXT_(SETUP, CTC_DBF_INFO,
 		"setup(%s) OK : r/w = %s/%s, protocol : %d", dev->name,
@@ -1580,13 +1628,22 @@ static int ctcm_new_device(struct ccwgroup_device *cgdev)
 			priv->channel[WRITE]->id, priv->protocol);
 
 	return 0;
+out_unregister:
+	unregister_netdev(dev);
 out_dev:
 	ctcm_free_netdevice(dev);
-out:
+out_ccw2:
 	ccw_device_set_offline(cgdev->cdev[1]);
+out_ccw1:
 	ccw_device_set_offline(cgdev->cdev[0]);
-
-	return -ENODEV;
+out_remove_channel2:
+	readc = channel_get(type, read_id, READ);
+	channel_remove(readc);
+out_remove_channel1:
+	writec = channel_get(type, write_id, WRITE);
+	channel_remove(writec);
+out_err_result:
+	return result;
 }
 
 /**
@@ -1648,10 +1705,8 @@ static void ctcm_remove_device(struct ccwgroup_device *cgdev)
 	BUG_ON(priv == NULL);
 
 	CTCM_DBF_TEXT_(SETUP, CTC_DBF_INFO,
-			"removing device %s, r/w = %s/%s, proto : %d",
-			priv->channel[READ]->netdev->name,
-			priv->channel[READ]->id, priv->channel[WRITE]->id,
-			priv->protocol);
+			"removing device %p, proto : %d",
+			cgdev, priv->protocol);
 
 	if (cgdev->state == CCWGROUP_ONLINE)
 		ctcm_shutdown_device(cgdev);
@@ -1660,6 +1715,59 @@ static void ctcm_remove_device(struct ccwgroup_device *cgdev)
 	kfree(priv);
 	put_device(&cgdev->dev);
 }
+
+static int ctcm_pm_suspend(struct ccwgroup_device *gdev)
+{
+	struct ctcm_priv *priv = dev_get_drvdata(&gdev->dev);
+
+	if (gdev->state == CCWGROUP_OFFLINE)
+		return 0;
+	netif_device_detach(priv->channel[READ]->netdev);
+	ctcm_close(priv->channel[READ]->netdev);
+	if (!wait_event_timeout(priv->fsm->wait_q,
+	    fsm_getstate(priv->fsm) == DEV_STATE_STOPPED, CTCM_TIME_5_SEC)) {
+		netif_device_attach(priv->channel[READ]->netdev);
+		return -EBUSY;
+	}
+	ccw_device_set_offline(gdev->cdev[1]);
+	ccw_device_set_offline(gdev->cdev[0]);
+	return 0;
+}
+
+static int ctcm_pm_resume(struct ccwgroup_device *gdev)
+{
+	struct ctcm_priv *priv = dev_get_drvdata(&gdev->dev);
+	int rc;
+
+	if (gdev->state == CCWGROUP_OFFLINE)
+		return 0;
+	rc = ccw_device_set_online(gdev->cdev[1]);
+	if (rc)
+		goto err_out;
+	rc = ccw_device_set_online(gdev->cdev[0]);
+	if (rc)
+		goto err_out;
+	ctcm_open(priv->channel[READ]->netdev);
+err_out:
+	netif_device_attach(priv->channel[READ]->netdev);
+	return rc;
+}
+
+static struct ccw_device_id ctcm_ids[] = {
+	{CCW_DEVICE(0x3088, 0x08), .driver_info = ctcm_channel_type_parallel},
+	{CCW_DEVICE(0x3088, 0x1e), .driver_info = ctcm_channel_type_ficon},
+	{CCW_DEVICE(0x3088, 0x1f), .driver_info = ctcm_channel_type_escon},
+	{},
+};
+MODULE_DEVICE_TABLE(ccw, ctcm_ids);
+
+static struct ccw_driver ctcm_ccw_driver = {
+	.owner	= THIS_MODULE,
+	.name	= "ctcm",
+	.ids	= ctcm_ids,
+	.probe	= ccwgroup_probe_ccwdev,
+	.remove	= ccwgroup_remove_ccwdev,
+};
 
 static struct ccwgroup_driver ctcm_group_driver = {
 	.owner       = THIS_MODULE,
@@ -1670,8 +1778,38 @@ static struct ccwgroup_driver ctcm_group_driver = {
 	.remove      = ctcm_remove_device,
 	.set_online  = ctcm_new_device,
 	.set_offline = ctcm_shutdown_device,
+	.freeze	     = ctcm_pm_suspend,
+	.thaw	     = ctcm_pm_resume,
+	.restore     = ctcm_pm_resume,
 };
 
+static ssize_t
+ctcm_driver_group_store(struct device_driver *ddrv, const char *buf,
+			size_t count)
+{
+	int err;
+
+	err = ccwgroup_create_from_string(ctcm_root_dev,
+					  ctcm_group_driver.driver_id,
+					  &ctcm_ccw_driver, 2, buf);
+	return err ? err : count;
+}
+
+static DRIVER_ATTR(group, 0200, NULL, ctcm_driver_group_store);
+
+static struct attribute *ctcm_group_attrs[] = {
+	&driver_attr_group.attr,
+	NULL,
+};
+
+static struct attribute_group ctcm_group_attr_group = {
+	.attrs = ctcm_group_attrs,
+};
+
+static const struct attribute_group *ctcm_group_attr_groups[] = {
+	&ctcm_group_attr_group,
+	NULL,
+};
 
 /*
  * Module related routines
@@ -1685,9 +1823,12 @@ static struct ccwgroup_driver ctcm_group_driver = {
  */
 static void __exit ctcm_exit(void)
 {
-	unregister_cu3088_discipline(&ctcm_group_driver);
+	driver_remove_file(&ctcm_group_driver.driver, &driver_attr_group);
+	ccwgroup_driver_unregister(&ctcm_group_driver);
+	ccw_driver_unregister(&ctcm_ccw_driver);
+	root_device_unregister(ctcm_root_dev);
 	ctcm_unregister_dbf_views();
-	ctcm_pr_info("CTCM driver unloaded\n");
+	pr_info("CTCM driver unloaded\n");
 }
 
 /*
@@ -1695,7 +1836,7 @@ static void __exit ctcm_exit(void)
  */
 static void print_banner(void)
 {
-	printk(KERN_INFO "CTCM driver initialized\n");
+	pr_info("CTCM driver initialized\n");
 }
 
 /**
@@ -1711,17 +1852,31 @@ static int __init ctcm_init(void)
 	channels = NULL;
 
 	ret = ctcm_register_dbf_views();
-	if (ret) {
-		return ret;
-	}
-	ret = register_cu3088_discipline(&ctcm_group_driver);
-	if (ret) {
-		ctcm_unregister_dbf_views();
-		ctcm_pr_crit("ctcm_init failed with register_cu3088_discipline "
-				"(rc = %d)\n", ret);
-		return ret;
-	}
+	if (ret)
+		goto out_err;
+	ctcm_root_dev = root_device_register("ctcm");
+	ret = IS_ERR(ctcm_root_dev) ? PTR_ERR(ctcm_root_dev) : 0;
+	if (ret)
+		goto register_err;
+	ret = ccw_driver_register(&ctcm_ccw_driver);
+	if (ret)
+		goto ccw_err;
+	ctcm_group_driver.driver.groups = ctcm_group_attr_groups;
+	ret = ccwgroup_driver_register(&ctcm_group_driver);
+	if (ret)
+		goto ccwgroup_err;
 	print_banner();
+	return 0;
+
+ccwgroup_err:
+	ccw_driver_unregister(&ctcm_ccw_driver);
+ccw_err:
+	root_device_unregister(ctcm_root_dev);
+register_err:
+	ctcm_unregister_dbf_views();
+out_err:
+	pr_err("%s / Initializing the ctcm device driver failed, ret = %d\n",
+		__func__, ret);
 	return ret;
 }
 

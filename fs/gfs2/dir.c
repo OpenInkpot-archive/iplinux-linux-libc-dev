@@ -36,7 +36,7 @@
  * the block.  In leaves, they begin at offset sizeof(struct gfs2_leaf) from the
  * beginning of the leaf block. The dirents reside in leaves when
  *
- * dip->i_di.di_flags & GFS2_DIF_EXHASH is true
+ * dip->i_diskflags & GFS2_DIF_EXHASH is true
  *
  * Otherwise, the dirents are "linear", within a single stuffed dinode block.
  *
@@ -60,7 +60,6 @@
 #include <linux/gfs2_ondisk.h>
 #include <linux/crc32.h>
 #include <linux/vmalloc.h>
-#include <linux/lm_interface.h>
 
 #include "gfs2.h"
 #include "incore.h"
@@ -128,8 +127,8 @@ static int gfs2_dir_write_stuffed(struct gfs2_inode *ip, const char *buf,
 
 	gfs2_trans_add_bh(ip->i_gl, dibh, 1);
 	memcpy(dibh->b_data + offset + sizeof(struct gfs2_dinode), buf, size);
-	if (ip->i_di.di_size < offset + size)
-		ip->i_di.di_size = offset + size;
+	if (ip->i_disksize < offset + size)
+		ip->i_disksize = offset + size;
 	ip->i_inode.i_mtime = ip->i_inode.i_ctime = CURRENT_TIME;
 	gfs2_dinode_out(ip, dibh->b_data);
 
@@ -226,8 +225,8 @@ out:
 	if (error)
 		return error;
 
-	if (ip->i_di.di_size < offset + copied)
-		ip->i_di.di_size = offset + copied;
+	if (ip->i_disksize < offset + copied)
+		ip->i_disksize = offset + copied;
 	ip->i_inode.i_mtime = ip->i_inode.i_ctime = CURRENT_TIME;
 
 	gfs2_trans_add_bh(ip->i_gl, dibh, 1);
@@ -277,11 +276,11 @@ static int gfs2_dir_read_data(struct gfs2_inode *ip, char *buf, u64 offset,
 	int copied = 0;
 	int error = 0;
 
-	if (offset >= ip->i_di.di_size)
+	if (offset >= ip->i_disksize)
 		return 0;
 
-	if (offset + size > ip->i_di.di_size)
-		size = ip->i_di.di_size - offset;
+	if (offset + size > ip->i_disksize)
+		size = ip->i_disksize - offset;
 
 	if (!size)
 		return 0;
@@ -526,38 +525,6 @@ consist_inode:
 	return ERR_PTR(-EIO);
 }
 
-
-/**
- * dirent_first - Return the first dirent
- * @dip: the directory
- * @bh: The buffer
- * @dent: Pointer to list of dirents
- *
- * return first dirent whether bh points to leaf or stuffed dinode
- *
- * Returns: IS_LEAF, IS_DINODE, or -errno
- */
-
-static int dirent_first(struct gfs2_inode *dip, struct buffer_head *bh,
-			struct gfs2_dirent **dent)
-{
-	struct gfs2_meta_header *h = (struct gfs2_meta_header *)bh->b_data;
-
-	if (be32_to_cpu(h->mh_type) == GFS2_METATYPE_LF) {
-		if (gfs2_meta_check(GFS2_SB(&dip->i_inode), bh))
-			return -EIO;
-		*dent = (struct gfs2_dirent *)(bh->b_data +
-					       sizeof(struct gfs2_leaf));
-		return IS_LEAF;
-	} else {
-		if (gfs2_metatype_check(GFS2_SB(&dip->i_inode), bh, GFS2_METATYPE_DI))
-			return -EIO;
-		*dent = (struct gfs2_dirent *)(bh->b_data +
-					       sizeof(struct gfs2_dinode));
-		return IS_DINODE;
-	}
-}
-
 static int dirent_check_reclen(struct gfs2_inode *dip,
 			       const struct gfs2_dirent *d, const void *end_p)
 {
@@ -755,12 +722,12 @@ static struct gfs2_dirent *gfs2_dirent_search(struct inode *inode,
 	struct gfs2_inode *ip = GFS2_I(inode);
 	int error;
 
-	if (ip->i_di.di_flags & GFS2_DIF_EXHASH) {
+	if (ip->i_diskflags & GFS2_DIF_EXHASH) {
 		struct gfs2_leaf *leaf;
 		unsigned hsize = 1 << ip->i_depth;
 		unsigned index;
 		u64 ln;
-		if (hsize * sizeof(u64) != ip->i_di.di_size) {
+		if (hsize * sizeof(u64) != ip->i_disksize) {
 			gfs2_consist_inode(ip);
 			return ERR_PTR(-EIO);
 		}
@@ -804,13 +771,20 @@ static struct gfs2_leaf *new_leaf(struct inode *inode, struct buffer_head **pbh,
 {
 	struct gfs2_inode *ip = GFS2_I(inode);
 	unsigned int n = 1;
-	u64 bn = gfs2_alloc_block(ip, &n);
-	struct buffer_head *bh = gfs2_meta_new(ip->i_gl, bn);
+	u64 bn;
+	int error;
+	struct buffer_head *bh;
 	struct gfs2_leaf *leaf;
 	struct gfs2_dirent *dent;
 	struct qstr name = { .name = "", .len = 0, .hash = 0 };
+
+	error = gfs2_alloc_block(ip, &bn, &n);
+	if (error)
+		return NULL;
+	bh = gfs2_meta_new(ip->i_gl, bn);
 	if (!bh)
 		return NULL;
+
 	gfs2_trans_add_unrevoke(GFS2_SB(inode), bn, 1);
 	gfs2_trans_add_bh(ip->i_gl, bh, 1);
 	gfs2_metatype_set(bh, GFS2_METATYPE_LF, GFS2_FORMAT_LF);
@@ -858,8 +832,8 @@ static int dir_make_exhash(struct inode *inode)
 		return -ENOSPC;
 	bn = bh->b_blocknr;
 
-	gfs2_assert(sdp, dip->i_di.di_entries < (1 << 16));
-	leaf->lf_entries = cpu_to_be16(dip->i_di.di_entries);
+	gfs2_assert(sdp, dip->i_entries < (1 << 16));
+	leaf->lf_entries = cpu_to_be16(dip->i_entries);
 
 	/*  Copy dirents  */
 
@@ -905,9 +879,9 @@ static int dir_make_exhash(struct inode *inode)
 	for (x = sdp->sd_hash_ptrs; x--; lp++)
 		*lp = cpu_to_be64(bn);
 
-	dip->i_di.di_size = sdp->sd_sb.sb_bsize / 2;
+	dip->i_disksize = sdp->sd_sb.sb_bsize / 2;
 	gfs2_add_inode_blocks(&dip->i_inode, 1);
-	dip->i_di.di_flags |= GFS2_DIF_EXHASH;
+	dip->i_diskflags |= GFS2_DIF_EXHASH;
 
 	for (x = sdp->sd_hash_ptrs, y = -1; x; x >>= 1, y++) ;
 	dip->i_depth = y;
@@ -1000,7 +974,7 @@ static int dir_split_leaf(struct inode *inode, const struct qstr *name)
 	divider = (start + half_len) << (32 - dip->i_depth);
 
 	/*  Copy the entries  */
-	dirent_first(dip, obh, &dent);
+	dent = (struct gfs2_dirent *)(obh->b_data + sizeof(struct gfs2_leaf));
 
 	do {
 		next = dent;
@@ -1082,7 +1056,7 @@ static int dir_double_exhash(struct gfs2_inode *dip)
 	int error = 0;
 
 	hsize = 1 << dip->i_depth;
-	if (hsize * sizeof(u64) != dip->i_di.di_size) {
+	if (hsize * sizeof(u64) != dip->i_disksize) {
 		gfs2_consist_inode(dip);
 		return -EIO;
 	}
@@ -1091,7 +1065,7 @@ static int dir_double_exhash(struct gfs2_inode *dip)
 
 	buf = kcalloc(3, sdp->sd_hash_bsize, GFP_NOFS | __GFP_NOFAIL);
 
-	for (block = dip->i_di.di_size >> sdp->sd_hash_bsize_shift; block--;) {
+	for (block = dip->i_disksize >> sdp->sd_hash_bsize_shift; block--;) {
 		error = gfs2_dir_read_data(dip, (char *)buf,
 					    block * sdp->sd_hash_bsize,
 					    sdp->sd_hash_bsize, 1);
@@ -1370,7 +1344,7 @@ static int dir_e_read(struct inode *inode, u64 *offset, void *opaque,
 	unsigned depth = 0;
 
 	hsize = 1 << dip->i_depth;
-	if (hsize * sizeof(u64) != dip->i_di.di_size) {
+	if (hsize * sizeof(u64) != dip->i_disksize) {
 		gfs2_consist_inode(dip);
 		return -EIO;
 	}
@@ -1426,10 +1400,10 @@ int gfs2_dir_read(struct inode *inode, u64 *offset, void *opaque,
 	int copied = 0;
 	int error;
 
-	if (!dip->i_di.di_entries)
+	if (!dip->i_entries)
 		return 0;
 
-	if (dip->i_di.di_flags & GFS2_DIF_EXHASH)
+	if (dip->i_diskflags & GFS2_DIF_EXHASH)
 		return dir_e_read(inode, offset, opaque, filldir);
 
 	if (!gfs2_is_stuffed(dip)) {
@@ -1453,17 +1427,17 @@ int gfs2_dir_read(struct inode *inode, u64 *offset, void *opaque,
 			error = PTR_ERR(dent);
 			goto out;
 		}
-		if (dip->i_di.di_entries != g.offset) {
+		if (dip->i_entries != g.offset) {
 			fs_warn(sdp, "Number of entries corrupt in dir %llu, "
-				"ip->i_di.di_entries (%u) != g.offset (%u)\n",
+				"ip->i_entries (%u) != g.offset (%u)\n",
 				(unsigned long long)dip->i_no_addr,
-				dip->i_di.di_entries,
+				dip->i_entries,
 				g.offset);
 			error = -EIO;
 			goto out;
 		}
 		error = do_filldir_main(dip, offset, opaque, filldir, darr,
-					dip->i_di.di_entries, &copied);
+					dip->i_entries, &copied);
 out:
 		kfree(darr);
 	}
@@ -1612,7 +1586,7 @@ int gfs2_dir_add(struct inode *inode, const struct qstr *name,
 			dent = gfs2_init_dirent(inode, dent, name, bh);
 			gfs2_inum_out(nip, dent);
 			dent->de_type = cpu_to_be16(type);
-			if (ip->i_di.di_flags & GFS2_DIF_EXHASH) {
+			if (ip->i_diskflags & GFS2_DIF_EXHASH) {
 				leaf = (struct gfs2_leaf *)bh->b_data;
 				be16_add_cpu(&leaf->lf_entries, 1);
 			}
@@ -1621,14 +1595,14 @@ int gfs2_dir_add(struct inode *inode, const struct qstr *name,
 			if (error)
 				break;
 			gfs2_trans_add_bh(ip->i_gl, bh, 1);
-			ip->i_di.di_entries++;
+			ip->i_entries++;
 			ip->i_inode.i_mtime = ip->i_inode.i_ctime = CURRENT_TIME;
 			gfs2_dinode_out(ip, bh->b_data);
 			brelse(bh);
 			error = 0;
 			break;
 		}
-		if (!(ip->i_di.di_flags & GFS2_DIF_EXHASH)) {
+		if (!(ip->i_diskflags & GFS2_DIF_EXHASH)) {
 			error = dir_make_exhash(inode);
 			if (error)
 				break;
@@ -1691,7 +1665,7 @@ int gfs2_dir_del(struct gfs2_inode *dip, const struct qstr *name)
 	}
 
 	dirent_del(dip, bh, prev, dent);
-	if (dip->i_di.di_flags & GFS2_DIF_EXHASH) {
+	if (dip->i_diskflags & GFS2_DIF_EXHASH) {
 		struct gfs2_leaf *leaf = (struct gfs2_leaf *)bh->b_data;
 		u16 entries = be16_to_cpu(leaf->lf_entries);
 		if (!entries)
@@ -1704,10 +1678,10 @@ int gfs2_dir_del(struct gfs2_inode *dip, const struct qstr *name)
 	if (error)
 		return error;
 
-	if (!dip->i_di.di_entries)
+	if (!dip->i_entries)
 		gfs2_consist_inode(dip);
 	gfs2_trans_add_bh(dip->i_gl, bh, 1);
-	dip->i_di.di_entries--;
+	dip->i_entries--;
 	dip->i_inode.i_mtime = dip->i_inode.i_ctime = CURRENT_TIME;
 	gfs2_dinode_out(dip, bh->b_data);
 	brelse(bh);
@@ -1748,7 +1722,7 @@ int gfs2_dir_mvino(struct gfs2_inode *dip, const struct qstr *filename,
 	gfs2_inum_out(nip, dent);
 	dent->de_type = cpu_to_be16(new_type);
 
-	if (dip->i_di.di_flags & GFS2_DIF_EXHASH) {
+	if (dip->i_diskflags & GFS2_DIF_EXHASH) {
 		brelse(bh);
 		error = gfs2_meta_inode_buffer(dip, &bh);
 		if (error)
@@ -1784,7 +1758,7 @@ static int foreach_leaf(struct gfs2_inode *dip, leaf_call_t lc, void *data)
 	int error = 0;
 
 	hsize = 1 << dip->i_depth;
-	if (hsize * sizeof(u64) != dip->i_di.di_size) {
+	if (hsize * sizeof(u64) != dip->i_disksize) {
 		gfs2_consist_inode(dip);
 		return -EIO;
 	}

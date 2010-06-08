@@ -14,8 +14,10 @@
 #include <linux/init.h>
 #include <linux/device.h>
 #include <linux/spi/spi.h>
+#include <linux/spi/tdo24m.h>
 #include <linux/fb.h>
 #include <linux/lcd.h>
+#include <linux/slab.h>
 
 #define POWER_IS_ON(pwr)	((pwr) <= FB_BLANK_NORMAL)
 
@@ -30,6 +32,9 @@ struct tdo24m {
 	struct spi_message	msg;
 	struct spi_transfer	xfer;
 	uint8_t			*buf;
+
+	int (*adj_mode)(struct tdo24m *lcd, int mode);
+	int color_invert;
 
 	int			power;
 	int			mode;
@@ -66,7 +71,7 @@ static uint32_t lcd_panel_off[] = {
 	CMD_NULL,
 };
 
-static uint32_t lcd_vga_pass_through[] = {
+static uint32_t lcd_vga_pass_through_tdo24m[] = {
 	CMD1(0xB0, 0x16),
 	CMD1(0xBC, 0x80),
 	CMD1(0xE1, 0x00),
@@ -75,7 +80,7 @@ static uint32_t lcd_vga_pass_through[] = {
 	CMD_NULL,
 };
 
-static uint32_t lcd_qvga_pass_through[] = {
+static uint32_t lcd_qvga_pass_through_tdo24m[] = {
 	CMD1(0xB0, 0x16),
 	CMD1(0xBC, 0x81),
 	CMD1(0xE1, 0x00),
@@ -84,7 +89,7 @@ static uint32_t lcd_qvga_pass_through[] = {
 	CMD_NULL,
 };
 
-static uint32_t lcd_vga_transfer[] = {
+static uint32_t lcd_vga_transfer_tdo24m[] = {
 	CMD1(0xcf, 0x02), 	/* Blanking period control (1) */
 	CMD2(0xd0, 0x08, 0x04),	/* Blanking period control (2) */
 	CMD1(0xd1, 0x01),	/* CKV timing control on/off */
@@ -105,6 +110,35 @@ static uint32_t lcd_qvga_transfer[] = {
 	CMD2(0xde, 0x05, 0x0a),	/* OEV timing control */
 	CMD2(0xdf, 0x0a, 0x19),	/* ASW timing control (1) */
 	CMD1(0xe0, 0x0a),	/* ASW timing control (2) */
+	CMD0(0x21),		/* Invert for normally black display */
+	CMD0(0x29),		/* Display on */
+	CMD_NULL,
+};
+
+static uint32_t lcd_vga_pass_through_tdo35s[] = {
+	CMD1(0xB0, 0x16),
+	CMD1(0xBC, 0x80),
+	CMD1(0xE1, 0x00),
+	CMD1(0x3B, 0x00),
+	CMD_NULL,
+};
+
+static uint32_t lcd_qvga_pass_through_tdo35s[] = {
+	CMD1(0xB0, 0x16),
+	CMD1(0xBC, 0x81),
+	CMD1(0xE1, 0x00),
+	CMD1(0x3B, 0x22),
+	CMD_NULL,
+};
+
+static uint32_t lcd_vga_transfer_tdo35s[] = {
+	CMD1(0xcf, 0x02), 	/* Blanking period control (1) */
+	CMD2(0xd0, 0x08, 0x04),	/* Blanking period control (2) */
+	CMD1(0xd1, 0x01),	/* CKV timing control on/off */
+	CMD2(0xd2, 0x00, 0x1e),	/* CKV 1,2 timing control */
+	CMD2(0xd3, 0x14, 0x28),	/* OEV timing control */
+	CMD2(0xd4, 0x28, 0x64),	/* ASW timing control (1) */
+	CMD1(0xd5, 0x28),	/* ASW timing control (2) */
 	CMD0(0x21),		/* Invert for normally black display */
 	CMD0(0x29),		/* Display on */
 	CMD_NULL,
@@ -148,6 +182,8 @@ static int tdo24m_writes(struct tdo24m *lcd, uint32_t *array)
 	int nparams, err = 0;
 
 	for (; *p != CMD_NULL; p++) {
+		if (!lcd->color_invert && *p == CMD0(0x21))
+			continue;
 
 		nparams = (*p >> 30) & 0x3;
 
@@ -184,12 +220,33 @@ static int tdo24m_adj_mode(struct tdo24m *lcd, int mode)
 {
 	switch (mode) {
 	case MODE_VGA:
-		tdo24m_writes(lcd, lcd_vga_pass_through);
+		tdo24m_writes(lcd, lcd_vga_pass_through_tdo24m);
 		tdo24m_writes(lcd, lcd_panel_config);
-		tdo24m_writes(lcd, lcd_vga_transfer);
+		tdo24m_writes(lcd, lcd_vga_transfer_tdo24m);
 		break;
 	case MODE_QVGA:
-		tdo24m_writes(lcd, lcd_qvga_pass_through);
+		tdo24m_writes(lcd, lcd_qvga_pass_through_tdo24m);
+		tdo24m_writes(lcd, lcd_panel_config);
+		tdo24m_writes(lcd, lcd_qvga_transfer);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	lcd->mode = mode;
+	return 0;
+}
+
+static int tdo35s_adj_mode(struct tdo24m *lcd, int mode)
+{
+	switch (mode) {
+	case MODE_VGA:
+		tdo24m_writes(lcd, lcd_vga_pass_through_tdo35s);
+		tdo24m_writes(lcd, lcd_panel_config);
+		tdo24m_writes(lcd, lcd_vga_transfer_tdo35s);
+		break;
+	case MODE_QVGA:
+		tdo24m_writes(lcd, lcd_qvga_pass_through_tdo35s);
 		tdo24m_writes(lcd, lcd_panel_config);
 		tdo24m_writes(lcd, lcd_qvga_transfer);
 		break;
@@ -213,7 +270,7 @@ static int tdo24m_power_on(struct tdo24m *lcd)
 	if (err)
 		goto out;
 
-	err = tdo24m_adj_mode(lcd, lcd->mode);
+	err = lcd->adj_mode(lcd, lcd->mode);
 out:
 	return err;
 }
@@ -262,7 +319,7 @@ static int tdo24m_set_mode(struct lcd_device *ld, struct fb_videomode *m)
 	if (lcd->mode == mode)
 		return 0;
 
-	return tdo24m_adj_mode(lcd, mode);
+	return lcd->adj_mode(lcd, mode);
 }
 
 static struct lcd_ops tdo24m_ops = {
@@ -276,7 +333,15 @@ static int __devinit tdo24m_probe(struct spi_device *spi)
 	struct tdo24m *lcd;
 	struct spi_message *m;
 	struct spi_transfer *x;
+	struct tdo24m_platform_data *pdata;
+	enum tdo24m_model model;
 	int err;
+
+	pdata = spi->dev.platform_data;
+	if (pdata)
+		model = pdata->model;
+	else
+		model = TDO24M;
 
 	spi->bits_per_word = 8;
 	spi->mode = SPI_MODE_3;
@@ -292,7 +357,7 @@ static int __devinit tdo24m_probe(struct spi_device *spi)
 	lcd->power = FB_BLANK_POWERDOWN;
 	lcd->mode = MODE_VGA;	/* default to VGA */
 
-	lcd->buf = kmalloc(TDO24M_SPI_BUFF_SIZE, sizeof(GFP_KERNEL));
+	lcd->buf = kmalloc(TDO24M_SPI_BUFF_SIZE, GFP_KERNEL);
 	if (lcd->buf == NULL) {
 		kfree(lcd);
 		return -ENOMEM;
@@ -303,8 +368,23 @@ static int __devinit tdo24m_probe(struct spi_device *spi)
 
 	spi_message_init(m);
 
+	x->cs_change = 1;
 	x->tx_buf = &lcd->buf[0];
 	spi_message_add_tail(x, m);
+
+	switch (model) {
+	case TDO24M:
+		lcd->color_invert = 1;
+		lcd->adj_mode = tdo24m_adj_mode;
+		break;
+	case TDO35S:
+		lcd->adj_mode = tdo35s_adj_mode;
+		lcd->color_invert = 0;
+		break;
+	default:
+		dev_err(&spi->dev, "Unsupported model");
+		goto out_free;
+	}
 
 	lcd->lcd_dev = lcd_device_register("tdo24m", &spi->dev,
 					lcd, &tdo24m_ops);
@@ -394,3 +474,4 @@ module_exit(tdo24m_exit);
 MODULE_AUTHOR("Eric Miao <eric.miao@marvell.com>");
 MODULE_DESCRIPTION("Driver for Toppoly TDO24M LCD Panel");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("spi:tdo24m");

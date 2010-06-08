@@ -55,8 +55,10 @@ static char *board[] __initdata = {
 	"amcc,canyonlands",
 	"amcc,glacier",
 	"ibm,ebony",
+	"amcc,eiger",
 	"amcc,katmai",
 	"amcc,rainier",
+	"amcc,redwood",
 	"amcc,sequoia",
 	"amcc,taishan",
 	"amcc,yosemite"
@@ -69,7 +71,7 @@ static int __init ppc44x_probe(void)
 
 	for (i = 0; i < ARRAY_SIZE(board); i++) {
 		if (of_flat_dt_is_compatible(root, board[i])) {
-			ppc_pci_flags = PPC_PCI_REASSIGN_ALL_RSRC;
+			ppc_pci_set_flags(PPC_PCI_REASSIGN_ALL_RSRC);
 			return 1;
 		}
 	}

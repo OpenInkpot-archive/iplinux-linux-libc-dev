@@ -28,7 +28,6 @@
 #include <linux/slab.h>
 #include <linux/highmem.h>
 #include <linux/bitops.h>
-#include <linux/debugfs.h>
 
 #define MLOG_MASK_PREFIX ML_DISK_ALLOC
 #include <cluster/masklog.h>
@@ -36,6 +35,7 @@
 #include "ocfs2.h"
 
 #include "alloc.h"
+#include "blockcheck.h"
 #include "dlmglue.h"
 #include "inode.h"
 #include "journal.h"
@@ -73,84 +73,6 @@ static int ocfs2_local_alloc_new_window(struct ocfs2_super *osb,
 
 static int ocfs2_local_alloc_slide_window(struct ocfs2_super *osb,
 					  struct inode *local_alloc_inode);
-
-#ifdef CONFIG_OCFS2_FS_STATS
-
-static int ocfs2_la_debug_open(struct inode *inode, struct file *file)
-{
-	file->private_data = inode->i_private;
-	return 0;
-}
-
-#define LA_DEBUG_BUF_SZ	PAGE_CACHE_SIZE
-#define LA_DEBUG_VER	1
-static ssize_t ocfs2_la_debug_read(struct file *file, char __user *userbuf,
-				   size_t count, loff_t *ppos)
-{
-	static DEFINE_MUTEX(la_debug_mutex);
-	struct ocfs2_super *osb = file->private_data;
-	int written, ret;
-	char *buf = osb->local_alloc_debug_buf;
-
-	mutex_lock(&la_debug_mutex);
-	memset(buf, 0, LA_DEBUG_BUF_SZ);
-
-	written = snprintf(buf, LA_DEBUG_BUF_SZ,
-			   "0x%x\t0x%llx\t%u\t%u\t0x%x\n",
-			   LA_DEBUG_VER,
-			   (unsigned long long)osb->la_last_gd,
-			   osb->local_alloc_default_bits,
-			   osb->local_alloc_bits, osb->local_alloc_state);
-
-	ret = simple_read_from_buffer(userbuf, count, ppos, buf, written);
-
-	mutex_unlock(&la_debug_mutex);
-	return ret;
-}
-
-static const struct file_operations ocfs2_la_debug_fops = {
-	.open =		ocfs2_la_debug_open,
-	.read =		ocfs2_la_debug_read,
-};
-
-static void ocfs2_init_la_debug(struct ocfs2_super *osb)
-{
-	osb->local_alloc_debug_buf = kmalloc(LA_DEBUG_BUF_SZ, GFP_NOFS);
-	if (!osb->local_alloc_debug_buf)
-		return;
-
-	osb->local_alloc_debug = debugfs_create_file("local_alloc_stats",
-						     S_IFREG|S_IRUSR,
-						     osb->osb_debug_root,
-						     osb,
-						     &ocfs2_la_debug_fops);
-	if (!osb->local_alloc_debug) {
-		kfree(osb->local_alloc_debug_buf);
-		osb->local_alloc_debug_buf = NULL;
-	}
-}
-
-static void ocfs2_shutdown_la_debug(struct ocfs2_super *osb)
-{
-	if (osb->local_alloc_debug)
-		debugfs_remove(osb->local_alloc_debug);
-
-	if (osb->local_alloc_debug_buf)
-		kfree(osb->local_alloc_debug_buf);
-
-	osb->local_alloc_debug_buf = NULL;
-	osb->local_alloc_debug = NULL;
-}
-#else	/* CONFIG_OCFS2_FS_STATS */
-static void ocfs2_init_la_debug(struct ocfs2_super *osb)
-{
-	return;
-}
-static void ocfs2_shutdown_la_debug(struct ocfs2_super *osb)
-{
-	return;
-}
-#endif
 
 static inline int ocfs2_la_state_enabled(struct ocfs2_super *osb)
 {
@@ -225,8 +147,6 @@ int ocfs2_load_local_alloc(struct ocfs2_super *osb)
 
 	mlog_entry_void();
 
-	ocfs2_init_la_debug(osb);
-
 	if (osb->local_alloc_bits == 0)
 		goto bail;
 
@@ -248,8 +168,8 @@ int ocfs2_load_local_alloc(struct ocfs2_super *osb)
 		goto bail;
 	}
 
-	status = ocfs2_read_blocks(inode, OCFS2_I(inode)->ip_blkno, 1,
-				   &alloc_bh, OCFS2_BH_IGNORE_CACHE);
+	status = ocfs2_read_inode_block_full(inode, &alloc_bh,
+					     OCFS2_BH_IGNORE_CACHE);
 	if (status < 0) {
 		mlog_errno(status);
 		goto bail;
@@ -298,9 +218,6 @@ bail:
 	if (inode)
 		iput(inode);
 
-	if (status < 0)
-		ocfs2_shutdown_la_debug(osb);
-
 	mlog(0, "Local alloc window bits = %d\n", osb->local_alloc_bits);
 
 	mlog_exit(status);
@@ -329,8 +246,6 @@ void ocfs2_shutdown_local_alloc(struct ocfs2_super *osb)
 
 	cancel_delayed_work(&osb->la_enable_wq);
 	flush_workqueue(ocfs2_wq);
-
-	ocfs2_shutdown_la_debug(osb);
 
 	if (osb->local_alloc_state == OCFS2_LA_UNUSED)
 		goto out;
@@ -382,8 +297,8 @@ void ocfs2_shutdown_local_alloc(struct ocfs2_super *osb)
 	}
 	memcpy(alloc_copy, alloc, bh->b_size);
 
-	status = ocfs2_journal_access(handle, local_alloc_inode, bh,
-				      OCFS2_JOURNAL_ACCESS_WRITE);
+	status = ocfs2_journal_access_di(handle, INODE_CACHE(local_alloc_inode),
+					 bh, OCFS2_JOURNAL_ACCESS_WRITE);
 	if (status < 0) {
 		mlog_errno(status);
 		goto out_commit;
@@ -459,8 +374,8 @@ int ocfs2_begin_local_alloc_recovery(struct ocfs2_super *osb,
 
 	mutex_lock(&inode->i_mutex);
 
-	status = ocfs2_read_blocks(inode, OCFS2_I(inode)->ip_blkno, 1,
-				   &alloc_bh, OCFS2_BH_IGNORE_CACHE);
+	status = ocfs2_read_inode_block_full(inode, &alloc_bh,
+					     OCFS2_BH_IGNORE_CACHE);
 	if (status < 0) {
 		mlog_errno(status);
 		goto bail;
@@ -476,7 +391,8 @@ int ocfs2_begin_local_alloc_recovery(struct ocfs2_super *osb,
 	alloc = (struct ocfs2_dinode *) alloc_bh->b_data;
 	ocfs2_clear_local_alloc(alloc);
 
-	status = ocfs2_write_block(osb, alloc_bh, inode);
+	ocfs2_compute_meta_ecc(osb->sb, alloc_bh->b_data, &alloc->i_check);
+	status = ocfs2_write_block(osb, alloc_bh, INODE_CACHE(inode));
 	if (status < 0)
 		mlog_errno(status);
 
@@ -560,7 +476,7 @@ out_mutex:
 
 out:
 	if (!status)
-		ocfs2_init_inode_steal_slot(osb);
+		ocfs2_init_steal_slots(osb);
 	mlog_exit(status);
 	return status;
 }
@@ -762,9 +678,10 @@ int ocfs2_claim_local_alloc_bits(struct ocfs2_super *osb,
 	 * delete bits from it! */
 	*num_bits = bits_wanted;
 
-	status = ocfs2_journal_access(handle, local_alloc_inode,
-				      osb->local_alloc_bh,
-				      OCFS2_JOURNAL_ACCESS_WRITE);
+	status = ocfs2_journal_access_di(handle,
+					 INODE_CACHE(local_alloc_inode),
+					 osb->local_alloc_bh,
+					 OCFS2_JOURNAL_ACCESS_WRITE);
 	if (status < 0) {
 		mlog_errno(status);
 		goto bail;
@@ -955,8 +872,10 @@ static int ocfs2_sync_local_to_main(struct ocfs2_super *osb,
 			     (unsigned long long)la_start_blk,
 			     (unsigned long long)blkno);
 
-			status = ocfs2_free_clusters(handle, main_bm_inode,
-						     main_bm_bh, blkno, count);
+			status = ocfs2_release_clusters(handle,
+							main_bm_inode,
+							main_bm_bh, blkno,
+							count);
 			if (status < 0) {
 				mlog_errno(status);
 				goto bail;
@@ -1067,8 +986,7 @@ static int ocfs2_local_alloc_reserve_for_window(struct ocfs2_super *osb,
 	}
 
 retry_enospc:
-	(*ac)->ac_bits_wanted = osb->local_alloc_bits;
-
+	(*ac)->ac_bits_wanted = osb->local_alloc_default_bits;
 	status = ocfs2_reserve_cluster_bitmap_bits(osb, *ac);
 	if (status == -ENOSPC) {
 		if (ocfs2_recalc_la_window(osb, OCFS2_LA_EVENT_ENOSPC) ==
@@ -1144,6 +1062,7 @@ retry_enospc:
 		    OCFS2_LA_DISABLED)
 			goto bail;
 
+		ac->ac_bits_wanted = osb->local_alloc_default_bits;
 		status = ocfs2_claim_clusters(osb, handle, ac,
 					      osb->local_alloc_bits,
 					      &cluster_off,
@@ -1240,9 +1159,10 @@ static int ocfs2_local_alloc_slide_window(struct ocfs2_super *osb,
 	}
 	memcpy(alloc_copy, alloc, osb->local_alloc_bh->b_size);
 
-	status = ocfs2_journal_access(handle, local_alloc_inode,
-				      osb->local_alloc_bh,
-				      OCFS2_JOURNAL_ACCESS_WRITE);
+	status = ocfs2_journal_access_di(handle,
+					 INODE_CACHE(local_alloc_inode),
+					 osb->local_alloc_bh,
+					 OCFS2_JOURNAL_ACCESS_WRITE);
 	if (status < 0) {
 		mlog_errno(status);
 		goto bail;

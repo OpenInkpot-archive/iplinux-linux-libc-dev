@@ -72,9 +72,9 @@
 
 #include "tcp_internal.h"
 
-#define SC_NODEF_FMT "node %s (num %u) at %u.%u.%u.%u:%u"
+#define SC_NODEF_FMT "node %s (num %u) at %pI4:%u"
 #define SC_NODEF_ARGS(sc) sc->sc_node->nd_name, sc->sc_node->nd_num,	\
-			  NIPQUAD(sc->sc_node->nd_ipv4_address),	\
+			  &sc->sc_node->nd_ipv4_address,		\
 			  ntohs(sc->sc_node->nd_ipv4_port)
 
 /*
@@ -485,7 +485,7 @@ static void o2net_set_nn_state(struct o2net_node *nn,
 	}
 
 	if (was_valid && !valid) {
-		printk(KERN_INFO "o2net: no longer connected to "
+		printk(KERN_NOTICE "o2net: no longer connected to "
 		       SC_NODEF_FMT "\n", SC_NODEF_ARGS(old_sc));
 		o2net_complete_nodes_nsw(nn);
 	}
@@ -493,7 +493,7 @@ static void o2net_set_nn_state(struct o2net_node *nn,
 	if (!was_valid && valid) {
 		o2quo_conn_up(o2net_num_from_nn(nn));
 		cancel_delayed_work(&nn->nn_connect_expired);
-		printk(KERN_INFO "o2net: %s " SC_NODEF_FMT "\n",
+		printk(KERN_NOTICE "o2net: %s " SC_NODEF_FMT "\n",
 		       o2nm_this_node() > sc->sc_node->nd_num ?
 		       		"connected to" : "accepted connection from",
 		       SC_NODEF_ARGS(sc));
@@ -930,7 +930,7 @@ static void o2net_sendpage(struct o2net_sock_container *sc,
 			cond_resched();
 			continue;
 		}
-		mlog(ML_ERROR, "sendpage of size %zu to " SC_NODEF_FMT 
+		mlog(ML_ERROR, "sendpage of size %zu to " SC_NODEF_FMT
 		     " failed with %zd\n", size, SC_NODEF_ARGS(sc), ret);
 		o2net_ensure_shutdown(nn, sc, 0);
 		break;
@@ -974,7 +974,7 @@ static int o2net_tx_can_proceed(struct o2net_node *nn,
 int o2net_send_message_vec(u32 msg_type, u32 key, struct kvec *caller_vec,
 			   size_t caller_veclen, u8 target_node, int *status)
 {
-	int ret, error = 0;
+	int ret;
 	struct o2net_msg *msg = NULL;
 	size_t veclen, caller_bytes = 0;
 	struct kvec *vec = NULL;
@@ -1015,10 +1015,7 @@ int o2net_send_message_vec(u32 msg_type, u32 key, struct kvec *caller_vec,
 
 	o2net_set_nst_sock_time(&nst);
 
-	ret = wait_event_interruptible(nn->nn_sc_wq,
-				       o2net_tx_can_proceed(nn, &sc, &error));
-	if (!ret && error)
-		ret = error;
+	wait_event(nn->nn_sc_wq, o2net_tx_can_proceed(nn, &sc, &ret));
 	if (ret)
 		goto out;
 
@@ -1479,14 +1476,14 @@ static void o2net_idle_timer(unsigned long data)
 
 	do_gettimeofday(&now);
 
-	printk(KERN_INFO "o2net: connection to " SC_NODEF_FMT " has been idle for %u.%u "
+	printk(KERN_NOTICE "o2net: connection to " SC_NODEF_FMT " has been idle for %u.%u "
 	     "seconds, shutting it down.\n", SC_NODEF_ARGS(sc),
 		     o2net_idle_timeout() / 1000,
 		     o2net_idle_timeout() % 1000);
 	mlog(ML_NOTICE, "here are some times that might help debug the "
 	     "situation: (tmr %ld.%ld now %ld.%ld dr %ld.%ld adv "
 	     "%ld.%ld:%ld.%ld func (%08x:%u) %ld.%ld:%ld.%ld)\n",
-	     sc->sc_tv_timer.tv_sec, (long) sc->sc_tv_timer.tv_usec, 
+	     sc->sc_tv_timer.tv_sec, (long) sc->sc_tv_timer.tv_usec,
 	     now.tv_sec, (long) now.tv_usec,
 	     sc->sc_tv_data_ready.tv_sec, (long) sc->sc_tv_data_ready.tv_usec,
 	     sc->sc_tv_advance_start.tv_sec,
@@ -1597,8 +1594,8 @@ static void o2net_start_connect(struct work_struct *work)
 	ret = sock->ops->bind(sock, (struct sockaddr *)&myaddr,
 			      sizeof(myaddr));
 	if (ret) {
-		mlog(ML_ERROR, "bind failed with %d at address %u.%u.%u.%u\n",
-		     ret, NIPQUAD(mynode->nd_ipv4_address));
+		mlog(ML_ERROR, "bind failed with %d at address %pI4\n",
+		     ret, &mynode->nd_ipv4_address);
 		goto out;
 	}
 
@@ -1790,17 +1787,16 @@ static int o2net_accept_one(struct socket *sock)
 
 	node = o2nm_get_node_by_ip(sin.sin_addr.s_addr);
 	if (node == NULL) {
-		mlog(ML_NOTICE, "attempt to connect from unknown node at "
-		     "%u.%u.%u.%u:%d\n", NIPQUAD(sin.sin_addr.s_addr),
-		     ntohs(sin.sin_port));
+		mlog(ML_NOTICE, "attempt to connect from unknown node at %pI4:%d\n",
+		     &sin.sin_addr.s_addr, ntohs(sin.sin_port));
 		ret = -EINVAL;
 		goto out;
 	}
 
 	if (o2nm_this_node() > node->nd_num) {
 		mlog(ML_NOTICE, "unexpected connect attempted from a lower "
-		     "numbered node '%s' at " "%u.%u.%u.%u:%d with num %u\n",
-		     node->nd_name, NIPQUAD(sin.sin_addr.s_addr),
+		     "numbered node '%s' at " "%pI4:%d with num %u\n",
+		     node->nd_name, &sin.sin_addr.s_addr,
 		     ntohs(sin.sin_port), node->nd_num);
 		ret = -EINVAL;
 		goto out;
@@ -1810,8 +1806,8 @@ static int o2net_accept_one(struct socket *sock)
 	 * and tries to connect before we see their heartbeat */
 	if (!o2hb_check_node_heartbeating_from_callback(node->nd_num)) {
 		mlog(ML_CONN, "attempt to connect from node '%s' at "
-		     "%u.%u.%u.%u:%d but it isn't heartbeating\n",
-		     node->nd_name, NIPQUAD(sin.sin_addr.s_addr),
+		     "%pI4:%d but it isn't heartbeating\n",
+		     node->nd_name, &sin.sin_addr.s_addr,
 		     ntohs(sin.sin_port));
 		ret = -EINVAL;
 		goto out;
@@ -1827,8 +1823,8 @@ static int o2net_accept_one(struct socket *sock)
 	spin_unlock(&nn->nn_lock);
 	if (ret) {
 		mlog(ML_NOTICE, "attempt to connect from node '%s' at "
-		     "%u.%u.%u.%u:%d but it already has an open connection\n",
-		     node->nd_name, NIPQUAD(sin.sin_addr.s_addr),
+		     "%pI4:%d but it already has an open connection\n",
+		     node->nd_name, &sin.sin_addr.s_addr,
 		     ntohs(sin.sin_port));
 		goto out;
 	}
@@ -1924,15 +1920,15 @@ static int o2net_open_listening_sock(__be32 addr, __be16 port)
 	sock->sk->sk_reuse = 1;
 	ret = sock->ops->bind(sock, (struct sockaddr *)&sin, sizeof(sin));
 	if (ret < 0) {
-		mlog(ML_ERROR, "unable to bind socket at %u.%u.%u.%u:%u, "
-		     "ret=%d\n", NIPQUAD(addr), ntohs(port), ret);
+		mlog(ML_ERROR, "unable to bind socket at %pI4:%u, "
+		     "ret=%d\n", &addr, ntohs(port), ret);
 		goto out;
 	}
 
 	ret = sock->ops->listen(sock, 64);
 	if (ret < 0) {
-		mlog(ML_ERROR, "unable to listen on %u.%u.%u.%u:%u, ret=%d\n",
-		     NIPQUAD(addr), ntohs(port), ret);
+		mlog(ML_ERROR, "unable to listen on %pI4:%u, ret=%d\n",
+		     &addr, ntohs(port), ret);
 	}
 
 out:

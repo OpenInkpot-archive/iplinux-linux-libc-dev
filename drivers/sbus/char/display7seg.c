@@ -12,6 +12,7 @@
 #include <linux/init.h>
 #include <linux/miscdevice.h>
 #include <linux/ioport.h>		/* request_region */
+#include <linux/slab.h>
 #include <linux/smp_lock.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
@@ -214,7 +215,7 @@ static int __devinit d7s_probe(struct of_device *op,
 
 	writeb(regs,  p->regs);
 
-	printk(KERN_INFO PFX "7-Segment Display%s at [%s:0x%lx] %s\n", 
+	printk(KERN_INFO PFX "7-Segment Display%s at [%s:0x%llx] %s\n",
 	       op->node->full_name,
 	       (regs & D7S_FLIP) ? " (FLIPPED)" : "",
 	       op->resource[0].start,

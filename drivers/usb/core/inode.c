@@ -39,6 +39,7 @@
 #include <linux/parser.h>
 #include <linux/notifier.h>
 #include <linux/seq_file.h>
+#include <linux/smp_lock.h>
 #include <asm/byteorder.h>
 #include "usb.h"
 #include "hcd.h"
@@ -47,7 +48,6 @@
 #define USBFS_DEFAULT_BUSMODE (S_IXUGO | S_IRUGO)
 #define USBFS_DEFAULT_LISTMODE S_IRUGO
 
-static struct super_operations usbfs_ops;
 static const struct file_operations default_file_operations;
 static struct vfsmount *usbfs_mount;
 static int usbfs_mount_count;	/* = 0 */
@@ -265,8 +265,12 @@ static int remount(struct super_block *sb, int *flags, char *data)
 		return -EINVAL;
 	}
 
+	lock_kernel();
+
 	if (usbfs_mount && usbfs_mount->mnt_sb)
 		update_sb(usbfs_mount->mnt_sb);
+
+	unlock_kernel();
 
 	return 0;
 }
@@ -277,9 +281,8 @@ static struct inode *usbfs_get_inode (struct super_block *sb, int mode, dev_t de
 
 	if (inode) {
 		inode->i_mode = mode;
-		inode->i_uid = current->fsuid;
-		inode->i_gid = current->fsgid;
-		inode->i_blocks = 0;
+		inode->i_uid = current_fsuid();
+		inode->i_gid = current_fsgid();
 		inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 		switch (mode & S_IFMT) {
 		default:
@@ -377,6 +380,7 @@ static int usbfs_rmdir(struct inode *dir, struct dentry *dentry)
 	mutex_lock(&inode->i_mutex);
 	dentry_unhash(dentry);
 	if (usbfs_empty(dentry)) {
+		dont_mount(dentry);
 		drop_nlink(dentry->d_inode);
 		drop_nlink(dentry->d_inode);
 		dput(dentry);
@@ -445,7 +449,7 @@ static const struct file_operations default_file_operations = {
 	.llseek =	default_file_lseek,
 };
 
-static struct super_operations usbfs_ops = {
+static const struct super_operations usbfs_ops = {
 	.statfs =	simple_statfs,
 	.drop_inode =	generic_delete_inode,
 	.remount_fs =	remount,
@@ -512,13 +516,13 @@ static int fs_create_by_name (const char *name, mode_t mode,
 	*dentry = NULL;
 	mutex_lock(&parent->d_inode->i_mutex);
 	*dentry = lookup_one_len(name, parent, strlen(name));
-	if (!IS_ERR(dentry)) {
+	if (!IS_ERR(*dentry)) {
 		if ((mode & S_IFMT) == S_IFDIR)
 			error = usbfs_mkdir (parent->d_inode, *dentry, mode);
 		else 
 			error = usbfs_create (parent->d_inode, *dentry, mode);
 	} else
-		error = PTR_ERR(dentry);
+		error = PTR_ERR(*dentry);
 	mutex_unlock(&parent->d_inode->i_mutex);
 
 	return error;
@@ -718,7 +722,6 @@ static void usbfs_remove_device(struct usb_device *dev)
 		fs_remove_file (dev->usbfs_dentry);
 		dev->usbfs_dentry = NULL;
 	}
-	usb_fs_classdev_common_remove(dev);
 }
 
 static int usbfs_notify(struct notifier_block *self, unsigned long action, void *dev)

@@ -7,13 +7,14 @@
  */
 
 #include <linux/errno.h>
+#include <linux/gfp.h>
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
 #include <linux/vmalloc.h>
+#include <linux/uaccess.h>
 
-#include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/ldt.h>
 #include <asm/desc.h>
@@ -67,8 +68,8 @@ static int alloc_ldt(mm_context_t *pc, int mincount, int reload)
 #ifdef CONFIG_SMP
 		preempt_disable();
 		load_LDT(pc);
-		if (!cpus_equal(current->mm->cpu_vm_mask,
-				cpumask_of_cpu(smp_processor_id())))
+		if (!cpumask_equal(mm_cpumask(current->mm),
+				   cpumask_of(smp_processor_id())))
 			smp_call_function(flush_ldt, current->mm, 1);
 		preempt_enable();
 #else
@@ -93,7 +94,7 @@ static inline int copy_ldt(mm_context_t *new, mm_context_t *old)
 	if (err < 0)
 		return err;
 
-	for(i = 0; i < old->size; i++)
+	for (i = 0; i < old->size; i++)
 		write_ldt_entry(new->ldt, i, old->ldt + i * LDT_ENTRY_SIZE);
 	return 0;
 }

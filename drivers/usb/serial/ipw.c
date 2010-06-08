@@ -134,7 +134,7 @@ enum {
 
 #define IPW_WANTS_TO_SEND	0x30
 
-static struct usb_device_id usb_ipw_ids[] = {
+static const struct usb_device_id usb_ipw_ids[] = {
 	{ USB_DEVICE(IPW_VID, IPW_PID) },
 	{ },
 };
@@ -172,7 +172,6 @@ static void ipw_read_bulk_callback(struct urb *urb)
 
 	tty = tty_port_tty_get(&port->port);
 	if (tty && urb->actual_length) {
-		tty_buffer_request_room(tty, urb->actual_length);
 		tty_insert_flip_string(tty, data, urb->actual_length);
 		tty_flip_buffer_push(tty);
 	}
@@ -193,8 +192,7 @@ static void ipw_read_bulk_callback(struct urb *urb)
 	return;
 }
 
-static int ipw_open(struct tty_struct *tty,
-			struct usb_serial_port *port, struct file *filp)
+static int ipw_open(struct tty_struct *tty, struct usb_serial_port *port)
 {
 	struct usb_device *dev = port->serial->dev;
 	u8 buf_flow_static[16] = IPW_BYTES_FLOWINIT;
@@ -206,9 +204,6 @@ static int ipw_open(struct tty_struct *tty,
 	buf_flow_init = kmemdup(buf_flow_static, 16, GFP_KERNEL);
 	if (!buf_flow_init)
 		return -ENOMEM;
-
-	if (tty)
-		tty->low_latency = 1;
 
 	/* --1: Tell the modem to initialize (we think) From sniffs this is
 	 *	always the first thing that gets sent to the modem during
@@ -305,23 +300,17 @@ static int ipw_open(struct tty_struct *tty,
 	return 0;
 }
 
-static void ipw_close(struct tty_struct *tty,
-			struct usb_serial_port *port, struct file *filp)
+static void ipw_dtr_rts(struct usb_serial_port *port, int on)
 {
 	struct usb_device *dev = port->serial->dev;
 	int result;
-
-	if (tty_hung_up_p(filp)) {
-		dbg("%s: tty_hung_up_p ...", __func__);
-		return;
-	}
 
 	/*--1: drop the dtr */
 	dbg("%s:dropping dtr", __func__);
 	result = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
 			 IPW_SIO_SET_PIN,
 			 USB_TYPE_VENDOR | USB_RECIP_INTERFACE | USB_DIR_OUT,
-			 IPW_PIN_CLRDTR,
+			 on ? IPW_PIN_SETDTR : IPW_PIN_CLRDTR,
 			 0,
 			 NULL,
 			 0,
@@ -335,7 +324,7 @@ static void ipw_close(struct tty_struct *tty,
 	result = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
 			 IPW_SIO_SET_PIN, USB_TYPE_VENDOR |
 			 		USB_RECIP_INTERFACE | USB_DIR_OUT,
-			 IPW_PIN_CLRRTS,
+			 on ? IPW_PIN_SETRTS : IPW_PIN_CLRRTS,
 			 0,
 			 NULL,
 			 0,
@@ -343,7 +332,12 @@ static void ipw_close(struct tty_struct *tty,
 	if (result < 0)
 		dev_err(&port->dev,
 				"dropping rts failed (error = %d)\n", result);
+}
 
+static void ipw_close(struct usb_serial_port *port)
+{
+	struct usb_device *dev = port->serial->dev;
+	int result;
 
 	/*--3: purge */
 	dbg("%s:sending purge", __func__);
@@ -464,6 +458,7 @@ static struct usb_serial_driver ipw_device = {
 	.num_ports =		1,
 	.open =			ipw_open,
 	.close =		ipw_close,
+	.dtr_rts =		ipw_dtr_rts,
 	.port_probe = 		ipw_probe,
 	.port_remove =		ipw_disconnect,
 	.write =		ipw_write,
@@ -473,7 +468,7 @@ static struct usb_serial_driver ipw_device = {
 
 
 
-static int usb_ipw_init(void)
+static int __init usb_ipw_init(void)
 {
 	int retval;
 
@@ -490,7 +485,7 @@ static int usb_ipw_init(void)
 	return 0;
 }
 
-static void usb_ipw_exit(void)
+static void __exit usb_ipw_exit(void)
 {
 	usb_deregister(&usb_ipw_driver);
 	usb_serial_deregister(&ipw_device);

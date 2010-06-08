@@ -11,19 +11,45 @@
 #ifndef __ASM_ARCH_MXC_MEMORY_H__
 #define __ASM_ARCH_MXC_MEMORY_H__
 
-#include <mach/hardware.h>
+#define MX1_PHYS_OFFSET		UL(0x08000000)
+#define MX21_PHYS_OFFSET	UL(0xc0000000)
+#define MX25_PHYS_OFFSET	UL(0x80000000)
+#define MX27_PHYS_OFFSET	UL(0xa0000000)
+#define MX3x_PHYS_OFFSET	UL(0x80000000)
+#define MX51_PHYS_OFFSET	UL(0x90000000)
+#define MXC91231_PHYS_OFFSET	UL(0x90000000)
 
-/*
- * Virtual view <-> DMA view memory address translations
- * This macro is used to translate the virtual address to an address
- * suitable to be passed to set_dma_addr()
- */
-#define __virt_to_bus(a)	__virt_to_phys(a)
+#if !defined(CONFIG_RUNTIME_PHYS_OFFSET)
+# if defined CONFIG_ARCH_MX1
+#  define PHYS_OFFSET		MX1_PHYS_OFFSET
+# elif defined CONFIG_MACH_MX21
+#  define PHYS_OFFSET		MX21_PHYS_OFFSET
+# elif defined CONFIG_ARCH_MX25
+#  define PHYS_OFFSET		MX25_PHYS_OFFSET
+# elif defined CONFIG_MACH_MX27
+#  define PHYS_OFFSET		MX27_PHYS_OFFSET
+# elif defined CONFIG_ARCH_MX3
+#  define PHYS_OFFSET		MX3x_PHYS_OFFSET
+# elif defined CONFIG_ARCH_MXC91231
+#  define PHYS_OFFSET		MXC91231_PHYS_OFFSET
+# elif defined CONFIG_ARCH_MX5
+#  define PHYS_OFFSET		MX51_PHYS_OFFSET
+# endif
+#endif
 
+#if defined(CONFIG_MX3_VIDEO)
 /*
- * Used to convert an address for DMA operations to an address that the
- * kernel can use.
+ * Increase size of DMA-consistent memory region.
+ * This is required for mx3 camera driver to capture at least two QXGA frames.
  */
-#define __bus_to_virt(a)	__phys_to_virt(a)
+#define CONSISTENT_DMA_SIZE SZ_8M
+
+#elif defined(CONFIG_MX1_VIDEO)
+/*
+ * Increase size of DMA-consistent memory region.
+ * This is required for i.MX camera driver to capture at least four VGA frames.
+ */
+#define CONSISTENT_DMA_SIZE SZ_4M
+#endif /* CONFIG_MX1_VIDEO */
 
 #endif /* __ASM_ARCH_MXC_MEMORY_H__ */

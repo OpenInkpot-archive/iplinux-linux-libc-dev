@@ -37,6 +37,42 @@
  * -- Manfred Spraul <manfred@colorfullife.com> 2002-05-09
  */
 
+static void pipe_lock_nested(struct pipe_inode_info *pipe, int subclass)
+{
+	if (pipe->inode)
+		mutex_lock_nested(&pipe->inode->i_mutex, subclass);
+}
+
+void pipe_lock(struct pipe_inode_info *pipe)
+{
+	/*
+	 * pipe_lock() nests non-pipe inode locks (for writing to a file)
+	 */
+	pipe_lock_nested(pipe, I_MUTEX_PARENT);
+}
+EXPORT_SYMBOL(pipe_lock);
+
+void pipe_unlock(struct pipe_inode_info *pipe)
+{
+	if (pipe->inode)
+		mutex_unlock(&pipe->inode->i_mutex);
+}
+EXPORT_SYMBOL(pipe_unlock);
+
+void pipe_double_lock(struct pipe_inode_info *pipe1,
+		      struct pipe_inode_info *pipe2)
+{
+	BUG_ON(pipe1 == pipe2);
+
+	if (pipe1 < pipe2) {
+		pipe_lock_nested(pipe1, I_MUTEX_PARENT);
+		pipe_lock_nested(pipe2, I_MUTEX_CHILD);
+	} else {
+		pipe_lock_nested(pipe2, I_MUTEX_PARENT);
+		pipe_lock_nested(pipe1, I_MUTEX_CHILD);
+	}
+}
+
 /* Drop the inode semaphore and wait for a pipe event, atomically */
 void pipe_wait(struct pipe_inode_info *pipe)
 {
@@ -47,12 +83,10 @@ void pipe_wait(struct pipe_inode_info *pipe)
 	 * is considered a noninteractive wait:
 	 */
 	prepare_to_wait(&pipe->wait, &wait, TASK_INTERRUPTIBLE);
-	if (pipe->inode)
-		mutex_unlock(&pipe->inode->i_mutex);
+	pipe_unlock(pipe);
 	schedule();
 	finish_wait(&pipe->wait, &wait);
-	if (pipe->inode)
-		mutex_lock(&pipe->inode->i_mutex);
+	pipe_lock(pipe);
 }
 
 static int
@@ -266,6 +300,20 @@ int generic_pipe_buf_confirm(struct pipe_inode_info *info,
 			     struct pipe_buffer *buf)
 {
 	return 0;
+}
+
+/**
+ * generic_pipe_buf_release - put a reference to a &struct pipe_buffer
+ * @pipe:	the pipe that the buffer belongs to
+ * @buf:	the buffer to put a reference to
+ *
+ * Description:
+ *	This function releases a reference to @buf.
+ */
+void generic_pipe_buf_release(struct pipe_inode_info *pipe,
+			      struct pipe_buffer *buf)
+{
+	page_cache_release(buf->page);
 }
 
 static const struct pipe_buf_operations anon_pipe_buf_ops = {
@@ -667,10 +715,7 @@ pipe_read_fasync(int fd, struct file *filp, int on)
 	retval = fasync_helper(fd, filp, on, &inode->i_pipe->fasync_readers);
 	mutex_unlock(&inode->i_mutex);
 
-	if (retval < 0)
-		return retval;
-
-	return 0;
+	return retval;
 }
 
 
@@ -684,10 +729,7 @@ pipe_write_fasync(int fd, struct file *filp, int on)
 	retval = fasync_helper(fd, filp, on, &inode->i_pipe->fasync_writers);
 	mutex_unlock(&inode->i_mutex);
 
-	if (retval < 0)
-		return retval;
-
-	return 0;
+	return retval;
 }
 
 
@@ -699,18 +741,14 @@ pipe_rdwr_fasync(int fd, struct file *filp, int on)
 	int retval;
 
 	mutex_lock(&inode->i_mutex);
-
 	retval = fasync_helper(fd, filp, on, &pipe->fasync_readers);
-
-	if (retval >= 0)
+	if (retval >= 0) {
 		retval = fasync_helper(fd, filp, on, &pipe->fasync_writers);
-
+		if (retval < 0) /* this can happen only if on == T */
+			fasync_helper(-1, filp, 0, &pipe->fasync_readers);
+	}
 	mutex_unlock(&inode->i_mutex);
-
-	if (retval < 0)
-		return retval;
-
-	return 0;
+	return retval;
 }
 
 
@@ -739,36 +777,55 @@ pipe_rdwr_release(struct inode *inode, struct file *filp)
 static int
 pipe_read_open(struct inode *inode, struct file *filp)
 {
-	/* We could have perhaps used atomic_t, but this and friends
-	   below are the only places.  So it doesn't seem worthwhile.  */
+	int ret = -ENOENT;
+
 	mutex_lock(&inode->i_mutex);
-	inode->i_pipe->readers++;
+
+	if (inode->i_pipe) {
+		ret = 0;
+		inode->i_pipe->readers++;
+	}
+
 	mutex_unlock(&inode->i_mutex);
 
-	return 0;
+	return ret;
 }
 
 static int
 pipe_write_open(struct inode *inode, struct file *filp)
 {
+	int ret = -ENOENT;
+
 	mutex_lock(&inode->i_mutex);
-	inode->i_pipe->writers++;
+
+	if (inode->i_pipe) {
+		ret = 0;
+		inode->i_pipe->writers++;
+	}
+
 	mutex_unlock(&inode->i_mutex);
 
-	return 0;
+	return ret;
 }
 
 static int
 pipe_rdwr_open(struct inode *inode, struct file *filp)
 {
+	int ret = -ENOENT;
+
 	mutex_lock(&inode->i_mutex);
-	if (filp->f_mode & FMODE_READ)
-		inode->i_pipe->readers++;
-	if (filp->f_mode & FMODE_WRITE)
-		inode->i_pipe->writers++;
+
+	if (inode->i_pipe) {
+		ret = 0;
+		if (filp->f_mode & FMODE_READ)
+			inode->i_pipe->readers++;
+		if (filp->f_mode & FMODE_WRITE)
+			inode->i_pipe->writers++;
+	}
+
 	mutex_unlock(&inode->i_mutex);
 
-	return 0;
+	return ret;
 }
 
 /*
@@ -849,17 +906,6 @@ void free_pipe_info(struct inode *inode)
 }
 
 static struct vfsmount *pipe_mnt __read_mostly;
-static int pipefs_delete_dentry(struct dentry *dentry)
-{
-	/*
-	 * At creation time, we pretended this dentry was hashed
-	 * (by clearing DCACHE_UNHASHED bit in d_flags)
-	 * At delete time, we restore the truth : not hashed.
-	 * (so that dput() can proceed correctly)
-	 */
-	dentry->d_flags |= DCACHE_UNHASHED;
-	return 0;
-}
 
 /*
  * pipefs_dname() is called from d_path().
@@ -870,8 +916,7 @@ static char *pipefs_dname(struct dentry *dentry, char *buffer, int buflen)
 				dentry->d_inode->i_ino);
 }
 
-static struct dentry_operations pipefs_dentry_operations = {
-	.d_delete	= pipefs_delete_dentry,
+static const struct dentry_operations pipefs_dentry_operations = {
 	.d_dname	= pipefs_dname,
 };
 
@@ -899,8 +944,8 @@ static struct inode * get_pipe_inode(void)
 	 */
 	inode->i_state = I_DIRTY;
 	inode->i_mode = S_IFIFO | S_IRUSR | S_IWUSR;
-	inode->i_uid = current->fsuid;
-	inode->i_gid = current->fsgid;
+	inode->i_uid = current_fsuid();
+	inode->i_gid = current_fsgid();
 	inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 
 	return inode;
@@ -917,7 +962,7 @@ struct file *create_write_pipe(int flags)
 	int err;
 	struct inode *inode;
 	struct file *f;
-	struct dentry *dentry;
+	struct path path;
 	struct qstr name = { .name = "" };
 
 	err = -ENFILE;
@@ -926,21 +971,16 @@ struct file *create_write_pipe(int flags)
 		goto err;
 
 	err = -ENOMEM;
-	dentry = d_alloc(pipe_mnt->mnt_sb->s_root, &name);
-	if (!dentry)
+	path.dentry = d_alloc(pipe_mnt->mnt_sb->s_root, &name);
+	if (!path.dentry)
 		goto err_inode;
+	path.mnt = mntget(pipe_mnt);
 
-	dentry->d_op = &pipefs_dentry_operations;
-	/*
-	 * We dont want to publish this dentry into global dentry hash table.
-	 * We pretend dentry is already hashed, by unsetting DCACHE_UNHASHED
-	 * This permits a working /proc/$pid/fd/XXX on pipes
-	 */
-	dentry->d_flags &= ~DCACHE_UNHASHED;
-	d_instantiate(dentry, inode);
+	path.dentry->d_op = &pipefs_dentry_operations;
+	d_instantiate(path.dentry, inode);
 
 	err = -ENFILE;
-	f = alloc_file(pipe_mnt, dentry, FMODE_WRITE, &write_pipefifo_fops);
+	f = alloc_file(&path, FMODE_WRITE, &write_pipefifo_fops);
 	if (!f)
 		goto err_dentry;
 	f->f_mapping = inode->i_mapping;
@@ -952,7 +992,7 @@ struct file *create_write_pipe(int flags)
 
  err_dentry:
 	free_pipe_info(inode);
-	dput(dentry);
+	path_put(&path);
 	return ERR_PTR(err);
 
  err_inode:
@@ -971,20 +1011,14 @@ void free_write_pipe(struct file *f)
 
 struct file *create_read_pipe(struct file *wrf, int flags)
 {
-	struct file *f = get_empty_filp();
+	/* Grab pipe from the writer */
+	struct file *f = alloc_file(&wrf->f_path, FMODE_READ,
+				    &read_pipefifo_fops);
 	if (!f)
 		return ERR_PTR(-ENFILE);
 
-	/* Grab pipe from the writer */
-	f->f_path = wrf->f_path;
 	path_get(&wrf->f_path);
-	f->f_mapping = wrf->f_path.dentry->d_inode->i_mapping;
-
-	f->f_pos = 0;
 	f->f_flags = O_RDONLY | (flags & O_NONBLOCK);
-	f->f_op = &read_pipefifo_fops;
-	f->f_mode = FMODE_READ;
-	f->f_version = 0;
 
 	return f;
 }
@@ -1016,10 +1050,7 @@ int do_pipe_flags(int *fd, int flags)
 		goto err_fdr;
 	fdw = error;
 
-	error = audit_fd_pair(fdr, fdw);
-	if (error < 0)
-		goto err_fdw;
-
+	audit_fd_pair(fdr, fdw);
 	fd_install(fdr, fr);
 	fd_install(fdw, fw);
 	fd[0] = fdr;
@@ -1027,8 +1058,6 @@ int do_pipe_flags(int *fd, int flags)
 
 	return 0;
 
- err_fdw:
-	put_unused_fd(fdw);
  err_fdr:
 	put_unused_fd(fdr);
  err_read_pipe:
@@ -1039,16 +1068,11 @@ int do_pipe_flags(int *fd, int flags)
 	return error;
 }
 
-int do_pipe(int *fd)
-{
-	return do_pipe_flags(fd, 0);
-}
-
 /*
  * sys_pipe() is the normal C calling standard for creating
  * a pipe. It's not the way Unix traditionally does this, though.
  */
-asmlinkage long __weak sys_pipe2(int __user *fildes, int flags)
+SYSCALL_DEFINE2(pipe2, int __user *, fildes, int, flags)
 {
 	int fd[2];
 	int error;
@@ -1064,7 +1088,7 @@ asmlinkage long __weak sys_pipe2(int __user *fildes, int flags)
 	return error;
 }
 
-asmlinkage long __weak sys_pipe(int __user *fildes)
+SYSCALL_DEFINE1(pipe, int __user *, fildes)
 {
 	return sys_pipe2(fildes, 0);
 }

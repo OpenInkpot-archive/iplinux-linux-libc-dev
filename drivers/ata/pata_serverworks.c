@@ -1,6 +1,7 @@
 /*
  * pata_serverworks.c 	- Serverworks PATA for new ATA layer
  *			  (C) 2005 Red Hat Inc
+ *			  (C) 2010 Bartlomiej Zolnierkiewicz
  *
  * based upon
  *
@@ -138,7 +139,6 @@ static struct sv_cable_table cable_detect[] = {
 /**
  *	serverworks_cable_detect	-	cable detection
  *	@ap: ATA port
- *	@deadline: deadline jiffies for the operation
  *
  *	Perform cable detection according to the device and subvendor
  *	identifications
@@ -254,7 +254,7 @@ static void serverworks_set_piomode(struct ata_port *ap, struct ata_device *adev
 	if (serverworks_is_csb(pdev)) {
 		pci_read_config_word(pdev, 0x4A, &csb5_pio);
 		csb5_pio &= ~(0x0F << devbits);
-		pci_write_config_byte(pdev, 0x4A, csb5_pio | (pio << devbits));
+		pci_write_config_word(pdev, 0x4A, csb5_pio | (pio << devbits));
 	}
 }
 
@@ -328,7 +328,7 @@ static int serverworks_fixup_osb4(struct pci_dev *pdev)
 		pci_dev_put(isa_dev);
 		return 0;
 	}
-	printk(KERN_WARNING "ata_serverworks: Unable to find bridge.\n");
+	printk(KERN_WARNING DRV_NAME ": Unable to find bridge.\n");
 	return -ENODEV;
 }
 
@@ -399,26 +399,26 @@ static int serverworks_init_one(struct pci_dev *pdev, const struct pci_device_id
 	static const struct ata_port_info info[4] = {
 		{ /* OSB4 */
 			.flags = ATA_FLAG_SLAVE_POSS,
-			.pio_mask = 0x1f,
-			.mwdma_mask = 0x07,
-			.udma_mask = 0x07,
+			.pio_mask = ATA_PIO4,
+			.mwdma_mask = ATA_MWDMA2,
+			.udma_mask = ATA_UDMA2,
 			.port_ops = &serverworks_osb4_port_ops
 		}, { /* OSB4 no UDMA */
 			.flags = ATA_FLAG_SLAVE_POSS,
-			.pio_mask = 0x1f,
-			.mwdma_mask = 0x07,
-			.udma_mask = 0x00,
+			.pio_mask = ATA_PIO4,
+			.mwdma_mask = ATA_MWDMA2,
+			/* No UDMA */
 			.port_ops = &serverworks_osb4_port_ops
 		}, { /* CSB5 */
 			.flags = ATA_FLAG_SLAVE_POSS,
-			.pio_mask = 0x1f,
-			.mwdma_mask = 0x07,
+			.pio_mask = ATA_PIO4,
+			.mwdma_mask = ATA_MWDMA2,
 			.udma_mask = ATA_UDMA4,
 			.port_ops = &serverworks_csb_port_ops
 		}, { /* CSB5 - later revisions*/
 			.flags = ATA_FLAG_SLAVE_POSS,
-			.pio_mask = 0x1f,
-			.mwdma_mask = 0x07,
+			.pio_mask = ATA_PIO4,
+			.mwdma_mask = ATA_MWDMA2,
 			.udma_mask = ATA_UDMA5,
 			.port_ops = &serverworks_csb_port_ops
 		}
@@ -460,7 +460,7 @@ static int serverworks_init_one(struct pci_dev *pdev, const struct pci_device_id
 	if (pdev->device == PCI_DEVICE_ID_SERVERWORKS_CSB5IDE)
 		ata_pci_bmdma_clear_simplex(pdev);
 
-	return ata_pci_sff_init_one(pdev, ppi, &serverworks_sht, NULL);
+	return ata_pci_sff_init_one(pdev, ppi, &serverworks_sht, NULL, 0);
 }
 
 #ifdef CONFIG_PM

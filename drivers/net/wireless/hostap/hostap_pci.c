@@ -9,6 +9,7 @@
 #include <linux/if.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
+#include <linux/slab.h>
 #include <linux/workqueue.h>
 #include <linux/wireless.h>
 #include <net/iw_handler.h>
@@ -39,7 +40,7 @@ struct hostap_pci_priv {
 /* FIX: do we need mb/wmb/rmb with memory operations? */
 
 
-static struct pci_device_id prism2_pci_id_table[] __devinitdata = {
+static DEFINE_PCI_DEVICE_TABLE(prism2_pci_id_table) = {
 	/* Intersil Prism3 ISL3872 11Mb/s WLAN Controller */
 	{ 0x1260, 0x3872, PCI_ANY_ID, PCI_ANY_ID },
 	/* Intersil Prism2.5 ISL3874 11Mb/s WLAN Controller */
@@ -312,7 +313,7 @@ static int prism2_pci_probe(struct pci_dev *pdev,
 		goto err_out_disable;
 	}
 
-	mem = ioremap(phymem, pci_resource_len(pdev, 0));
+	mem = pci_ioremap_bar(pdev, 0);
 	if (mem == NULL) {
 		printk(KERN_ERR "prism2: Cannot remap PCI memory region\n") ;
 		goto fail;

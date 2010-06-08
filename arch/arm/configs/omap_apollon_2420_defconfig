@@ -196,7 +196,6 @@ CONFIG_MACH_OMAP_APOLLON=y
 #
 # Processor Type
 #
-CONFIG_CPU_32=y
 CONFIG_CPU_V6=y
 # CONFIG_CPU_32v6K is not set
 CONFIG_CPU_32v6=y
@@ -612,7 +611,7 @@ CONFIG_SPI_OMAP24XX=y
 #
 # SPI Protocol Masters
 #
-# CONFIG_SPI_AT25 is not set
+# CONFIG_EEPROM_AT25 is not set
 # CONFIG_SPI_TSC2101 is not set
 # CONFIG_SPI_TSC2102 is not set
 # CONFIG_SPI_TSC210X is not set

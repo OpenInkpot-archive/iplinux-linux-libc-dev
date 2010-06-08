@@ -19,7 +19,7 @@
 #include <asm/system.h>
 #include <asm/irq.h>
 #include <mach/hardware.h>
-#include <asm/dma.h>
+#include <mach/dma.h>
 
 
 #undef DEBUG
@@ -39,7 +39,7 @@ typedef struct {
 
 static sa1100_dma_t dma_chan[SA1100_DMA_CHANNELS];
 
-static spinlock_t dma_list_lock;
+static DEFINE_SPINLOCK(dma_list_lock);
 
 
 static irqreturn_t dma_irq_handler(int irq, void *dev_id)
@@ -65,7 +65,7 @@ static irqreturn_t dma_irq_handler(int irq, void *dev_id)
 
 
 /**
- *	sa1100_request_dma - allocate one of the SA11x0's DMA chanels
+ *	sa1100_request_dma - allocate one of the SA11x0's DMA channels
  *	@device: The SA11x0 peripheral targeted by this request
  *	@device_id: An ascii name for the claiming device
  *	@callback: Function to be called when the DMA completes
@@ -113,10 +113,10 @@ int sa1100_request_dma (dma_device_t device, const char *device_id,
 		}
 	}
 	if (!err) {
-	       if (dma)
-		       dma->device = device;
-	       else
-		       err = -ENOSR;
+		if (dma)
+			dma->device = device;
+		else
+			err = -ENOSR;
 	}
 	spin_unlock(&dma_list_lock);
 	if (err)

@@ -15,6 +15,7 @@
 #include <linux/device.h>
 #include <linux/platform_device.h>
 #include <linux/fb.h>
+#include <linux/mfd/tc6393xb.h>
 
 #include <video/w100fb.h>
 
@@ -22,15 +23,25 @@
 #include <asm/mach/arch.h>
 #include <asm/mach-types.h>
 
-#include <mach/mfp-pxa25x.h>
-#include <mach/hardware.h>
+#include <mach/pxa25x.h>
 #include <mach/eseries-gpio.h>
 #include <mach/udc.h>
+#include <mach/irqs.h>
+#include <mach/audio.h>
 
 #include "generic.h"
 #include "eseries.h"
+#include "clock.h"
 
 /* ------------------------ e800 LCD definitions ------------------------- */
+
+static unsigned long e800_pin_config[] __initdata = {
+	/* AC97 */
+	GPIO28_AC97_BITCLK,
+	GPIO29_AC97_SDATA_IN_0,
+	GPIO30_AC97_SDATA_OUT,
+	GPIO31_AC97_SYNC,
+};
 
 static struct w100_gen_regs e800_lcd_regs = {
 	.lcd_format =            0x00008003,
@@ -160,16 +171,48 @@ static struct pxa2xx_udc_mach_info e800_udc_mach_info = {
 	.gpio_pullup_inverted = 1
 };
 
+/* ----------------- e800 tc6393xb parameters ------------------ */
+
+static struct tc6393xb_platform_data e800_tc6393xb_info = {
+	.irq_base       = IRQ_BOARD_START,
+	.scr_pll2cr     = 0x0cc1,
+	.scr_gper       = 0,
+	.gpio_base      = -1,
+	.suspend        = &eseries_tmio_suspend,
+	.resume         = &eseries_tmio_resume,
+	.enable         = &eseries_tmio_enable,
+	.disable        = &eseries_tmio_disable,
+};
+
+static struct platform_device e800_tc6393xb_device = {
+	.name           = "tc6393xb",
+	.id             = -1,
+	.dev            = {
+		.platform_data = &e800_tc6393xb_info,
+	},
+	.num_resources = 2,
+	.resource      = eseries_tmio_resources,
+};
+
 /* ----------------------------------------------------------------------- */
 
 static struct platform_device *devices[] __initdata = {
 	&e800_fb_device,
+	&e800_tc6393xb_device,
 };
 
 static void __init e800_init(void)
 {
+	pxa2xx_mfp_config(ARRAY_AND_SIZE(e800_pin_config));
+	pxa_set_ffuart_info(NULL);
+	pxa_set_btuart_info(NULL);
+	pxa_set_stuart_info(NULL);
+	clk_add_alias("CLK_CK3P6MI", e800_tc6393xb_device.name,
+			"GPIO11_CLK", NULL),
+	eseries_get_tmio_gpios();
 	platform_add_devices(devices, ARRAY_SIZE(devices));
 	pxa_set_udc_info(&e800_udc_mach_info);
+	pxa_set_ac97_info(NULL);
 }
 
 MACHINE_START(E800, "Toshiba e800")

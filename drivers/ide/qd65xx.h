@@ -4,7 +4,7 @@
 
 /*
  * Authors:	Petr Soucek <petr@ryston.cz>
- * 		Samuel Thibault <samuel.thibault@fnac.net>
+ * 		Samuel Thibault <samuel.thibault@ens-lyon.org>
  */
 
 /* truncates a in [b,c] */
@@ -31,8 +31,15 @@
 
 #define QD_CONFIG(hwif)		((hwif)->config_data & 0x00ff)
 
-#define QD_TIMING(drive)	(byte)(((drive)->drive_data) & 0x00ff)
-#define QD_TIMREG(drive)	(byte)((((drive)->drive_data) & 0xff00) >> 8)
+static inline u8 QD_TIMING(ide_drive_t *drive)
+{
+	return (unsigned long)ide_get_drivedata(drive) & 0x00ff;
+}
+
+static inline u8 QD_TIMREG(ide_drive_t *drive)
+{
+	return ((unsigned long)ide_get_drivedata(drive) & 0xff00) >> 8;
+}
 
 #define QD6500_DEF_DATA		((QD_TIM1_PORT<<8) | (QD_ID3 ? 0x0c : 0x08))
 #define QD6580_DEF_DATA		((QD_TIM1_PORT<<8) | (QD_ID3 ? 0x0a : 0x00))

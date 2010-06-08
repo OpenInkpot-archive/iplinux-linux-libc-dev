@@ -7,7 +7,8 @@
 #include <linux/types.h>
 #include <linux/sched.h>
 
-#define COMPAT_USER_HZ	100
+#define COMPAT_USER_HZ		100
+#define COMPAT_UTS_MACHINE	"ppc\0\0"
 
 typedef u32		compat_size_t;
 typedef s32		compat_ssize_t;
@@ -209,6 +210,11 @@ struct compat_shmid64_ds {
 	compat_ulong_t __unused5;
 	compat_ulong_t __unused6;
 };
+
+static inline int is_compat_task(void)
+{
+	return test_thread_flag(TIF_32BIT);
+}
 
 #endif /* __KERNEL__ */
 #endif /* _ASM_POWERPC_COMPAT_H */

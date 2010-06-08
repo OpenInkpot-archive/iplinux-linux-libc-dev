@@ -356,7 +356,6 @@ static void bfin_set_piomode(struct ata_port *ap, struct ata_device *adev)
  *	bfin_set_dmamode - Initialize host controller PATA DMA timings
  *	@ap: Port whose timings we are configuring
  *	@adev: um
- *	@udma: udma mode, 0 - 6
  *
  *	Set UDMA mode for device.
  *
@@ -1503,7 +1502,7 @@ static struct ata_port_info bfin_port_info[] = {
 		.flags		= ATA_FLAG_SLAVE_POSS
 				| ATA_FLAG_MMIO
 				| ATA_FLAG_NO_LEGACY,
-		.pio_mask	= 0x1f,	/* pio0-4 */
+		.pio_mask	= ATA_PIO4,
 		.mwdma_mask	= 0,
 		.udma_mask	= 0,
 		.port_ops	= &bfin_pata_ops,
@@ -1558,6 +1557,25 @@ static unsigned short atapi_io_port[] = {
 	P_ATAPI_DMARQ,
 	P_ATAPI_INTRQ,
 	P_ATAPI_IORDY,
+	P_ATAPI_D0A,
+	P_ATAPI_D1A,
+	P_ATAPI_D2A,
+	P_ATAPI_D3A,
+	P_ATAPI_D4A,
+	P_ATAPI_D5A,
+	P_ATAPI_D6A,
+	P_ATAPI_D7A,
+	P_ATAPI_D8A,
+	P_ATAPI_D9A,
+	P_ATAPI_D10A,
+	P_ATAPI_D11A,
+	P_ATAPI_D12A,
+	P_ATAPI_D13A,
+	P_ATAPI_D14A,
+	P_ATAPI_D15A,
+	P_ATAPI_A0A,
+	P_ATAPI_A1A,
+	P_ATAPI_A2A,
 	0
 };
 

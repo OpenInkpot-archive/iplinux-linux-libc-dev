@@ -64,10 +64,11 @@ static unsigned char get_dtype(struct super_block *sb, int filetype)
 int ext4_check_dir_entry(const char *function, struct inode *dir,
 			 struct ext4_dir_entry_2 *de,
 			 struct buffer_head *bh,
-			 unsigned long offset)
+			 unsigned int offset)
 {
 	const char *error_msg = NULL;
-	const int rlen = ext4_rec_len_from_disk(de->rec_len);
+	const int rlen = ext4_rec_len_from_disk(de->rec_len,
+						dir->i_sb->s_blocksize);
 
 	if (rlen < EXT4_DIR_REC_LEN(1))
 		error_msg = "rec_len is smaller than minimal";
@@ -82,11 +83,13 @@ int ext4_check_dir_entry(const char *function, struct inode *dir,
 		error_msg = "inode out of bounds";
 
 	if (error_msg != NULL)
-		ext4_error(dir->i_sb, function,
-			"bad entry in directory #%lu: %s - "
-			"offset=%lu, inode=%lu, rec_len=%d, name_len=%d",
-			dir->i_ino, error_msg, offset,
-			(unsigned long) le32_to_cpu(de->inode),
+		__ext4_error(dir->i_sb, function,
+			"bad entry in directory #%lu: %s - block=%llu"
+			"offset=%u(%u), inode=%u, rec_len=%d, name_len=%d",
+			dir->i_ino, error_msg, 
+			(unsigned long long) bh->b_blocknr,     
+			(unsigned) (offset%bh->b_size), offset,
+			le32_to_cpu(de->inode),
 			rlen, de->name_len);
 	return error_msg == NULL ? 1 : 0;
 }
@@ -95,7 +98,7 @@ static int ext4_readdir(struct file *filp,
 			 void *dirent, filldir_t filldir)
 {
 	int error = 0;
-	unsigned long offset;
+	unsigned int offset;
 	int i, stored;
 	struct ext4_dir_entry_2 *de;
 	struct super_block *sb;
@@ -130,8 +133,7 @@ static int ext4_readdir(struct file *filp,
 		struct buffer_head *bh = NULL;
 
 		map_bh.b_state = 0;
-		err = ext4_get_blocks_wrap(NULL, inode, blk, 1, &map_bh,
-						0, 0, 0);
+		err = ext4_get_blocks(NULL, inode, blk, 1, &map_bh, 0);
 		if (err > 0) {
 			pgoff_t index = map_bh.b_blocknr >>
 					(PAGE_CACHE_SHIFT - inode->i_blkbits);
@@ -150,7 +152,7 @@ static int ext4_readdir(struct file *filp,
 		 */
 		if (!bh) {
 			if (!dir_has_error) {
-				ext4_error(sb, __func__, "directory #%lu "
+				ext4_error(sb, "directory #%lu "
 					   "contains a hole at offset %Lu",
 					   inode->i_ino,
 					   (unsigned long long) filp->f_pos);
@@ -178,10 +180,11 @@ revalidate:
 				 * least that it is non-zero.  A
 				 * failure will be detected in the
 				 * dirent test below. */
-				if (ext4_rec_len_from_disk(de->rec_len)
-						< EXT4_DIR_REC_LEN(1))
+				if (ext4_rec_len_from_disk(de->rec_len,
+					sb->s_blocksize) < EXT4_DIR_REC_LEN(1))
 					break;
-				i += ext4_rec_len_from_disk(de->rec_len);
+				i += ext4_rec_len_from_disk(de->rec_len,
+							    sb->s_blocksize);
 			}
 			offset = i;
 			filp->f_pos = (filp->f_pos & ~(sb->s_blocksize - 1))
@@ -203,7 +206,8 @@ revalidate:
 				ret = stored;
 				goto out;
 			}
-			offset += ext4_rec_len_from_disk(de->rec_len);
+			offset += ext4_rec_len_from_disk(de->rec_len,
+					sb->s_blocksize);
 			if (le32_to_cpu(de->inode)) {
 				/* We might block in the next section
 				 * if the data destination is
@@ -225,7 +229,8 @@ revalidate:
 					goto revalidate;
 				stored++;
 			}
-			filp->f_pos += ext4_rec_len_from_disk(de->rec_len);
+			filp->f_pos += ext4_rec_len_from_disk(de->rec_len,
+						sb->s_blocksize);
 		}
 		offset = 0;
 		brelse(bh);
@@ -300,7 +305,7 @@ static void free_rb_tree_fname(struct rb_root *root)
 			kfree(old);
 		}
 		if (!parent)
-			root->rb_node = NULL;
+			*root = RB_ROOT;
 		else if (parent->rb_left == n)
 			parent->rb_left = NULL;
 		else if (parent->rb_right == n)
@@ -405,7 +410,7 @@ static int call_filldir(struct file *filp, void *dirent,
 	sb = inode->i_sb;
 
 	if (!fname) {
-		printk(KERN_ERR "ext4: call_filldir: called with "
+		printk(KERN_ERR "EXT4-fs: call_filldir: called with "
 		       "null fname?!?\n");
 		return 0;
 	}

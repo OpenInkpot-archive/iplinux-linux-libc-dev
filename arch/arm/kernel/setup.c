@@ -24,11 +24,14 @@
 #include <linux/interrupt.h>
 #include <linux/smp.h>
 #include <linux/fs.h>
+#include <linux/proc_fs.h>
 
+#include <asm/unified.h>
 #include <asm/cpu.h>
 #include <asm/cputype.h>
 #include <asm/elf.h>
 #include <asm/procinfo.h>
+#include <asm/sections.h>
 #include <asm/setup.h>
 #include <asm/mach-types.h>
 #include <asm/cacheflush.h>
@@ -39,9 +42,11 @@
 #include <asm/mach/irq.h>
 #include <asm/mach/time.h>
 #include <asm/traps.h>
+#include <asm/unwind.h>
 
 #include "compat.h"
 #include "atags.h"
+#include "tcm.h"
 
 #ifndef MEM_SIZE
 #define MEM_SIZE	(16*1024*1024)
@@ -59,9 +64,8 @@ static int __init fpe_setup(char *line)
 __setup("fpe=", fpe_setup);
 #endif
 
-extern void paging_init(struct meminfo *, struct machine_desc *desc);
+extern void paging_init(struct machine_desc *desc);
 extern void reboot_setup(char *str);
-extern void _text, _etext, __data_start, _edata, _end;
 
 unsigned int processor_id;
 EXPORT_SYMBOL(processor_id);
@@ -99,6 +103,7 @@ struct cpu_cache_fns cpu_cache;
 #endif
 #ifdef CONFIG_OUTER_CACHE
 struct outer_cache_fns outer_cache;
+EXPORT_SYMBOL(outer_cache);
 #endif
 
 struct stack {
@@ -112,10 +117,9 @@ static struct stack stacks[NR_CPUS];
 char elf_platform[ELF_PLATFORM_SIZE];
 EXPORT_SYMBOL(elf_platform);
 
-static struct meminfo meminfo __initdata = { 0, };
 static const char *cpu_name;
 static const char *machine_name;
-static char __initdata command_line[COMMAND_LINE_SIZE];
+static char __initdata cmd_line[COMMAND_LINE_SIZE];
 
 static char default_command_line[COMMAND_LINE_SIZE] __initdata = CONFIG_CMDLINE;
 static union { char c[4]; unsigned long l; } endian_test __initdata = { { 'l', '?', '?', 'b' } };
@@ -234,12 +238,13 @@ static void __init cacheid_init(void)
 	unsigned int cachetype = read_cpuid_cachetype();
 	unsigned int arch = cpu_architecture();
 
-	if (arch >= CPU_ARCH_ARMv7) {
-		cacheid = CACHEID_VIPT_NONALIASING;
-		if ((cachetype & (3 << 14)) == 1 << 14)
-			cacheid |= CACHEID_ASID_TAGGED;
-	} else if (arch >= CPU_ARCH_ARMv6) {
-		if (cachetype & (1 << 23))
+	if (arch >= CPU_ARCH_ARMv6) {
+		if ((cachetype & (7 << 29)) == 4 << 29) {
+			/* ARMv7 register format */
+			cacheid = CACHEID_VIPT_NONALIASING;
+			if ((cachetype & (3 << 14)) == 1 << 14)
+				cacheid |= CACHEID_ASID_TAGGED;
+		} else if (cachetype & (1 << 23))
 			cacheid = CACHEID_VIPT_ALIASING;
 		else
 			cacheid = CACHEID_VIPT_NONALIASING;
@@ -326,25 +331,38 @@ void cpu_init(void)
 	}
 
 	/*
+	 * Define the placement constraint for the inline asm directive below.
+	 * In Thumb-2, msr with an immediate value is not allowed.
+	 */
+#ifdef CONFIG_THUMB2_KERNEL
+#define PLC	"r"
+#else
+#define PLC	"I"
+#endif
+
+	/*
 	 * setup stacks for re-entrant exception handlers
 	 */
 	__asm__ (
 	"msr	cpsr_c, %1\n\t"
-	"add	sp, %0, %2\n\t"
+	"add	r14, %0, %2\n\t"
+	"mov	sp, r14\n\t"
 	"msr	cpsr_c, %3\n\t"
-	"add	sp, %0, %4\n\t"
+	"add	r14, %0, %4\n\t"
+	"mov	sp, r14\n\t"
 	"msr	cpsr_c, %5\n\t"
-	"add	sp, %0, %6\n\t"
+	"add	r14, %0, %6\n\t"
+	"mov	sp, r14\n\t"
 	"msr	cpsr_c, %7"
 	    :
 	    : "r" (stk),
-	      "I" (PSR_F_BIT | PSR_I_BIT | IRQ_MODE),
+	      PLC (PSR_F_BIT | PSR_I_BIT | IRQ_MODE),
 	      "I" (offsetof(struct stack, irq[0])),
-	      "I" (PSR_F_BIT | PSR_I_BIT | ABT_MODE),
+	      PLC (PSR_F_BIT | PSR_I_BIT | ABT_MODE),
 	      "I" (offsetof(struct stack, abt[0])),
-	      "I" (PSR_F_BIT | PSR_I_BIT | UND_MODE),
+	      PLC (PSR_F_BIT | PSR_I_BIT | UND_MODE),
 	      "I" (offsetof(struct stack, und[0])),
-	      "I" (PSR_F_BIT | PSR_I_BIT | SVC_MODE)
+	      PLC (PSR_F_BIT | PSR_I_BIT | SVC_MODE)
 	    : "r14");
 }
 
@@ -367,31 +385,45 @@ static struct machine_desc * __init setup_machine(unsigned int nr)
 	return list;
 }
 
-static void __init arm_add_memory(unsigned long start, unsigned long size)
+static int __init arm_add_memory(unsigned long start, unsigned long size)
 {
-	struct membank *bank;
+	struct membank *bank = &meminfo.bank[meminfo.nr_banks];
+
+	if (meminfo.nr_banks >= NR_BANKS) {
+		printk(KERN_CRIT "NR_BANKS too low, "
+			"ignoring memory at %#lx\n", start);
+		return -EINVAL;
+	}
 
 	/*
 	 * Ensure that start/size are aligned to a page boundary.
 	 * Size is appropriately rounded down, start is rounded up.
 	 */
 	size -= start & ~PAGE_MASK;
-
-	bank = &meminfo.bank[meminfo.nr_banks++];
-
 	bank->start = PAGE_ALIGN(start);
 	bank->size  = size & PAGE_MASK;
 	bank->node  = PHYS_TO_NID(start);
+
+	/*
+	 * Check whether this memory region has non-zero size or
+	 * invalid node number.
+	 */
+	if (bank->size == 0 || bank->node >= MAX_NUMNODES)
+		return -EINVAL;
+
+	meminfo.nr_banks++;
+	return 0;
 }
 
 /*
  * Pick out the memory size.  We look for mem=size@start,
  * where start and size are "size[KkMm]"
  */
-static void __init early_mem(char **p)
+static int __init early_mem(char *p)
 {
 	static int usermem __initdata = 0;
 	unsigned long size, start;
+	char *endp;
 
 	/*
 	 * If the user specifies memory size, we
@@ -404,52 +436,15 @@ static void __init early_mem(char **p)
 	}
 
 	start = PHYS_OFFSET;
-	size  = memparse(*p, p);
-	if (**p == '@')
-		start = memparse(*p + 1, p);
+	size  = memparse(p, &endp);
+	if (*endp == '@')
+		start = memparse(endp + 1, NULL);
 
 	arm_add_memory(start, size);
+
+	return 0;
 }
-__early_param("mem=", early_mem);
-
-/*
- * Initial parsing of the command line.
- */
-static void __init parse_cmdline(char **cmdline_p, char *from)
-{
-	char c = ' ', *to = command_line;
-	int len = 0;
-
-	for (;;) {
-		if (c == ' ') {
-			extern struct early_params __early_begin, __early_end;
-			struct early_params *p;
-
-			for (p = &__early_begin; p < &__early_end; p++) {
-				int arglen = strlen(p->arg);
-
-				if (memcmp(from, p->arg, arglen) == 0) {
-					if (to != command_line)
-						to -= 1;
-					from += arglen;
-					p->fn(&from);
-
-					while (*from != ' ' && *from != '\0')
-						from++;
-					break;
-				}
-			}
-		}
-		c = *from++;
-		if (!c)
-			break;
-		if (COMMAND_LINE_SIZE <= ++len)
-			break;
-		*to++ = c;
-	}
-	*to = '\0';
-	*cmdline_p = command_line;
-}
+early_param("mem", early_mem);
 
 static void __init
 setup_ramdisk(int doload, int prompt, int image_start, unsigned int rd_sz)
@@ -472,10 +467,10 @@ request_standard_resources(struct meminfo *mi, struct machine_desc *mdesc)
 	struct resource *res;
 	int i;
 
-	kernel_code.start   = virt_to_phys(&_text);
-	kernel_code.end     = virt_to_phys(&_etext - 1);
-	kernel_data.start   = virt_to_phys(&__data_start);
-	kernel_data.end     = virt_to_phys(&_end - 1);
+	kernel_code.start   = virt_to_phys(_text);
+	kernel_code.end     = virt_to_phys(_etext - 1);
+	kernel_data.start   = virt_to_phys(_data);
+	kernel_data.end     = virt_to_phys(_end - 1);
 
 	for (i = 0; i < mi->nr_banks; i++) {
 		if (mi->bank[i].size == 0)
@@ -539,14 +534,7 @@ __tagtable(ATAG_CORE, parse_tag_core);
 
 static int __init parse_tag_mem32(const struct tag *tag)
 {
-	if (meminfo.nr_banks >= NR_BANKS) {
-		printk(KERN_WARNING
-		       "Ignoring memory bank 0x%08x size %dKB\n",
-			tag->u.mem.start, tag->u.mem.size / 1024);
-		return -EINVAL;
-	}
-	arm_add_memory(tag->u.mem.start, tag->u.mem.size);
-	return 0;
+	return arm_add_memory(tag->u.mem.start, tag->u.mem.size);
 }
 
 __tagtable(ATAG_MEM, parse_tag_mem32);
@@ -679,6 +667,8 @@ void __init setup_arch(char **cmdline_p)
 	struct machine_desc *mdesc;
 	char *from = default_command_line;
 
+	unwind_init();
+
 	setup_processor();
 	mdesc = setup_machine(machine_arch_type);
 	machine_name = mdesc->name;
@@ -710,15 +700,21 @@ void __init setup_arch(char **cmdline_p)
 		parse_tags(tags);
 	}
 
-	init_mm.start_code = (unsigned long) &_text;
-	init_mm.end_code   = (unsigned long) &_etext;
-	init_mm.end_data   = (unsigned long) &_edata;
-	init_mm.brk	   = (unsigned long) &_end;
+	init_mm.start_code = (unsigned long) _text;
+	init_mm.end_code   = (unsigned long) _etext;
+	init_mm.end_data   = (unsigned long) _edata;
+	init_mm.brk	   = (unsigned long) _end;
 
-	memcpy(boot_command_line, from, COMMAND_LINE_SIZE);
-	boot_command_line[COMMAND_LINE_SIZE-1] = '\0';
-	parse_cmdline(cmdline_p, from);
-	paging_init(&meminfo, mdesc);
+	/* parse_early_param needs a boot_command_line */
+	strlcpy(boot_command_line, from, COMMAND_LINE_SIZE);
+
+	/* populate cmd_line too for later use, preserving boot_command_line */
+	strlcpy(cmd_line, boot_command_line, COMMAND_LINE_SIZE);
+	*cmdline_p = cmd_line;
+
+	parse_early_param();
+
+	paging_init(mdesc);
 	request_standard_resources(&meminfo, mdesc);
 
 #ifdef CONFIG_SMP
@@ -726,6 +722,7 @@ void __init setup_arch(char **cmdline_p)
 #endif
 
 	cpu_init();
+	tcm_init();
 
 	/*
 	 * Set up various architecture-specific pointers
@@ -757,8 +754,20 @@ static int __init topology_init(void)
 
 	return 0;
 }
-
 subsys_initcall(topology_init);
+
+#ifdef CONFIG_HAVE_PROC_CPU
+static int __init proc_cpu_init(void)
+{
+	struct proc_dir_entry *res;
+
+	res = proc_mkdir("cpu", NULL);
+	if (!res)
+		return -ENOMEM;
+	return 0;
+}
+fs_initcall(proc_cpu_init);
+#endif
 
 static const char *hwcap_str[] = {
 	"swp",
@@ -772,6 +781,10 @@ static const char *hwcap_str[] = {
 	"java",
 	"iwmmxt",
 	"crunch",
+	"thumbee",
+	"neon",
+	"vfpv3",
+	"vfpv3d16",
 	NULL
 };
 

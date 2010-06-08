@@ -27,6 +27,7 @@
 #include <linux/init.h>
 #include <linux/smp_lock.h>
 #include <linux/mutex.h>
+#include <linux/jiffies.h>
 
 #include <asm/hardware/dec21285.h>
 #include <asm/io.h>
@@ -57,8 +58,6 @@ static int gbWriteBase64Enable;
 static volatile unsigned char *FLASH_BASE;
 static int gbFlashSize = KFLASH_SIZE;
 static DEFINE_MUTEX(nwflash_mutex);
-
-extern spinlock_t gpio_lock;
 
 static int get_flash_id(void)
 {
@@ -616,9 +615,9 @@ static void kick_open(void)
 	 * we want to write a bit pattern XXX1 to Xilinx to enable
 	 * the write gate, which will be open for about the next 2ms.
 	 */
-	spin_lock_irqsave(&gpio_lock, flags);
-	cpld_modify(1, 1);
-	spin_unlock_irqrestore(&gpio_lock, flags);
+	spin_lock_irqsave(&nw_gpio_lock, flags);
+	nw_cpld_modify(CPLD_FLASH_WR_ENABLE, CPLD_FLASH_WR_ENABLE);
+	spin_unlock_irqrestore(&nw_gpio_lock, flags);
 
 	/*
 	 * let the ISA bus to catch on...

@@ -43,6 +43,7 @@
 #include <linux/moduleparam.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/in.h>
 #include <linux/ip.h>
 #include <linux/udp.h>
@@ -930,8 +931,8 @@ static inline void mangle_address(unsigned char *begin,
 		}
 
 		if (debug)
-			printk(KERN_DEBUG "bsalg: mapped %u.%u.%u.%u to "
-			       "%u.%u.%u.%u\n", NIPQUAD(old), NIPQUAD(*addr));
+			printk(KERN_DEBUG "bsalg: mapped %pI4 to %pI4\n",
+			       &old, addr);
 	}
 }
 
@@ -1038,7 +1039,7 @@ static int snmp_parse_mangle(unsigned char *msg,
 	unsigned int cls, con, tag, vers, pdutype;
 	struct asn1_ctx ctx;
 	struct asn1_octstr comm;
-	struct snmp_object **obj;
+	struct snmp_object *obj;
 
 	if (debug > 1)
 		hex_dump(msg, len);
@@ -1148,43 +1149,34 @@ static int snmp_parse_mangle(unsigned char *msg,
 	if (cls != ASN1_UNI || con != ASN1_CON || tag != ASN1_SEQ)
 		return 0;
 
-	obj = kmalloc(sizeof(struct snmp_object), GFP_ATOMIC);
-	if (obj == NULL) {
-		if (net_ratelimit())
-			printk(KERN_WARNING "OOM in bsalg(%d)\n", __LINE__);
-		return 0;
-	}
-
 	while (!asn1_eoc_decode(&ctx, eoc)) {
 		unsigned int i;
 
-		if (!snmp_object_decode(&ctx, obj)) {
-			if (*obj) {
-				kfree((*obj)->id);
-				kfree(*obj);
+		if (!snmp_object_decode(&ctx, &obj)) {
+			if (obj) {
+				kfree(obj->id);
+				kfree(obj);
 			}
-			kfree(obj);
 			return 0;
 		}
 
 		if (debug > 1) {
 			printk(KERN_DEBUG "bsalg: object: ");
-			for (i = 0; i < (*obj)->id_len; i++) {
+			for (i = 0; i < obj->id_len; i++) {
 				if (i > 0)
 					printk(".");
-				printk("%lu", (*obj)->id[i]);
+				printk("%lu", obj->id[i]);
 			}
-			printk(": type=%u\n", (*obj)->type);
+			printk(": type=%u\n", obj->type);
 
 		}
 
-		if ((*obj)->type == SNMP_IPADDR)
+		if (obj->type == SNMP_IPADDR)
 			mangle_address(ctx.begin, ctx.pointer - 4 , map, check);
 
-		kfree((*obj)->id);
-		kfree(*obj);
+		kfree(obj->id);
+		kfree(obj);
 	}
-	kfree(obj);
 
 	if (!asn1_eoc_decode(&ctx, eoc))
 		return 0;
@@ -1267,9 +1259,8 @@ static int help(struct sk_buff *skb, unsigned int protoff,
 	 */
 	if (ntohs(udph->len) != skb->len - (iph->ihl << 2)) {
 		 if (net_ratelimit())
-			 printk(KERN_WARNING "SNMP: dropping malformed packet "
-				"src=%u.%u.%u.%u dst=%u.%u.%u.%u\n",
-				NIPQUAD(iph->saddr), NIPQUAD(iph->daddr));
+			 printk(KERN_WARNING "SNMP: dropping malformed packet src=%pI4 dst=%pI4\n",
+				&iph->saddr, &iph->daddr);
 		 return NF_DROP;
 	}
 
@@ -1293,7 +1284,7 @@ static struct nf_conntrack_helper snmp_helper __read_mostly = {
 	.expect_policy		= &snmp_exp_policy,
 	.name			= "snmp",
 	.tuple.src.l3num	= AF_INET,
-	.tuple.src.u.udp.port	= __constant_htons(SNMP_PORT),
+	.tuple.src.u.udp.port	= cpu_to_be16(SNMP_PORT),
 	.tuple.dst.protonum	= IPPROTO_UDP,
 };
 
@@ -1303,7 +1294,7 @@ static struct nf_conntrack_helper snmp_trap_helper __read_mostly = {
 	.expect_policy		= &snmp_exp_policy,
 	.name			= "snmp_trap",
 	.tuple.src.l3num	= AF_INET,
-	.tuple.src.u.udp.port	= __constant_htons(SNMP_TRAP_PORT),
+	.tuple.src.u.udp.port	= cpu_to_be16(SNMP_TRAP_PORT),
 	.tuple.dst.protonum	= IPPROTO_UDP,
 };
 

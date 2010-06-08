@@ -58,6 +58,7 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
+#include <linux/slab.h>
 #include <linux/timer.h>
 #include <linux/list.h>
 
@@ -934,6 +935,7 @@ int hil_mlc_register(hil_mlc *mlc)
 		snprintf(mlc_serio->name, sizeof(mlc_serio->name)-1, "HIL_SERIO%d", i);
 		snprintf(mlc_serio->phys, sizeof(mlc_serio->phys)-1, "HIL%d", i);
 		mlc_serio->id			= hil_mlc_serio_id;
+		mlc_serio->id.id		= i; /* HIL port no. */
 		mlc_serio->write		= hil_mlc_serio_write;
 		mlc_serio->open			= hil_mlc_serio_open;
 		mlc_serio->close		= hil_mlc_serio_close;
@@ -992,10 +994,8 @@ int hil_mlc_unregister(hil_mlc *mlc)
 
 static int __init hil_mlc_init(void)
 {
-	init_timer(&hil_mlcs_kicker);
-	hil_mlcs_kicker.expires = jiffies + HZ;
-	hil_mlcs_kicker.function = &hil_mlcs_timer;
-	add_timer(&hil_mlcs_kicker);
+	setup_timer(&hil_mlcs_kicker, &hil_mlcs_timer, 0);
+	mod_timer(&hil_mlcs_kicker, jiffies + HZ);
 
 	tasklet_enable(&hil_mlcs_tasklet);
 
@@ -1004,7 +1004,7 @@ static int __init hil_mlc_init(void)
 
 static void __exit hil_mlc_exit(void)
 {
-	del_timer(&hil_mlcs_kicker);
+	del_timer_sync(&hil_mlcs_kicker);
 
 	tasklet_disable(&hil_mlcs_tasklet);
 	tasklet_kill(&hil_mlcs_tasklet);

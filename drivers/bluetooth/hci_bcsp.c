@@ -47,11 +47,6 @@
 
 #include "hci_uart.h"
 
-#ifndef CONFIG_BT_HCIUART_DEBUG
-#undef  BT_DBG
-#define BT_DBG( A... )
-#endif
-
 #define VERSION "0.3"
 
 static int txcrc = 1;
@@ -378,8 +373,9 @@ static void bcsp_pkt_cull(struct bcsp_struct *bcsp)
 
 	i = 0;
 	skb_queue_walk_safe(&bcsp->unack, skb, tmp) {
-		if (i++ >= pkts_to_be_removed)
+		if (i >= pkts_to_be_removed)
 			break;
+		i++;
 
 		__skb_unlink(skb, &bcsp->unack);
 		kfree_skb(skb);

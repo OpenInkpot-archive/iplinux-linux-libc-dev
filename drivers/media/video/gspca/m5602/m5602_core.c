@@ -17,6 +17,7 @@
  */
 
 #include "m5602_ov9650.h"
+#include "m5602_ov7660.h"
 #include "m5602_mt9m111.h"
 #include "m5602_po1030.h"
 #include "m5602_s5k83a.h"
@@ -24,7 +25,7 @@
 
 /* Kernel module parameters */
 int force_sensor;
-int dump_bridge;
+static int dump_bridge;
 int dump_sensor;
 
 static const __devinitdata struct usb_device_id m5602_table[] = {
@@ -35,7 +36,7 @@ static const __devinitdata struct usb_device_id m5602_table[] = {
 MODULE_DEVICE_TABLE(usb, m5602_table);
 
 /* Reads a byte from the m5602 */
-int m5602_read_bridge(struct sd *sd, u8 address, u8 *i2c_data)
+int m5602_read_bridge(struct sd *sd, const u8 address, u8 *i2c_data)
 {
 	int err;
 	struct usb_device *udev = sd->gspca_dev.dev;
@@ -51,12 +52,12 @@ int m5602_read_bridge(struct sd *sd, u8 address, u8 *i2c_data)
 	       address, *i2c_data);
 
 	/* usb_control_msg(...) returns the number of bytes sent upon success,
-	mask that and return zero upon success instead*/
+	mask that and return zero instead*/
 	return (err < 0) ? err : 0;
 }
 
-/* Writes a byte to to the m5602 */
-int m5602_write_bridge(struct sd *sd, u8 address, u8 i2c_data)
+/* Writes a byte to the m5602 */
+int m5602_write_bridge(struct sd *sd, const u8 address, const u8 i2c_data)
 {
 	int err;
 	struct usb_device *udev = sd->gspca_dev.dev;
@@ -76,7 +77,110 @@ int m5602_write_bridge(struct sd *sd, u8 address, u8 i2c_data)
 				4, M5602_URB_MSG_TIMEOUT);
 
 	/* usb_control_msg(...) returns the number of bytes sent upon success,
-	   mask that and return zero upon success instead */
+	   mask that and return zero instead */
+	return (err < 0) ? err : 0;
+}
+
+static int m5602_wait_for_i2c(struct sd *sd)
+{
+	int err;
+	u8 data;
+
+	do {
+		err = m5602_read_bridge(sd, M5602_XB_I2C_STATUS, &data);
+	} while ((data & I2C_BUSY) && !err);
+	return err;
+}
+
+int m5602_read_sensor(struct sd *sd, const u8 address,
+		       u8 *i2c_data, const u8 len)
+{
+	int err, i;
+
+	if (!len || len > sd->sensor->i2c_regW)
+		return -EINVAL;
+
+	err = m5602_wait_for_i2c(sd);
+	if (err < 0)
+		return err;
+
+	err = m5602_write_bridge(sd, M5602_XB_I2C_DEV_ADDR,
+				 sd->sensor->i2c_slave_id);
+	if (err < 0)
+		return err;
+
+	err = m5602_write_bridge(sd, M5602_XB_I2C_REG_ADDR, address);
+	if (err < 0)
+		return err;
+
+	/* Sensors with registers that are of only
+	   one byte width are differently read */
+
+	/* FIXME: This works with the ov9650, but has issues with the po1030 */
+	if (sd->sensor->i2c_regW == 1) {
+		err = m5602_write_bridge(sd, M5602_XB_I2C_CTRL, 1);
+		if (err < 0)
+			return err;
+
+		err = m5602_write_bridge(sd, M5602_XB_I2C_CTRL, 0x08);
+	} else {
+		err = m5602_write_bridge(sd, M5602_XB_I2C_CTRL, 0x18 + len);
+	}
+
+	for (i = 0; (i < len) && !err; i++) {
+		err = m5602_wait_for_i2c(sd);
+		if (err < 0)
+			return err;
+
+		err = m5602_read_bridge(sd, M5602_XB_I2C_DATA, &(i2c_data[i]));
+
+		PDEBUG(D_CONF, "Reading sensor register "
+			       "0x%x containing 0x%x ", address, *i2c_data);
+	}
+	return err;
+}
+
+int m5602_write_sensor(struct sd *sd, const u8 address,
+			u8 *i2c_data, const u8 len)
+{
+	int err, i;
+	u8 *p;
+	struct usb_device *udev = sd->gspca_dev.dev;
+	__u8 *buf = sd->gspca_dev.usb_buf;
+
+	/* No sensor with a data width larger than 16 bits has yet been seen */
+	if (len > sd->sensor->i2c_regW || !len)
+		return -EINVAL;
+
+	memcpy(buf, sensor_urb_skeleton,
+	       sizeof(sensor_urb_skeleton));
+
+	buf[11] = sd->sensor->i2c_slave_id;
+	buf[15] = address;
+
+	/* Special case larger sensor writes */
+	p = buf + 16;
+
+	/* Copy a four byte write sequence for each byte to be written to */
+	for (i = 0; i < len; i++) {
+		memcpy(p, sensor_urb_skeleton + 16, 4);
+		p[3] = i2c_data[i];
+		p += 4;
+		PDEBUG(D_CONF, "Writing sensor register 0x%x with 0x%x",
+		       address, i2c_data[i]);
+	}
+
+	/* Copy the tailer */
+	memcpy(p, sensor_urb_skeleton + 20, 4);
+
+	/* Set the total length */
+	p[3] = 0x10 + len;
+
+	err = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
+			      0x04, 0x40, 0x19,
+			      0x0000, buf,
+			      20 + len * 4, M5602_URB_MSG_TIMEOUT);
+
 	return (err < 0) ? err : 0;
 }
 
@@ -116,6 +220,11 @@ static int m5602_probe_sensor(struct sd *sd)
 	if (!sd->sensor->probe(sd))
 		return 0;
 
+	/* Try the ov7660 */
+	sd->sensor = &ov7660;
+	if (!sd->sensor->probe(sd))
+		return 0;
+
 	/* Try the s5k83a */
 	sd->sensor = &s5k83a;
 	if (!sd->sensor->probe(sd))
@@ -150,19 +259,22 @@ static int m5602_start_transfer(struct gspca_dev *gspca_dev)
 
 	/* Send start command to the camera */
 	const u8 buffer[4] = {0x13, 0xf9, 0x0f, 0x01};
+
+	if (sd->sensor->start)
+		sd->sensor->start(sd);
+
 	memcpy(buf, buffer, sizeof(buffer));
 	err = usb_control_msg(gspca_dev->dev,
 			      usb_sndctrlpipe(gspca_dev->dev, 0),
 			      0x04, 0x40, 0x19, 0x0000, buf,
-			      4, M5602_URB_MSG_TIMEOUT);
+			      sizeof(buffer), M5602_URB_MSG_TIMEOUT);
 
 	PDEBUG(D_STREAM, "Transfer started");
 	return (err < 0) ? err : 0;
 }
 
 static void m5602_urb_complete(struct gspca_dev *gspca_dev,
-			struct gspca_frame *frame,
-			__u8 *data, int len)
+				u8 *data, int len)
 {
 	struct sd *sd = (struct sd *) gspca_dev;
 
@@ -182,19 +294,27 @@ static void m5602_urb_complete(struct gspca_dev *gspca_dev,
 		len -= 6;
 
 		/* Complete the last frame (if any) */
-		frame = gspca_frame_add(gspca_dev, LAST_PACKET,
-					frame, data, 0);
+		gspca_frame_add(gspca_dev, LAST_PACKET,
+				NULL, 0);
 		sd->frame_count++;
 
 		/* Create a new frame */
-		gspca_frame_add(gspca_dev, FIRST_PACKET, frame, data, len);
+		gspca_frame_add(gspca_dev, FIRST_PACKET, data, len);
 
 		PDEBUG(D_FRAM, "Starting new frame %d",
 		       sd->frame_count);
 
 	} else {
-		int cur_frame_len = frame->data_end - frame->data;
+		struct gspca_frame *frame;
+		int cur_frame_len;
 
+		frame = gspca_get_i_frame(gspca_dev);
+		if (frame == NULL) {
+			gspca_dev->last_packet_type = DISCARD_PACKET;
+			return;
+		}
+
+		cur_frame_len = frame->data_end - frame->data;
 		/* Remove urb header */
 		data += 4;
 		len -= 4;
@@ -203,19 +323,23 @@ static void m5602_urb_complete(struct gspca_dev *gspca_dev,
 			PDEBUG(D_FRAM, "Continuing frame %d copying %d bytes",
 			       sd->frame_count, len);
 
-			gspca_frame_add(gspca_dev, INTER_PACKET, frame,
+			gspca_frame_add(gspca_dev, INTER_PACKET,
 					data, len);
 		} else if (frame->v4l2_buf.length - cur_frame_len > 0) {
 			/* Add the remaining data up to frame size */
-			gspca_frame_add(gspca_dev, INTER_PACKET, frame, data,
-					frame->v4l2_buf.length - cur_frame_len);
+			gspca_frame_add(gspca_dev, INTER_PACKET, data,
+				    frame->v4l2_buf.length - cur_frame_len);
 		}
 	}
 }
 
 static void m5602_stop_transfer(struct gspca_dev *gspca_dev)
 {
-	/* Is there are a command to stop a data transfer? */
+	struct sd *sd = (struct sd *) gspca_dev;
+
+	/* Run the sensor specific end transfer sequence */
+	if (sd->sensor->stop)
+		sd->sensor->stop(sd);
 }
 
 /* sub-driver description, the ctrl and nctrl is filled at probe time */
@@ -237,7 +361,6 @@ static int m5602_configure(struct gspca_dev *gspca_dev,
 	int err;
 
 	cam = &gspca_dev->cam;
-	cam->epaddr = M5602_ISOC_ENDPOINT_ADDR;
 	sd->desc = &sd_desc;
 
 	if (dump_bridge)
@@ -265,6 +388,17 @@ static int m5602_probe(struct usb_interface *intf,
 			       THIS_MODULE);
 }
 
+static void m5602_disconnect(struct usb_interface *intf)
+{
+	struct gspca_dev *gspca_dev = usb_get_intfdata(intf);
+	struct sd *sd = (struct sd *) gspca_dev;
+
+	if (sd->sensor->disconnect)
+		sd->sensor->disconnect(sd);
+
+	gspca_disconnect(intf);
+}
+
 static struct usb_driver sd_driver = {
 	.name = MODULE_NAME,
 	.id_table = m5602_table,
@@ -273,17 +407,20 @@ static struct usb_driver sd_driver = {
 	.suspend = gspca_suspend,
 	.resume = gspca_resume,
 #endif
-	.disconnect = gspca_disconnect
+	.disconnect = m5602_disconnect
 };
 
 /* -- module insert / remove -- */
 static int __init mod_m5602_init(void)
 {
-	if (usb_register(&sd_driver) < 0)
-		return -1;
+	int ret;
+	ret = usb_register(&sd_driver);
+	if (ret < 0)
+		return ret;
 	PDEBUG(D_PROBE, "registered");
 	return 0;
 }
+
 static void __exit mod_m5602_exit(void)
 {
 	usb_deregister(&sd_driver);
@@ -298,8 +435,9 @@ MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 module_param(force_sensor, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(force_sensor,
-		"force detection of sensor, "
-		"1 = OV9650, 2 = S5K83A, 3 = S5K4AA, 4 = MT9M111, 5 = PO1030");
+		"forces detection of a sensor, "
+		"1 = OV9650, 2 = S5K83A, 3 = S5K4AA, "
+		"4 = MT9M111, 5 = PO1030, 6 = OV7660");
 
 module_param(dump_bridge, bool, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(dump_bridge, "Dumps all usb bridge registers at startup");

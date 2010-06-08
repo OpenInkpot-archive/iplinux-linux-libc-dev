@@ -3,7 +3,7 @@ protocol of kernel. These should be filled by bootloader or 16-bit
 real-mode setup code of the kernel. References/settings to it mainly
 are in:
 
-  include/asm-x86/bootparam.h
+  arch/x86/include/asm/bootparam.h
 
 
 Offset	Proto	Name		Meaning
@@ -12,6 +12,7 @@ Offset	Proto	Name		Meaning
 000/040	ALL	screen_info	Text mode or frame buffer information
 				(struct screen_info)
 040/014	ALL	apm_bios_info	APM BIOS information (struct apm_bios_info)
+058/008	ALL	tboot_addr      Physical address of tboot shared page
 060/010	ALL	ist_info	Intel SpeedStep (IST) BIOS support information
 				(struct ist_info)
 080/010	ALL	hd0_info	hd0 disk parameter, OBSOLETE!!

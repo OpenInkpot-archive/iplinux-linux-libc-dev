@@ -17,7 +17,9 @@
 #include <linux/spinlock.h>
 #include <linux/io.h>
 #include <linux/string.h>
+
 #include <asm/geode.h>
+#include <asm/setup.h>
 #include <asm/olpc.h>
 
 #ifdef CONFIG_OPEN_FIRMWARE
@@ -203,7 +205,7 @@ static void __init platform_detect(void)
 static void __init platform_detect(void)
 {
 	/* stopgap until OFW support is added to the kernel */
-	olpc_platform_info.boardrev = 0xc2;
+	olpc_platform_info.boardrev = olpc_board(0xc2);
 }
 #endif
 
@@ -212,7 +214,7 @@ static int __init olpc_init(void)
 	unsigned char *romsig;
 
 	/* The ioremap check is dangerous; limit what we run it on */
-	if (!is_geode() || geode_has_vsa2())
+	if (!is_geode() || cs5535_has_vsa2())
 		return 0;
 
 	spin_lock_init(&ec_lock);
@@ -243,9 +245,11 @@ static int __init olpc_init(void)
 	olpc_ec_cmd(EC_FIRMWARE_REV, NULL, 0,
 			(unsigned char *) &olpc_platform_info.ecver, 1);
 
-	/* check to see if the VSA exists */
-	if (geode_has_vsa2())
-		olpc_platform_info.flags |= OLPC_F_VSA;
+#ifdef CONFIG_PCI_OLPC
+	/* If the VSA exists let it emulate PCI, if not emulate in kernel */
+	if (!cs5535_has_vsa2())
+		x86_init.pci.arch_init = pci_olpc_init;
+#endif
 
 	printk(KERN_INFO "OLPC board revision %s%X (EC=%x)\n",
 			((olpc_platform_info.boardrev & 0xf) < 8) ? "pre" : "",

@@ -4,8 +4,7 @@
 /* WARNING: The ordering of these elements must match ordering
  *          of RTA_* rtnetlink attribute numbers.
  */
-struct dn_kern_rta
-{
+struct dn_kern_rta {
         void            *rta_dst;
         void            *rta_src;
         int             *rta_iif;
@@ -181,9 +180,9 @@ static inline void dn_fib_res_put(struct dn_fib_res *res)
 
 static inline __le16 dnet_make_mask(int n)
 {
-        if (n)
-                return dn_htons(~((1<<(16-n))-1));
-        return 0;
+	if (n)
+		return cpu_to_le16(~((1 << (16 - n)) - 1));
+	return cpu_to_le16(0);
 }
 
 #endif /* _NET_DN_FIB_H */

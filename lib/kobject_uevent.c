@@ -18,6 +18,7 @@
 #include <linux/string.h>
 #include <linux/kobject.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 
 #include <linux/socket.h>
 #include <linux/skbuff.h>
@@ -95,7 +96,7 @@ int kobject_uevent_env(struct kobject *kobj, enum kobject_action action,
 	const char *subsystem;
 	struct kobject *top_kobj;
 	struct kset *kset;
-	struct kset_uevent_ops *uevent_ops;
+	const struct kset_uevent_ops *uevent_ops;
 	u64 seq;
 	int i = 0;
 	int retval = 0;
@@ -118,6 +119,13 @@ int kobject_uevent_env(struct kobject *kobj, enum kobject_action action,
 	kset = top_kobj->kset;
 	uevent_ops = kset->uevent_ops;
 
+	/* skip the event, if uevent_suppress is set*/
+	if (kobj->uevent_suppress) {
+		pr_debug("kobject: '%s' (%p): %s: uevent_suppress "
+				 "caused the event to drop!\n",
+				 kobject_name(kobj), kobj, __func__);
+		return 0;
+	}
 	/* skip the event, if the filter returns zero. */
 	if (uevent_ops && uevent_ops->filter)
 		if (!uevent_ops->filter(kset, kobj)) {
@@ -165,7 +173,7 @@ int kobject_uevent_env(struct kobject *kobj, enum kobject_action action,
 	/* keys passed in from the caller */
 	if (envp_ext) {
 		for (i = 0; envp_ext[i]; i++) {
-			retval = add_uevent_var(env, envp_ext[i]);
+			retval = add_uevent_var(env, "%s", envp_ext[i]);
 			if (retval)
 				goto exit;
 		}
@@ -225,8 +233,13 @@ int kobject_uevent_env(struct kobject *kobj, enum kobject_action action,
 			}
 
 			NETLINK_CB(skb).dst_group = 1;
-			netlink_broadcast(uevent_sock, skb, 0, 1, GFP_KERNEL);
-		}
+			retval = netlink_broadcast(uevent_sock, skb, 0, 1,
+						   GFP_KERNEL);
+			/* ENOBUFS should be handled in userspace */
+			if (retval == -ENOBUFS)
+				retval = 0;
+		} else
+			retval = -ENOMEM;
 	}
 #endif
 
@@ -316,7 +329,7 @@ static int __init kobject_uevent_init(void)
 		       "kobject_uevent: unable to create netlink socket!\n");
 		return -ENODEV;
 	}
-
+	netlink_set_nonroot(NETLINK_KOBJECT_UEVENT, NL_NONROOT_RECV);
 	return 0;
 }
 

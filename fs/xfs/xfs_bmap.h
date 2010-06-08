@@ -95,7 +95,21 @@ typedef	struct xfs_bmap_free
 					/* need write cache flushing and no */
 					/* additional allocation alignments */
 
-#define	XFS_BMAPI_AFLAG(w)	xfs_bmapi_aflag(w)
+#define XFS_BMAPI_FLAGS \
+	{ XFS_BMAPI_WRITE,	"WRITE" }, \
+	{ XFS_BMAPI_DELAY,	"DELAY" }, \
+	{ XFS_BMAPI_ENTIRE,	"ENTIRE" }, \
+	{ XFS_BMAPI_METADATA,	"METADATA" }, \
+	{ XFS_BMAPI_EXACT,	"EXACT" }, \
+	{ XFS_BMAPI_ATTRFORK,	"ATTRFORK" }, \
+	{ XFS_BMAPI_ASYNC,	"ASYNC" }, \
+	{ XFS_BMAPI_RSVBLOCKS,	"RSVBLOCKS" }, \
+	{ XFS_BMAPI_PREALLOC,	"PREALLOC" }, \
+	{ XFS_BMAPI_IGSTATE,	"IGSTATE" }, \
+	{ XFS_BMAPI_CONTIG,	"CONTIG" }, \
+	{ XFS_BMAPI_CONVERT,	"CONVERT" }
+
+
 static inline int xfs_bmapi_aflag(int w)
 {
 	return (w == XFS_ATTR_FORK ? XFS_BMAPI_ATTRFORK : 0);
@@ -107,7 +121,6 @@ static inline int xfs_bmapi_aflag(int w)
 #define	DELAYSTARTBLOCK		((xfs_fsblock_t)-1LL)
 #define	HOLESTARTBLOCK		((xfs_fsblock_t)-2LL)
 
-#define	XFS_BMAP_INIT(flp,fbp)	xfs_bmap_init(flp,fbp)
 static inline void xfs_bmap_init(xfs_bmap_free_t *flp, xfs_fsblock_t *fbp)
 {
 	((flp)->xbf_first = NULL, (flp)->xbf_count = 0, \
@@ -127,7 +140,7 @@ typedef struct xfs_bmalloca {
 	struct xfs_bmbt_irec	*gotp;	/* extent after, or delayed */
 	xfs_extlen_t		alen;	/* i/o length asked/allocated */
 	xfs_extlen_t		total;	/* total blocks needed for xaction */
-	xfs_extlen_t		minlen;	/* mininum allocation size (blocks) */
+	xfs_extlen_t		minlen;	/* minimum allocation size (blocks) */
 	xfs_extlen_t		minleft; /* amount must be left after alloc */
 	char			eof;	/* set if allocating past last extent */
 	char			wasdel;	/* replacing a delayed allocation */
@@ -137,32 +150,40 @@ typedef struct xfs_bmalloca {
 	char			conv;	/* overwriting unwritten extents */
 } xfs_bmalloca_t;
 
-#ifdef __KERNEL__
-
-#if defined(XFS_BMAP_TRACE)
 /*
- * Trace operations for bmap extent tracing
+ * Flags for xfs_bmap_add_extent*.
  */
-#define	XFS_BMAP_KTRACE_DELETE	1
-#define	XFS_BMAP_KTRACE_INSERT	2
-#define	XFS_BMAP_KTRACE_PRE_UP	3
-#define	XFS_BMAP_KTRACE_POST_UP	4
+#define BMAP_LEFT_CONTIG	(1 << 0)
+#define BMAP_RIGHT_CONTIG	(1 << 1)
+#define BMAP_LEFT_FILLING	(1 << 2)
+#define BMAP_RIGHT_FILLING	(1 << 3)
+#define BMAP_LEFT_DELAY		(1 << 4)
+#define BMAP_RIGHT_DELAY	(1 << 5)
+#define BMAP_LEFT_VALID		(1 << 6)
+#define BMAP_RIGHT_VALID	(1 << 7)
+#define BMAP_ATTRFORK		(1 << 8)
 
-#define	XFS_BMAP_TRACE_SIZE	4096	/* size of global trace buffer */
-#define	XFS_BMAP_KTRACE_SIZE	32	/* size of per-inode trace buffer */
-extern ktrace_t	*xfs_bmap_trace_buf;
+#define XFS_BMAP_EXT_FLAGS \
+	{ BMAP_LEFT_CONTIG,	"LC" }, \
+	{ BMAP_RIGHT_CONTIG,	"RC" }, \
+	{ BMAP_LEFT_FILLING,	"LF" }, \
+	{ BMAP_RIGHT_FILLING,	"RF" }, \
+	{ BMAP_ATTRFORK,	"ATTR" }
 
 /*
  * Add bmap trace insert entries for all the contents of the extent list.
+ *
+ * Quite excessive tracing.  Only do this for debug builds.
  */
+#if defined(__KERNEL) && defined(DEBUG)
 void
 xfs_bmap_trace_exlist(
-	const char		*fname,		/* function name */
 	struct xfs_inode	*ip,		/* incore inode pointer */
 	xfs_extnum_t		cnt,		/* count of entries in list */
-	int			whichfork);	/* data or attr fork */
+	int			whichfork,
+	unsigned long		caller_ip);	/* data or attr fork */
 #define	XFS_BMAP_TRACE_EXLIST(ip,c,w)	\
-	xfs_bmap_trace_exlist(__func__,ip,c,w)
+	xfs_bmap_trace_exlist(ip,c,w, _THIS_IP_)
 #else
 #define	XFS_BMAP_TRACE_EXLIST(ip,c,w)
 #endif
@@ -204,20 +225,6 @@ void
 xfs_bmap_compute_maxlevels(
 	struct xfs_mount	*mp,	/* file system mount structure */
 	int			whichfork);	/* data or attr fork */
-
-/*
- * Routine to be called at transaction's end by xfs_bmapi, xfs_bunmapi
- * caller.  Frees all the extents that need freeing, which must be done
- * last due to locking considerations.
- *
- * Return 1 if the given transaction was committed and a new one allocated,
- * and 0 otherwise.
- */
-int						/* error */
-xfs_bmap_finish(
-	struct xfs_trans	**tp,		/* transaction pointer addr */
-	xfs_bmap_free_t		*flist,		/* i/o: list extents to free */
-	int			*committed);	/* xact committed or not */
 
 /*
  * Returns the file-relative block number of the first unused block in the file.
@@ -344,14 +351,47 @@ xfs_bunmapi(
 	int			*done);		/* set if not done yet */
 
 /*
- * Fcntl interface to xfs_bmapi.
+ * Check an extent list, which has just been read, for
+ * any bit in the extent flag field.
+ */
+int
+xfs_check_nostate_extents(
+	struct xfs_ifork	*ifp,
+	xfs_extnum_t		idx,
+	xfs_extnum_t		num);
+
+uint
+xfs_default_attroffset(
+	struct xfs_inode	*ip);
+
+#ifdef __KERNEL__
+
+/*
+ * Routine to be called at transaction's end by xfs_bmapi, xfs_bunmapi
+ * caller.  Frees all the extents that need freeing, which must be done
+ * last due to locking considerations.
+ *
+ * Return 1 if the given transaction was committed and a new one allocated,
+ * and 0 otherwise.
+ */
+int						/* error */
+xfs_bmap_finish(
+	struct xfs_trans	**tp,		/* transaction pointer addr */
+	xfs_bmap_free_t		*flist,		/* i/o: list extents to free */
+	int			*committed);	/* xact committed or not */
+
+/* bmap to userspace formatter - copy to user & advance pointer */
+typedef int (*xfs_bmap_format_t)(void **, struct getbmapx *, int *);
+
+/*
+ * Get inode's extents as described in bmv, and format for output.
  */
 int						/* error code */
 xfs_getbmap(
 	xfs_inode_t		*ip,
-	struct getbmap		*bmv,		/* user bmap structure */
-	void			__user *ap,	/* pointer to user's array */
-	int			iflags);	/* interface flags */
+	struct getbmapx		*bmv,		/* user bmap structure */
+	xfs_bmap_format_t	formatter,	/* format to user */
+	void			*arg);		/* formatter arg */
 
 /*
  * Check if the endoff is outside the last extent. If so the caller will grow
@@ -373,27 +413,6 @@ xfs_bmap_count_blocks(
 	struct xfs_inode	*ip,
 	int			whichfork,
 	int			*count);
-
-/*
- * Check an extent list, which has just been read, for
- * any bit in the extent flag field.
- */
-int
-xfs_check_nostate_extents(
-	struct xfs_ifork	*ifp,
-	xfs_extnum_t		idx,
-	xfs_extnum_t		num);
-
-/*
- * Search the extent records for the entry containing block bno.
- * If bno lies in a hole, point to the next entry.  If bno lies
- * past eof, *eofp will be set, and *prevp will contain the last
- * entry (null if none).  Else, *lastxp will be set to the index
- * of the found entry; *gotp will contain the entry.
- */
-xfs_bmbt_rec_host_t *
-xfs_bmap_search_multi_extents(struct xfs_ifork *, xfs_fileoff_t, int *,
-			xfs_extnum_t *, xfs_bmbt_irec_t *, xfs_bmbt_irec_t *);
 
 #endif	/* __KERNEL__ */
 

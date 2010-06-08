@@ -15,6 +15,7 @@
 #include <linux/rtc.h>
 #include <linux/kdev_t.h>
 #include <linux/idr.h>
+#include <linux/slab.h>
 
 #include "rtc-core.h"
 
@@ -48,9 +49,7 @@ static int rtc_suspend(struct device *dev, pm_message_t mesg)
 	struct rtc_time		tm;
 	struct timespec		ts = current_kernel_time();
 
-	if (strncmp(rtc->dev.bus_id,
-				CONFIG_RTC_HCTOSYS_DEVICE,
-				BUS_ID_SIZE) != 0)
+	if (strcmp(dev_name(&rtc->dev), CONFIG_RTC_HCTOSYS_DEVICE) != 0)
 		return 0;
 
 	rtc_read_time(rtc, &tm);
@@ -71,20 +70,18 @@ static int rtc_resume(struct device *dev)
 	time_t			newtime;
 	struct timespec		time;
 
-	if (strncmp(rtc->dev.bus_id,
-				CONFIG_RTC_HCTOSYS_DEVICE,
-				BUS_ID_SIZE) != 0)
+	if (strcmp(dev_name(&rtc->dev), CONFIG_RTC_HCTOSYS_DEVICE) != 0)
 		return 0;
 
 	rtc_read_time(rtc, &tm);
 	if (rtc_valid_tm(&tm) != 0) {
-		pr_debug("%s:  bogus resume time\n", rtc->dev.bus_id);
+		pr_debug("%s:  bogus resume time\n", dev_name(&rtc->dev));
 		return 0;
 	}
 	rtc_tm_to_time(&tm, &newtime);
 	if (newtime <= oldtime) {
 		if (newtime < oldtime)
-			pr_debug("%s:  time travel!\n", rtc->dev.bus_id);
+			pr_debug("%s:  time travel!\n", dev_name(&rtc->dev));
 		return 0;
 	}
 
@@ -156,7 +153,7 @@ struct rtc_device *rtc_device_register(const char *name, struct device *dev,
 	init_waitqueue_head(&rtc->irq_queue);
 
 	strlcpy(rtc->name, name, RTC_DEVICE_NAME_SIZE);
-	snprintf(rtc->dev.bus_id, BUS_ID_SIZE, "rtc%d", id);
+	dev_set_name(&rtc->dev, "rtc%d", id);
 
 	rtc_dev_prepare(rtc);
 
@@ -169,7 +166,7 @@ struct rtc_device *rtc_device_register(const char *name, struct device *dev,
 	rtc_proc_add_device(rtc);
 
 	dev_info(dev, "rtc core: registered %s as %s\n",
-			rtc->name, rtc->dev.bus_id);
+			rtc->name, dev_name(&rtc->dev));
 
 	return rtc;
 
@@ -230,6 +227,7 @@ static void __exit rtc_exit(void)
 {
 	rtc_dev_exit();
 	class_destroy(rtc_class);
+	idr_destroy(&rtc_idr);
 }
 
 subsys_initcall(rtc_init);

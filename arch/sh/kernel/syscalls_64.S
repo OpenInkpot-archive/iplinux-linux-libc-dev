@@ -109,7 +109,7 @@ sys_call_table:
 	.long sys_uselib
 	.long sys_swapon
 	.long sys_reboot
-	.long old_readdir
+	.long sys_old_readdir
 	.long old_mmap			/* 90 */
 	.long sys_munmap
 	.long sys_truncate
@@ -143,7 +143,7 @@ sys_call_table:
 	.long sys_clone			/* 120 */
 	.long sys_setdomainname
 	.long sys_newuname
-	.long sys_ni_syscall	/* sys_modify_ldt */
+	.long sys_cacheflush	/* x86: sys_modify_ldt */
 	.long sys_adjtimex
 	.long sys_mprotect		/* 125 */
 	.long sys_sigprocmask
@@ -387,3 +387,9 @@ sys_call_table:
 	.long sys_dup3
 	.long sys_pipe2
 	.long sys_inotify_init1		/* 360 */
+	.long sys_preadv
+	.long sys_pwritev
+	.long sys_rt_tgsigqueueinfo
+	.long sys_perf_event_open
+	.long sys_recvmmsg		/* 365 */
+	.long sys_accept4

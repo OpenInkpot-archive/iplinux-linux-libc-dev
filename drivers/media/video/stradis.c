@@ -26,6 +26,7 @@
 #include <linux/kernel.h>
 #include <linux/major.h>
 #include <linux/slab.h>
+#include <linux/smp_lock.h>
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/poll.h>
@@ -1275,7 +1276,7 @@ static void make_clip_tab(struct saa7146 *saa, struct video_clip *cr, int ncr)
 		clip_draw_rectangle(clipmap, 0, 0, 1024, -saa->win.y);
 }
 
-static int saa_ioctl(struct inode *inode, struct file *file,
+static long saa_ioctl(struct file *file,
 		     unsigned int cmd, unsigned long argl)
 {
 	struct saa7146 *saa = file->private_data;
@@ -1877,7 +1878,7 @@ static ssize_t saa_write(struct file *file, const char __user * buf,
 	return count;
 }
 
-static int saa_open(struct inode *inode, struct file *file)
+static int saa_open(struct file *file)
 {
 	struct video_device *vdev = video_devdata(file);
 	struct saa7146 *saa = container_of(vdev, struct saa7146, video_dev);
@@ -1895,7 +1896,7 @@ static int saa_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static int saa_release(struct inode *inode, struct file *file)
+static int saa_release(struct file *file)
 {
 	struct saa7146 *saa = file->private_data;
 	saa->user--;
@@ -1906,16 +1907,12 @@ static int saa_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static const struct file_operations saa_fops = {
+static const struct v4l2_file_operations saa_fops = {
 	.owner = THIS_MODULE,
 	.open = saa_open,
 	.release = saa_release,
 	.ioctl = saa_ioctl,
-#ifdef CONFIG_COMPAT
-	.compat_ioctl = v4l_compat_ioctl32,
-#endif
 	.read = saa_read,
-	.llseek = no_llseek,
 	.write = saa_write,
 	.mmap = saa_mmap,
 };
@@ -1924,7 +1921,6 @@ static const struct file_operations saa_fops = {
 static struct video_device saa_template = {
 	.name = "SAA7146A",
 	.fops = &saa_fops,
-	.minor = -1,
 	.release = video_device_release_empty,
 };
 
@@ -1975,7 +1971,6 @@ static int __devinit configure_saa7146(struct pci_dev *pdev, int num)
 
 	saa->id = pdev->device;
 	saa->irq = pdev->irq;
-	saa->video_dev.minor = -1;
 	saa->saa7146_adr = pci_resource_start(pdev, 0);
 	pci_read_config_byte(pdev, PCI_CLASS_REVISION, &saa->revision);
 
@@ -2137,7 +2132,7 @@ static void stradis_release_saa(struct pci_dev *pdev)
 	free_irq(saa->irq, saa);
 	if (saa->saa7146_mem)
 		iounmap(saa->saa7146_mem);
-	if (saa->video_dev.minor != -1)
+	if (video_is_registered(&saa->video_dev))
 		video_unregister_device(&saa->video_dev);
 }
 

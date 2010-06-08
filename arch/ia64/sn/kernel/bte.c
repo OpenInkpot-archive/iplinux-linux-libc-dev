@@ -19,6 +19,7 @@
 #include <linux/bootmem.h>
 #include <linux/string.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 
 #include <asm/sn/bte.h>
 
@@ -97,9 +98,10 @@ bte_result_t bte_copy(u64 src, u64 dest, u64 len, u64 mode, void *notification)
 		return BTE_SUCCESS;
 	}
 
-	BUG_ON((len & L1_CACHE_MASK) ||
-		 (src & L1_CACHE_MASK) || (dest & L1_CACHE_MASK));
-	BUG_ON(!(len < ((BTE_LEN_MASK + 1) << L1_CACHE_SHIFT)));
+	BUG_ON(len & L1_CACHE_MASK);
+	BUG_ON(src & L1_CACHE_MASK);
+	BUG_ON(dest & L1_CACHE_MASK);
+	BUG_ON(len > BTE_MAX_XFER);
 
 	/*
 	 * Start with interface corresponding to cpu number

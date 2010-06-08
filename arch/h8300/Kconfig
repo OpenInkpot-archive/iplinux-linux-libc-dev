@@ -10,6 +10,10 @@ config H8300
 	default y
 	select HAVE_IDE
 
+config SYMBOL_PREFIX
+	string
+	default "_"
+
 config MMU
 	bool
 	default n
@@ -219,6 +223,8 @@ source "drivers/usb/Kconfig"
 source "drivers/uwb/Kconfig"
 
 endmenu
+
+source "drivers/staging/Kconfig"
 
 source "fs/Kconfig"
 

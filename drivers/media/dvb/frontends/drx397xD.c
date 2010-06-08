@@ -26,6 +26,7 @@
 #include <linux/delay.h>
 #include <linux/string.h>
 #include <linux/firmware.h>
+#include <linux/slab.h>
 #include <asm/div64.h>
 
 #include "dvb_frontend.h"
@@ -39,7 +40,7 @@ static const char mod_name[] = "drx397xD";
 #define F_SET_0D4h	2
 
 enum fw_ix {
-#define _FW_ENTRY(a, b)		b
+#define _FW_ENTRY(a, b, c)	b
 #include "drx397xD_fw.h"
 };
 
@@ -72,16 +73,16 @@ static struct {
 	int refcnt;
 	const u8 *data[ARRAY_SIZE(blob_name)];
 } fw[] = {
-#define _FW_ENTRY(a, b)		{			\
-			.name	= a,			\
-			.file	= 0,			\
-			.lock	= RW_LOCK_UNLOCKED,	\
-			.refcnt = 0,			\
+#define _FW_ENTRY(a, b, c)	{					\
+			.name	= a,					\
+			.file	= NULL,					\
+			.lock	= __RW_LOCK_UNLOCKED(fw[c].lock),	\
+			.refcnt = 0,					\
 			.data	= { }		}
 #include "drx397xD_fw.h"
 };
 
-/* use only with writer lock aquired */
+/* use only with writer lock acquired */
 static void _drx_release_fw(struct drx397xD_state *s, enum fw_ix ix)
 {
 	memset(&fw[ix].data[0], 0, sizeof(fw[0].data));
@@ -123,10 +124,10 @@ static int drx_load_fw(struct drx397xD_state *s, enum fw_ix ix)
 	}
 	memset(&fw[ix].data[0], 0, sizeof(fw[0].data));
 
-	if (request_firmware(&fw[ix].file, fw[ix].name, &s->i2c->dev) != 0) {
+	rc = request_firmware(&fw[ix].file, fw[ix].name, s->i2c->dev.parent);
+	if (rc != 0) {
 		printk(KERN_ERR "%s: Firmware \"%s\" not available\n",
 		       mod_name, fw[ix].name);
-		rc = -ENOENT;
 		goto exit_err;
 	}
 
@@ -646,7 +647,7 @@ static int drx_tune(struct drx397xD_state *s,
 	u32 edi = 0, ebx = 0, ebp = 0, edx = 0;
 	u16 v20 = 0, v1E = 0, v16 = 0, v14 = 0, v12 = 0, v10 = 0, v0E = 0;
 
-	int rc, df_tuner;
+	int rc, df_tuner = 0;
 	int a, b, c, d;
 	pr_debug("%s %d\n", __func__, s->config.d60);
 

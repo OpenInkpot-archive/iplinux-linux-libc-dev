@@ -52,6 +52,7 @@
 
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include "ibmasm.h"
 #include "lowlevel.h"
 #include "remote.h"
@@ -104,8 +105,7 @@ static int __devinit ibmasm_init_one(struct pci_dev *pdev, const struct pci_devi
 	}
 
 	sp->irq = pdev->irq;
-	sp->base_address = ioremap(pci_resource_start(pdev, 0),
-					pci_resource_len(pdev, 0));
+	sp->base_address = pci_ioremap_bar(pdev, 0);
 	if (!sp->base_address) {
 		dev_err(sp->dev, "Failed to ioremap pci memory\n");
 		result =  -ENODEV;

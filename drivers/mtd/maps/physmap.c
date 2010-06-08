@@ -46,34 +46,38 @@ static int physmap_flash_remove(struct platform_device *dev)
 
 	physmap_data = dev->dev.platform_data;
 
-#ifdef CONFIG_MTD_CONCAT
-	if (info->cmtd != info->mtd[0]) {
+	if (info->cmtd) {
+#ifdef CONFIG_MTD_PARTITIONS
+		if (info->nr_parts || physmap_data->nr_parts) {
+			del_mtd_partitions(info->cmtd);
+
+			if (info->nr_parts)
+				kfree(info->parts);
+		} else {
+			del_mtd_device(info->cmtd);
+		}
+#else
 		del_mtd_device(info->cmtd);
-		mtd_concat_destroy(info->cmtd);
-	}
 #endif
+#ifdef CONFIG_MTD_CONCAT
+		if (info->cmtd != info->mtd[0])
+			mtd_concat_destroy(info->cmtd);
+#endif
+	}
 
 	for (i = 0; i < MAX_RESOURCES; i++) {
-		if (info->mtd[i] != NULL) {
-#ifdef CONFIG_MTD_PARTITIONS
-			if (info->nr_parts) {
-				del_mtd_partitions(info->mtd[i]);
-				kfree(info->parts);
-			} else if (physmap_data->nr_parts) {
-				del_mtd_partitions(info->mtd[i]);
-			} else {
-				del_mtd_device(info->mtd[i]);
-			}
-#else
-			del_mtd_device(info->mtd[i]);
-#endif
+		if (info->mtd[i] != NULL)
 			map_destroy(info->mtd[i]);
-		}
 	}
 	return 0;
 }
 
-static const char *rom_probe_types[] = { "cfi_probe", "jedec_probe", "map_rom", NULL };
+static const char *rom_probe_types[] = {
+					"cfi_probe",
+					"jedec_probe",
+					"qinfo_probe",
+					"map_rom",
+					NULL };
 #ifdef CONFIG_MTD_PARTITIONS
 static const char *part_probe_types[] = { "cmdlinepart", "RedBoot", NULL };
 #endif
@@ -108,23 +112,24 @@ static int physmap_flash_probe(struct platform_device *dev)
 		if (!devm_request_mem_region(&dev->dev,
 			dev->resource[i].start,
 			dev->resource[i].end - dev->resource[i].start + 1,
-			dev->dev.bus_id)) {
+			dev_name(&dev->dev))) {
 			dev_err(&dev->dev, "Could not reserve memory region\n");
 			err = -ENOMEM;
 			goto err_out;
 		}
 
-		info->map[i].name = dev->dev.bus_id;
+		info->map[i].name = dev_name(&dev->dev);
 		info->map[i].phys = dev->resource[i].start;
 		info->map[i].size = dev->resource[i].end - dev->resource[i].start + 1;
 		info->map[i].bankwidth = physmap_data->width;
 		info->map[i].set_vpp = physmap_data->set_vpp;
+		info->map[i].pfow_base = physmap_data->pfow_base;
 
 		info->map[i].virt = devm_ioremap(&dev->dev, info->map[i].phys,
 						 info->map[i].size);
 		if (info->map[i].virt == NULL) {
 			dev_err(&dev->dev, "Failed to ioremap flash region\n");
-			err = EIO;
+			err = -EIO;
 			goto err_out;
 		}
 
@@ -141,6 +146,7 @@ static int physmap_flash_probe(struct platform_device *dev)
 			devices_found++;
 		}
 		info->mtd[i]->owner = THIS_MODULE;
+		info->mtd[i]->dev.parent = &dev->dev;
 	}
 
 	if (devices_found == 1) {
@@ -150,7 +156,7 @@ static int physmap_flash_probe(struct platform_device *dev)
 		 * We detected multiple devices. Concatenate them together.
 		 */
 #ifdef CONFIG_MTD_CONCAT
-		info->cmtd = mtd_concat_create(info->mtd, devices_found, dev->dev.bus_id);
+		info->cmtd = mtd_concat_create(info->mtd, devices_found, dev_name(&dev->dev));
 		if (info->cmtd == NULL)
 			err = -ENXIO;
 #else
@@ -163,9 +169,11 @@ static int physmap_flash_probe(struct platform_device *dev)
 		goto err_out;
 
 #ifdef CONFIG_MTD_PARTITIONS
-	err = parse_mtd_partitions(info->cmtd, part_probe_types, &info->parts, 0);
+	err = parse_mtd_partitions(info->cmtd, part_probe_types,
+				&info->parts, 0);
 	if (err > 0) {
 		add_mtd_partitions(info->cmtd, info->parts, err);
+		info->nr_parts = err;
 		return 0;
 	}
 
@@ -186,42 +194,6 @@ err_out:
 }
 
 #ifdef CONFIG_PM
-static int physmap_flash_suspend(struct platform_device *dev, pm_message_t state)
-{
-	struct physmap_flash_info *info = platform_get_drvdata(dev);
-	int ret = 0;
-	int i;
-
-	for (i = 0; i < MAX_RESOURCES && info->mtd[i]; i++)
-		if (info->mtd[i]->suspend) {
-			ret = info->mtd[i]->suspend(info->mtd[i]);
-			if (ret)
-				goto fail;
-		}
-
-	return 0;
-fail:
-	for (--i; i >= 0; --i)
-		if (info->mtd[i]->suspend) {
-			BUG_ON(!info->mtd[i]->resume);
-			info->mtd[i]->resume(info->mtd[i]);
-		}
-
-	return ret;
-}
-
-static int physmap_flash_resume(struct platform_device *dev)
-{
-	struct physmap_flash_info *info = platform_get_drvdata(dev);
-	int i;
-
-	for (i = 0; i < MAX_RESOURCES && info->mtd[i]; i++)
-		if (info->mtd[i]->resume)
-			info->mtd[i]->resume(info->mtd[i]);
-
-	return 0;
-}
-
 static void physmap_flash_shutdown(struct platform_device *dev)
 {
 	struct physmap_flash_info *info = platform_get_drvdata(dev);
@@ -233,16 +205,12 @@ static void physmap_flash_shutdown(struct platform_device *dev)
 				info->mtd[i]->resume(info->mtd[i]);
 }
 #else
-#define physmap_flash_suspend NULL
-#define physmap_flash_resume NULL
 #define physmap_flash_shutdown NULL
 #endif
 
 static struct platform_driver physmap_flash_driver = {
 	.probe		= physmap_flash_probe,
 	.remove		= physmap_flash_remove,
-	.suspend	= physmap_flash_suspend,
-	.resume		= physmap_flash_resume,
 	.shutdown	= physmap_flash_shutdown,
 	.driver		= {
 		.name	= "physmap-flash",
@@ -251,14 +219,7 @@ static struct platform_driver physmap_flash_driver = {
 };
 
 
-#ifdef CONFIG_MTD_PHYSMAP_LEN
-#if CONFIG_MTD_PHYSMAP_LEN != 0
-#warning using PHYSMAP compat code
-#define PHYSMAP_COMPAT
-#endif
-#endif
-
-#ifdef PHYSMAP_COMPAT
+#ifdef CONFIG_MTD_PHYSMAP_COMPAT
 static struct physmap_flash_data physmap_flash_data = {
 	.width		= CONFIG_MTD_PHYSMAP_BANKWIDTH,
 };
@@ -302,7 +263,7 @@ static int __init physmap_init(void)
 	int err;
 
 	err = platform_driver_register(&physmap_flash_driver);
-#ifdef PHYSMAP_COMPAT
+#ifdef CONFIG_MTD_PHYSMAP_COMPAT
 	if (err == 0)
 		platform_device_register(&physmap_flash);
 #endif
@@ -312,7 +273,7 @@ static int __init physmap_init(void)
 
 static void __exit physmap_exit(void)
 {
-#ifdef PHYSMAP_COMPAT
+#ifdef CONFIG_MTD_PHYSMAP_COMPAT
 	platform_device_unregister(&physmap_flash);
 #endif
 	platform_driver_unregister(&physmap_flash_driver);
@@ -326,8 +287,7 @@ MODULE_AUTHOR("David Woodhouse <dwmw2@infradead.org>");
 MODULE_DESCRIPTION("Generic configurable MTD map driver");
 
 /* legacy platform drivers can't hotplug or coldplg */
-#ifndef PHYSMAP_COMPAT
+#ifndef CONFIG_MTD_PHYSMAP_COMPAT
 /* work with hotplug and coldplug */
 MODULE_ALIAS("platform:physmap-flash");
 #endif
-

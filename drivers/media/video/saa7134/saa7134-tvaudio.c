@@ -25,7 +25,6 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/kthread.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/freezer.h>
 #include <asm/div64.h>
@@ -159,7 +158,7 @@ static struct saa7134_tvaudio tvaudio[] = {
 		.mode          = TVAUDIO_FM_MONO,
 	}
 };
-#define TVAUDIO (sizeof(tvaudio)/sizeof(struct saa7134_tvaudio))
+#define TVAUDIO ARRAY_SIZE(tvaudio)
 
 /* ------------------------------------------------------------------ */
 

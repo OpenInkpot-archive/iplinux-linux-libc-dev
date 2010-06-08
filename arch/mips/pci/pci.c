@@ -31,8 +31,8 @@ unsigned int pci_probe = PCI_ASSIGN_ALL_BUSSES;
 
 static struct pci_controller *hose_head, **hose_tail = &hose_head;
 
-unsigned long PCIBIOS_MIN_IO	= 0x0000;
-unsigned long PCIBIOS_MIN_MEM	= 0;
+unsigned long PCIBIOS_MIN_IO;
+unsigned long PCIBIOS_MIN_MEM;
 
 static int pci_initialized;
 
@@ -49,8 +49,8 @@ static int pci_initialized;
  * but we want to try to avoid allocating at 0x2900-0x2bff
  * which might have be mirrored at 0x0100-0x03ff..
  */
-void
-pcibios_align_resource(void *data, struct resource *res,
+resource_size_t
+pcibios_align_resource(void *data, const struct resource *res,
 		       resource_size_t size, resource_size_t align)
 {
 	struct pci_dev *dev = data;
@@ -73,7 +73,7 @@ pcibios_align_resource(void *data, struct resource *res,
 			start = PCIBIOS_MIN_MEM + hose->mem_resource->start;
 	}
 
-	res->start = start;
+	return start;
 }
 
 static void __devinit pcibios_scanbus(struct pci_controller *hose)
@@ -149,28 +149,6 @@ out:
 	       "Skipping PCI bus scan due to resource conflict\n");
 }
 
-/* Most MIPS systems have straight-forward swizzling needs.  */
-
-static inline u8 bridge_swizzle(u8 pin, u8 slot)
-{
-	return (((pin - 1) + slot) % 4) + 1;
-}
-
-static u8 __init common_swizzle(struct pci_dev *dev, u8 *pinp)
-{
-	u8 pin = *pinp;
-
-	while (dev->bus->parent) {
-		pin = bridge_swizzle(pin, PCI_SLOT(dev->devfn));
-		/* Move up the chain of bridges. */
-		dev = dev->bus->self;
-        }
-	*pinp = pin;
-
-	/* The slot is the slot of the last bridge. */
-	return PCI_SLOT(dev->devfn);
-}
-
 static int __init pcibios_init(void)
 {
 	struct pci_controller *hose;
@@ -179,7 +157,7 @@ static int __init pcibios_init(void)
 	for (hose = hose_head; hose; hose = hose->next)
 		pcibios_scanbus(hose);
 
-	pci_fixup_irqs(common_swizzle, pcibios_map_irq);
+	pci_fixup_irqs(pci_common_swizzle, pcibios_map_irq);
 
 	pci_initialized = 1;
 
@@ -272,8 +250,6 @@ static void pcibios_fixup_device_resources(struct pci_dev *dev,
 
 	for (i = 0; i < PCI_NUM_RESOURCES; i++) {
 		if (!dev->resource[i].start)
-			continue;
-		if (dev->resource[i].flags & IORESOURCE_PCI_FIXED)
 			continue;
 		if (dev->resource[i].flags & IORESOURCE_IO)
 			offset = hose->io_offset;

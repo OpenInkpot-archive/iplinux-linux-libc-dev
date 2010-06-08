@@ -160,7 +160,7 @@ static int emi26_load_firmware (struct usb_device *dev)
 			err("%s - error loading firmware: error = %d", __func__, err);
 			goto wraperr;
 		}
-	} while (i > 0);
+	} while (rec);
 
 	/* Assert reset (stop the CPU in the EMI) */
 	err = emi26_set_reset(dev,1);
@@ -245,7 +245,7 @@ wraperr:
 	return err;
 }
 
-static struct usb_device_id id_table [] = {
+static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(EMI26_VENDOR_ID, EMI26_PRODUCT_ID) },
 	{ USB_DEVICE(EMI26_VENDOR_ID, EMI26B_PRODUCT_ID) },
 	{ }                                             /* Terminating entry */

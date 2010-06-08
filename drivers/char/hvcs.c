@@ -74,6 +74,7 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/stat.h>
 #include <linux/tty.h>
@@ -269,7 +270,7 @@ struct hvcs_struct {
 	unsigned int index;
 
 	struct tty_struct *tty;
-	unsigned int open_count;
+	int open_count;
 
 	/*
 	 * Used to tell the driver kernel_thread what operations need to take
@@ -347,7 +348,7 @@ static void __exit hvcs_module_exit(void);
 
 static inline struct hvcs_struct *from_vio_dev(struct vio_dev *viod)
 {
-	return viod->dev.driver_data;
+	return dev_get_drvdata(&viod->dev);
 }
 /* The sysfs interface for the driver and devices */
 
@@ -785,7 +786,7 @@ static int __devinit hvcs_probe(
 	kref_init(&hvcsd->kref);
 
 	hvcsd->vdev = dev;
-	dev->dev.driver_data = hvcsd;
+	dev_set_drvdata(&dev->dev, hvcsd);
 
 	hvcsd->index = index;
 
@@ -831,7 +832,7 @@ static int __devinit hvcs_probe(
 
 static int __devexit hvcs_remove(struct vio_dev *dev)
 {
-	struct hvcs_struct *hvcsd = dev->dev.driver_data;
+	struct hvcs_struct *hvcsd = dev_get_drvdata(&dev->dev);
 	unsigned long flags;
 	struct tty_struct *tty;
 
@@ -868,7 +869,7 @@ static int __devexit hvcs_remove(struct vio_dev *dev)
 static struct vio_driver hvcs_vio_driver = {
 	.id_table	= hvcs_driver_table,
 	.probe		= hvcs_probe,
-	.remove		= hvcs_remove,
+	.remove		= __devexit_p(hvcs_remove),
 	.driver		= {
 		.name	= hvcs_driver_name,
 		.owner	= THIS_MODULE,
@@ -1138,15 +1139,6 @@ static int hvcs_open(struct tty_struct *tty, struct file *filp)
 	hvcsd->open_count = 1;
 	hvcsd->tty = tty;
 	tty->driver_data = hvcsd;
-
-	/*
-	 * Set this driver to low latency so that we actually have a chance at
-	 * catching a throttled TTY after we flip_buffer_push.  Otherwise the
-	 * flush_to_async may not execute until after the kernel_thread has
-	 * yielded and resumed the next flip_buffer_push resulting in data
-	 * loss.
-	 */
-	tty->low_latency = 1;
 
 	memset(&hvcsd->buffer[0], 0x00, HVCS_BUFF_LEN);
 

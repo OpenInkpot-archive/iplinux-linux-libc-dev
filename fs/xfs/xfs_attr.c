@@ -45,9 +45,9 @@
 #include "xfs_error.h"
 #include "xfs_quota.h"
 #include "xfs_trans_space.h"
-#include "xfs_acl.h"
 #include "xfs_rw.h"
 #include "xfs_vnodeops.h"
+#include "xfs_trace.h"
 
 /*
  * xfs_attr.c
@@ -90,19 +90,15 @@ STATIC int xfs_attr_rmtval_remove(xfs_da_args_t *args);
 
 #define ATTR_RMTVALUE_MAPSIZE	1	/* # of map entries at once */
 
-#if defined(XFS_ATTR_TRACE)
-ktrace_t *xfs_attr_trace_buf;
-#endif
-
 STATIC int
 xfs_attr_name_to_xname(
 	struct xfs_name	*xname,
-	const char	*aname)
+	const unsigned char *aname)
 {
 	if (!aname)
 		return EINVAL;
 	xname->name = aname;
-	xname->len = strlen(aname);
+	xname->len = strlen((char *)aname);
 	if (xname->len >= MAXNAMELEN)
 		return EFAULT;		/* match IRIX behaviour */
 
@@ -124,9 +120,13 @@ xfs_inode_hasattr(
  * Overall external interface routines.
  *========================================================================*/
 
-int
-xfs_attr_fetch(xfs_inode_t *ip, struct xfs_name *name,
-		char *value, int *valuelenp, int flags)
+STATIC int
+xfs_attr_get_int(
+	struct xfs_inode	*ip,
+	struct xfs_name		*name,
+	unsigned char		*value,
+	int			*valuelenp,
+	int			flags)
 {
 	xfs_da_args_t   args;
 	int             error;
@@ -171,8 +171,8 @@ xfs_attr_fetch(xfs_inode_t *ip, struct xfs_name *name,
 int
 xfs_attr_get(
 	xfs_inode_t	*ip,
-	const char	*name,
-	char		*value,
+	const unsigned char *name,
+	unsigned char	*value,
 	int		*valuelenp,
 	int		flags)
 {
@@ -189,7 +189,7 @@ xfs_attr_get(
 		return error;
 
 	xfs_ilock(ip, XFS_ILOCK_SHARED);
-	error = xfs_attr_fetch(ip, &xname, value, valuelenp, flags);
+	error = xfs_attr_get_int(ip, &xname, value, valuelenp, flags);
 	xfs_iunlock(ip, XFS_ILOCK_SHARED);
 	return(error);
 }
@@ -197,7 +197,7 @@ xfs_attr_get(
 /*
  * Calculate how many blocks we need for the new attribute,
  */
-int
+STATIC int
 xfs_attr_calc_size(
 	struct xfs_inode 	*ip,
 	int			namelen,
@@ -235,8 +235,12 @@ xfs_attr_calc_size(
 }
 
 STATIC int
-xfs_attr_set_int(xfs_inode_t *dp, struct xfs_name *name,
-		char *value, int valuelen, int flags)
+xfs_attr_set_int(
+	struct xfs_inode *dp,
+	struct xfs_name	*name,
+	unsigned char	*value,
+	int		valuelen,
+	int		flags)
 {
 	xfs_da_args_t	args;
 	xfs_fsblock_t	firstblock;
@@ -249,8 +253,9 @@ xfs_attr_set_int(xfs_inode_t *dp, struct xfs_name *name,
 	/*
 	 * Attach the dquots to the inode.
 	 */
-	if ((error = XFS_QM_DQATTACH(mp, dp, 0)))
-		return (error);
+	error = xfs_qm_dqattach(dp, 0);
+	if (error)
+		return error;
 
 	/*
 	 * If the inode doesn't have an attribute fork, add one.
@@ -311,7 +316,7 @@ xfs_attr_set_int(xfs_inode_t *dp, struct xfs_name *name,
 	}
 	xfs_ilock(dp, XFS_ILOCK_EXCL);
 
-	error = XFS_TRANS_RESERVE_QUOTA_NBLKS(mp, args.trans, dp, args.total, 0,
+	error = xfs_trans_reserve_quota_nblks(args.trans, dp, args.total, 0,
 				rsvd ? XFS_QMOPT_RES_REGBLKS | XFS_QMOPT_FORCE_RES :
 				       XFS_QMOPT_RES_REGBLKS);
 	if (error) {
@@ -374,7 +379,7 @@ xfs_attr_set_int(xfs_inode_t *dp, struct xfs_name *name,
 		 * It won't fit in the shortform, transform to a leaf block.
 		 * GROT: another possible req'mt for a double-split btree op.
 		 */
-		XFS_BMAP_INIT(args.flist, args.firstblock);
+		xfs_bmap_init(args.flist, args.firstblock);
 		error = xfs_attr_shortform_to_leaf(&args);
 		if (!error) {
 			error = xfs_bmap_finish(&args.trans, args.flist,
@@ -451,8 +456,8 @@ out:
 int
 xfs_attr_set(
 	xfs_inode_t	*dp,
-	const char	*name,
-	char		*value,
+	const unsigned char *name,
+	unsigned char	*value,
 	int		valuelen,
 	int		flags)
 {
@@ -501,8 +506,9 @@ xfs_attr_remove_int(xfs_inode_t *dp, struct xfs_name *name, int flags)
 	/*
 	 * Attach the dquots to the inode.
 	 */
-	if ((error = XFS_QM_DQATTACH(mp, dp, 0)))
-		return (error);
+	error = xfs_qm_dqattach(dp, 0);
+	if (error)
+		return error;
 
 	/*
 	 * Start our first transaction of the day.
@@ -598,7 +604,7 @@ out:
 int
 xfs_attr_remove(
 	xfs_inode_t	*dp,
-	const char	*name,
+	const unsigned char *name,
 	int		flags)
 {
 	int		error;
@@ -635,7 +641,6 @@ xfs_attr_list_int(xfs_attr_list_context_t *context)
 		return EIO;
 
 	xfs_ilock(dp, XFS_ILOCK_SHARED);
-	xfs_attr_trace_l_c("syscall start", context);
 
 	/*
 	 * Decide on what work routines to call based on the inode size.
@@ -651,7 +656,6 @@ xfs_attr_list_int(xfs_attr_list_context_t *context)
 	}
 
 	xfs_iunlock(dp, XFS_ILOCK_SHARED);
-	xfs_attr_trace_l_c("syscall end", context);
 
 	return error;
 }
@@ -669,9 +673,13 @@ xfs_attr_list_int(xfs_attr_list_context_t *context)
  */
 /*ARGSUSED*/
 STATIC int
-xfs_attr_put_listent(xfs_attr_list_context_t *context, int flags,
-		     char *name, int namelen,
-		     int valuelen, char *value)
+xfs_attr_put_listent(
+	xfs_attr_list_context_t *context,
+	int		flags,
+	unsigned char	*name,
+	int		namelen,
+	int		valuelen,
+	unsigned char	*value)
 {
 	struct attrlist *alist = (struct attrlist *)context->alist;
 	attrlist_ent_t *aep;
@@ -697,7 +705,7 @@ xfs_attr_put_listent(xfs_attr_list_context_t *context, int flags,
 			context->count * sizeof(alist->al_offset[0]);
 	context->firstu -= ATTR_ENTSIZE(namelen);
 	if (context->firstu < arraytop) {
-		xfs_attr_trace_l_c("buffer full", context);
+		trace_xfs_attr_list_full(context);
 		alist->al_more = 1;
 		context->seen_enough = 1;
 		return 1;
@@ -709,7 +717,7 @@ xfs_attr_put_listent(xfs_attr_list_context_t *context, int flags,
 	aep->a_name[namelen] = 0;
 	alist->al_offset[context->count++] = context->firstu;
 	alist->al_count = context->count;
-	xfs_attr_trace_l_c("add", context);
+	trace_xfs_attr_list_add(context);
 	return 0;
 }
 
@@ -956,7 +964,7 @@ xfs_attr_leaf_addname(xfs_da_args_t *args)
 		 * Commit that transaction so that the node_addname() call
 		 * can manage its own transactions.
 		 */
-		XFS_BMAP_INIT(args->flist, args->firstblock);
+		xfs_bmap_init(args->flist, args->firstblock);
 		error = xfs_attr_leaf_to_node(args);
 		if (!error) {
 			error = xfs_bmap_finish(&args->trans, args->flist,
@@ -1057,7 +1065,7 @@ xfs_attr_leaf_addname(xfs_da_args_t *args)
 		 * If the result is small enough, shrink it all into the inode.
 		 */
 		if ((forkoff = xfs_attr_shortform_allfit(bp, dp))) {
-			XFS_BMAP_INIT(args->flist, args->firstblock);
+			xfs_bmap_init(args->flist, args->firstblock);
 			error = xfs_attr_leaf_to_shortform(bp, args, forkoff);
 			/* bp is gone due to xfs_da_shrink_inode */
 			if (!error) {
@@ -1135,7 +1143,7 @@ xfs_attr_leaf_removename(xfs_da_args_t *args)
 	 * If the result is small enough, shrink it all into the inode.
 	 */
 	if ((forkoff = xfs_attr_shortform_allfit(bp, dp))) {
-		XFS_BMAP_INIT(args->flist, args->firstblock);
+		xfs_bmap_init(args->flist, args->firstblock);
 		error = xfs_attr_leaf_to_shortform(bp, args, forkoff);
 		/* bp is gone due to xfs_da_shrink_inode */
 		if (!error) {
@@ -1290,7 +1298,7 @@ restart:
 			 * have been a b-tree.
 			 */
 			xfs_da_state_free(state);
-			XFS_BMAP_INIT(args->flist, args->firstblock);
+			xfs_bmap_init(args->flist, args->firstblock);
 			error = xfs_attr_leaf_to_node(args);
 			if (!error) {
 				error = xfs_bmap_finish(&args->trans,
@@ -1331,7 +1339,7 @@ restart:
 		 * in the index/blkno/rmtblkno/rmtblkcnt fields and
 		 * in the index2/blkno2/rmtblkno2/rmtblkcnt2 fields.
 		 */
-		XFS_BMAP_INIT(args->flist, args->firstblock);
+		xfs_bmap_init(args->flist, args->firstblock);
 		error = xfs_da_split(state);
 		if (!error) {
 			error = xfs_bmap_finish(&args->trans, args->flist,
@@ -1443,7 +1451,7 @@ restart:
 		 * Check to see if the tree needs to be collapsed.
 		 */
 		if (retval && (state->path.active > 1)) {
-			XFS_BMAP_INIT(args->flist, args->firstblock);
+			xfs_bmap_init(args->flist, args->firstblock);
 			error = xfs_da_join(state);
 			if (!error) {
 				error = xfs_bmap_finish(&args->trans,
@@ -1579,7 +1587,7 @@ xfs_attr_node_removename(xfs_da_args_t *args)
 	 * Check to see if the tree needs to be collapsed.
 	 */
 	if (retval && (state->path.active > 1)) {
-		XFS_BMAP_INIT(args->flist, args->firstblock);
+		xfs_bmap_init(args->flist, args->firstblock);
 		error = xfs_da_join(state);
 		if (!error) {
 			error = xfs_bmap_finish(&args->trans, args->flist,
@@ -1630,7 +1638,7 @@ xfs_attr_node_removename(xfs_da_args_t *args)
 						       == XFS_ATTR_LEAF_MAGIC);
 
 		if ((forkoff = xfs_attr_shortform_allfit(bp, dp))) {
-			XFS_BMAP_INIT(args->flist, args->firstblock);
+			xfs_bmap_init(args->flist, args->firstblock);
 			error = xfs_attr_leaf_to_shortform(bp, args, forkoff);
 			/* bp is gone due to xfs_da_shrink_inode */
 			if (!error) {
@@ -1848,7 +1856,7 @@ xfs_attr_node_list(xfs_attr_list_context_t *context)
 			node = bp->data;
 			switch (be16_to_cpu(node->hdr.info.magic)) {
 			case XFS_DA_NODE_MAGIC:
-				xfs_attr_trace_l_cn("wrong blk", context, node);
+				trace_xfs_attr_list_wrong_blk(context);
 				xfs_da_brelse(NULL, bp);
 				bp = NULL;
 				break;
@@ -1856,20 +1864,18 @@ xfs_attr_node_list(xfs_attr_list_context_t *context)
 				leaf = bp->data;
 				if (cursor->hashval > be32_to_cpu(leaf->entries[
 				    be16_to_cpu(leaf->hdr.count)-1].hashval)) {
-					xfs_attr_trace_l_cl("wrong blk",
-							   context, leaf);
+					trace_xfs_attr_list_wrong_blk(context);
 					xfs_da_brelse(NULL, bp);
 					bp = NULL;
 				} else if (cursor->hashval <=
 					     be32_to_cpu(leaf->entries[0].hashval)) {
-					xfs_attr_trace_l_cl("maybe wrong blk",
-							   context, leaf);
+					trace_xfs_attr_list_wrong_blk(context);
 					xfs_da_brelse(NULL, bp);
 					bp = NULL;
 				}
 				break;
 			default:
-				xfs_attr_trace_l_c("wrong blk - ??", context);
+				trace_xfs_attr_list_wrong_blk(context);
 				xfs_da_brelse(NULL, bp);
 				bp = NULL;
 			}
@@ -1914,8 +1920,8 @@ xfs_attr_node_list(xfs_attr_list_context_t *context)
 				if (cursor->hashval
 						<= be32_to_cpu(btree->hashval)) {
 					cursor->blkno = be32_to_cpu(btree->before);
-					xfs_attr_trace_l_cb("descending",
-							    context, btree);
+					trace_xfs_attr_list_node_descend(context,
+									 btree);
 					break;
 				}
 			}
@@ -1982,7 +1988,7 @@ xfs_attr_rmtval_get(xfs_da_args_t *args)
 	xfs_bmbt_irec_t map[ATTR_RMTVALUE_MAPSIZE];
 	xfs_mount_t *mp;
 	xfs_daddr_t dblkno;
-	xfs_caddr_t dst;
+	void *dst;
 	xfs_buf_t *bp;
 	int nmap, error, tmp, valuelen, blkcnt, i;
 	xfs_dablk_t lblkno;
@@ -2009,13 +2015,14 @@ xfs_attr_rmtval_get(xfs_da_args_t *args)
 			dblkno = XFS_FSB_TO_DADDR(mp, map[i].br_startblock);
 			blkcnt = XFS_FSB_TO_BB(mp, map[i].br_blockcount);
 			error = xfs_read_buf(mp, mp->m_ddev_targp, dblkno,
-					     blkcnt, XFS_BUF_LOCK, &bp);
+					     blkcnt, XBF_LOCK | XBF_DONT_BLOCK,
+					     &bp);
 			if (error)
 				return(error);
 
 			tmp = (valuelen < XFS_BUF_SIZE(bp))
 				? valuelen : XFS_BUF_SIZE(bp);
-			xfs_biomove(bp, 0, tmp, dst, XFS_B_READ);
+			xfs_biomove(bp, 0, tmp, dst, XBF_READ);
 			xfs_buf_relse(bp);
 			dst += tmp;
 			valuelen -= tmp;
@@ -2039,7 +2046,7 @@ xfs_attr_rmtval_set(xfs_da_args_t *args)
 	xfs_inode_t *dp;
 	xfs_bmbt_irec_t map;
 	xfs_daddr_t dblkno;
-	xfs_caddr_t src;
+	void *src;
 	xfs_buf_t *bp;
 	xfs_dablk_t lblkno;
 	int blkcnt, valuelen, nmap, error, tmp, committed;
@@ -2069,7 +2076,7 @@ xfs_attr_rmtval_set(xfs_da_args_t *args)
 		/*
 		 * Allocate a single extent, up to the size of the value.
 		 */
-		XFS_BMAP_INIT(args->flist, args->firstblock);
+		xfs_bmap_init(args->flist, args->firstblock);
 		nmap = 1;
 		error = xfs_bmapi(args->trans, dp, (xfs_fileoff_t)lblkno,
 				  blkcnt,
@@ -2123,7 +2130,7 @@ xfs_attr_rmtval_set(xfs_da_args_t *args)
 		/*
 		 * Try to remember where we decided to put the value.
 		 */
-		XFS_BMAP_INIT(args->flist, args->firstblock);
+		xfs_bmap_init(args->flist, args->firstblock);
 		nmap = 1;
 		error = xfs_bmapi(NULL, dp, (xfs_fileoff_t)lblkno,
 				  args->rmtblkcnt,
@@ -2140,14 +2147,14 @@ xfs_attr_rmtval_set(xfs_da_args_t *args)
 		dblkno = XFS_FSB_TO_DADDR(mp, map.br_startblock),
 		blkcnt = XFS_FSB_TO_BB(mp, map.br_blockcount);
 
-		bp = xfs_buf_get_flags(mp->m_ddev_targp, dblkno,
-							blkcnt, XFS_BUF_LOCK);
+		bp = xfs_buf_get(mp->m_ddev_targp, dblkno, blkcnt,
+				 XBF_LOCK | XBF_DONT_BLOCK);
 		ASSERT(bp);
 		ASSERT(!XFS_BUF_GETERROR(bp));
 
 		tmp = (valuelen < XFS_BUF_SIZE(bp)) ? valuelen :
 							XFS_BUF_SIZE(bp);
-		xfs_biomove(bp, 0, tmp, src, XFS_B_WRITE);
+		xfs_biomove(bp, 0, tmp, src, XBF_WRITE);
 		if (tmp < XFS_BUF_SIZE(bp))
 			xfs_biozero(bp, tmp, XFS_BUF_SIZE(bp) - tmp);
 		if ((error = xfs_bwrite(mp, bp))) {/* GROT: NOTE: synchronous write */
@@ -2188,7 +2195,7 @@ xfs_attr_rmtval_remove(xfs_da_args_t *args)
 		/*
 		 * Try to remember where we decided to put the value.
 		 */
-		XFS_BMAP_INIT(args->flist, args->firstblock);
+		xfs_bmap_init(args->flist, args->firstblock);
 		nmap = 1;
 		error = xfs_bmapi(NULL, args->dp, (xfs_fileoff_t)lblkno,
 					args->rmtblkcnt,
@@ -2208,8 +2215,7 @@ xfs_attr_rmtval_remove(xfs_da_args_t *args)
 		/*
 		 * If the "remote" value is in the cache, remove it.
 		 */
-		bp = xfs_incore(mp->m_ddev_targp, dblkno, blkcnt,
-				XFS_INCORE_TRYLOCK);
+		bp = xfs_incore(mp->m_ddev_targp, dblkno, blkcnt, XBF_TRYLOCK);
 		if (bp) {
 			XFS_BUF_STALE(bp);
 			XFS_BUF_UNDELAYWRITE(bp);
@@ -2229,7 +2235,7 @@ xfs_attr_rmtval_remove(xfs_da_args_t *args)
 	blkcnt = args->rmtblkcnt;
 	done = 0;
 	while (!done) {
-		XFS_BMAP_INIT(args->flist, args->firstblock);
+		xfs_bmap_init(args->flist, args->firstblock);
 		error = xfs_bunmapi(args->trans, args->dp, lblkno, blkcnt,
 				    XFS_BMAPI_ATTRFORK | XFS_BMAPI_METADATA,
 				    1, args->firstblock, args->flist,
@@ -2263,85 +2269,3 @@ xfs_attr_rmtval_remove(xfs_da_args_t *args)
 	}
 	return(0);
 }
-
-#if defined(XFS_ATTR_TRACE)
-/*
- * Add a trace buffer entry for an attr_list context structure.
- */
-void
-xfs_attr_trace_l_c(char *where, struct xfs_attr_list_context *context)
-{
-	xfs_attr_trace_enter(XFS_ATTR_KTRACE_L_C, where, context,
-		(__psunsigned_t)NULL,
-		(__psunsigned_t)NULL,
-		(__psunsigned_t)NULL);
-}
-
-/*
- * Add a trace buffer entry for a context structure and a Btree node.
- */
-void
-xfs_attr_trace_l_cn(char *where, struct xfs_attr_list_context *context,
-			 struct xfs_da_intnode *node)
-{
-	xfs_attr_trace_enter(XFS_ATTR_KTRACE_L_CN, where, context,
-		(__psunsigned_t)be16_to_cpu(node->hdr.count),
-		(__psunsigned_t)be32_to_cpu(node->btree[0].hashval),
-		(__psunsigned_t)be32_to_cpu(node->btree[
-				    be16_to_cpu(node->hdr.count)-1].hashval));
-}
-
-/*
- * Add a trace buffer entry for a context structure and a Btree element.
- */
-void
-xfs_attr_trace_l_cb(char *where, struct xfs_attr_list_context *context,
-			  struct xfs_da_node_entry *btree)
-{
-	xfs_attr_trace_enter(XFS_ATTR_KTRACE_L_CB, where, context,
-		(__psunsigned_t)be32_to_cpu(btree->hashval),
-		(__psunsigned_t)be32_to_cpu(btree->before),
-		(__psunsigned_t)NULL);
-}
-
-/*
- * Add a trace buffer entry for a context structure and a leaf block.
- */
-void
-xfs_attr_trace_l_cl(char *where, struct xfs_attr_list_context *context,
-			      struct xfs_attr_leafblock *leaf)
-{
-	xfs_attr_trace_enter(XFS_ATTR_KTRACE_L_CL, where, context,
-		(__psunsigned_t)be16_to_cpu(leaf->hdr.count),
-		(__psunsigned_t)be32_to_cpu(leaf->entries[0].hashval),
-		(__psunsigned_t)be32_to_cpu(leaf->entries[
-				be16_to_cpu(leaf->hdr.count)-1].hashval));
-}
-
-/*
- * Add a trace buffer entry for the arguments given to the routine,
- * generic form.
- */
-void
-xfs_attr_trace_enter(int type, char *where,
-			 struct xfs_attr_list_context *context,
-			 __psunsigned_t a13, __psunsigned_t a14,
-			 __psunsigned_t a15)
-{
-	ASSERT(xfs_attr_trace_buf);
-	ktrace_enter(xfs_attr_trace_buf, (void *)((__psunsigned_t)type),
-		(void *)((__psunsigned_t)where),
-		(void *)((__psunsigned_t)context->dp),
-		(void *)((__psunsigned_t)context->cursor->hashval),
-		(void *)((__psunsigned_t)context->cursor->blkno),
-		(void *)((__psunsigned_t)context->cursor->offset),
-		(void *)((__psunsigned_t)context->alist),
-		(void *)((__psunsigned_t)context->bufsize),
-		(void *)((__psunsigned_t)context->count),
-		(void *)((__psunsigned_t)context->firstu),
-		NULL,
-		(void *)((__psunsigned_t)context->dupcnt),
-		(void *)((__psunsigned_t)context->flags),
-		(void *)a13, (void *)a14, (void *)a15);
-}
-#endif	/* XFS_ATTR_TRACE */

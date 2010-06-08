@@ -25,6 +25,7 @@
  */
 
 #include <linux/interrupt.h>
+#include <linux/slab.h>
 #include <linux/completion.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
@@ -50,7 +51,7 @@ struct pmi_data {
 
 static struct pmi_data *data;
 
-static int pmi_irq_handler(int irq, void *dev_id)
+static irqreturn_t pmi_irq_handler(int irq, void *dev_id)
 {
 	u8 type;
 	int rc;

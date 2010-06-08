@@ -14,6 +14,11 @@ config MMU
 	bool
 	default n
 
+config NO_DMA
+	bool
+	depends on !COLDFIRE
+	default y
+
 config FPU
 	bool
 	default n
@@ -41,6 +46,10 @@ config ARCH_HAS_ILOG2_U64
 config GENERIC_FIND_NEXT_BIT
 	bool
 	default y
+
+config GENERIC_GPIO
+	bool
+	default n
 
 config GENERIC_HWEIGHT
 	bool
@@ -177,6 +186,8 @@ config M527x
 config COLDFIRE
 	bool
 	depends on (M5206 || M5206e || M520x || M523x || M5249 || M527x || M5272 || M528x || M5307 || M532x || M5407)
+	select GENERIC_GPIO
+	select ARCH_REQUIRE_GPIOLIB
 	default y
 
 config CLOCK_SET
@@ -398,12 +409,6 @@ config M5307C3
 	help
 	  Support for the Motorola M5307C3 board.
 
-config eLIA
-	bool "Moreton Bay eLIA board support"
-	depends on M5307
-	help
-	  Support for the Moreton Bay eLIA board.
-
 config SECUREEDGEMP3
 	bool "SnapGear SecureEdge/MP3 platform support"
 	depends on M5307
@@ -527,6 +532,13 @@ config AVNET
 	bool
 	default y
 	depends on (AVNET5282)
+
+config UBOOT
+	bool "Support for U-Boot command line parameters"
+	help
+	  If you say Y here kernel will try to collect command
+	  line parameters from the initial u-boot stack.
+	default n
 
 config 4KSTACKS
 	bool "Use 4Kb for kernel stacks instead of 8Kb"
@@ -697,24 +709,7 @@ config ISA_DMA_API
 	depends on !M5272
 	default y
 
-menu "Bus options (PCI, PCMCIA, EISA, MCA, ISA)"
-
-config PCI
-	bool "PCI support"
-	help
-	  Support for PCI bus.
-
-config COMEMPCI
-	bool "CO-MEM lite PCI controller support"
-	depends on (M5307 || M5407)
-
-source "drivers/pci/Kconfig"
-
 source "drivers/pcmcia/Kconfig"
-
-source "drivers/pci/hotplug/Kconfig"
-
-endmenu
 
 menu "Executable file formats"
 

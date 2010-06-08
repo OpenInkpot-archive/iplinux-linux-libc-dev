@@ -10,7 +10,6 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/slab.h>
 #include <linux/fs.h>
 #include <linux/time.h>
 #include <linux/pagemap.h>
@@ -56,7 +55,7 @@ const struct file_operations jffs2_file_operations =
 
 const struct inode_operations jffs2_file_inode_operations =
 {
-	.permission =	jffs2_permission,
+	.check_acl =	jffs2_check_acl,
 	.setattr =	jffs2_setattr,
 	.setxattr =	jffs2_setxattr,
 	.getxattr =	jffs2_getxattr,
@@ -99,7 +98,7 @@ static int jffs2_do_readpage_nolock (struct inode *inode, struct page *pg)
 	kunmap(pg);
 
 	D2(printk(KERN_DEBUG "readpage finished\n"));
-	return 0;
+	return ret;
 }
 
 int jffs2_do_readpage_unlock(struct inode *inode, struct page *pg)
@@ -132,7 +131,7 @@ static int jffs2_write_begin(struct file *filp, struct address_space *mapping,
 	uint32_t pageofs = index << PAGE_CACHE_SHIFT;
 	int ret = 0;
 
-	pg = __grab_cache_page(mapping, index);
+	pg = grab_cache_page_write_begin(mapping, index, flags);
 	if (!pg)
 		return -ENOMEM;
 	*pagep = pg;

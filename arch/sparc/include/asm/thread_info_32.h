@@ -45,7 +45,7 @@ struct thread_info {
 	/* A place to store user windows and stack pointers
 	 * when the stack needs inspection.
 	 */
-	struct reg_window	reg_window[NSWINS];	/* align for ldd! */
+	struct reg_window32	reg_window[NSWINS];	/* align for ldd! */
 	unsigned long		rwbuf_stkptrs[NSWINS];
 	unsigned long		w_saved;
 
@@ -54,8 +54,6 @@ struct thread_info {
 
 /*
  * macros/functions for gaining access to the thread information structure
- *
- * preempt_count needs to be 1 initially, until the scheduler is functional.
  */
 #define INIT_THREAD_INFO(tsk)				\
 {							\
@@ -64,7 +62,7 @@ struct thread_info {
 	.exec_domain	=	&default_exec_domain,	\
 	.flags		=	0,			\
 	.cpu		=	0,			\
-	.preempt_count	=	1,			\
+	.preempt_count	=	INIT_PREEMPT_COUNT,	\
 	.restart_block	= {				\
 		.fn	=	do_no_restart_syscall,	\
 	},						\

@@ -281,7 +281,7 @@ void ubifs_add_to_cat(struct ubifs_info *c, struct ubifs_lprops *lprops,
 	case LPROPS_FREE:
 		if (add_to_lpt_heap(c, lprops, cat))
 			break;
-		/* No more room on heap so make it uncategorized */
+		/* No more room on heap so make it un-categorized */
 		cat = LPROPS_UNCAT;
 		/* Fall through */
 	case LPROPS_UNCAT:
@@ -375,8 +375,8 @@ void ubifs_replace_cat(struct ubifs_info *c, struct ubifs_lprops *old_lprops,
  * @lprops: LEB properties
  *
  * A LEB may have fallen off of the bottom of a heap, and ended up as
- * uncategorized even though it has enough space for us now. If that is the case
- * this function will put the LEB back onto a heap.
+ * un-categorized even though it has enough space for us now. If that is the
+ * case this function will put the LEB back onto a heap.
  */
 void ubifs_ensure_cat(struct ubifs_info *c, struct ubifs_lprops *lprops)
 {
@@ -436,10 +436,10 @@ int ubifs_categorize_lprops(const struct ubifs_info *c,
 /**
  * change_category - change LEB properties category.
  * @c: UBIFS file-system description object
- * @lprops: LEB properties to recategorize
+ * @lprops: LEB properties to re-categorize
  *
  * LEB properties are categorized to enable fast find operations. When the LEB
- * properties change they must be recategorized.
+ * properties change they must be re-categorized.
  */
 static void change_category(struct ubifs_info *c, struct ubifs_lprops *lprops)
 {
@@ -461,21 +461,18 @@ static void change_category(struct ubifs_info *c, struct ubifs_lprops *lprops)
 }
 
 /**
- * calc_dark - calculate LEB dark space size.
+ * ubifs_calc_dark - calculate LEB dark space size.
  * @c: the UBIFS file-system description object
  * @spc: amount of free and dirty space in the LEB
  *
- * This function calculates amount of dark space in an LEB which has @spc bytes
- * of free and dirty space. Returns the calculations result.
+ * This function calculates and returns amount of dark space in an LEB which
+ * has @spc bytes of free and dirty space.
  *
- * Dark space is the space which is not always usable - it depends on which
- * nodes are written in which order. E.g., if an LEB has only 512 free bytes,
- * it is dark space, because it cannot fit a large data node. So UBIFS cannot
- * count on this LEB and treat these 512 bytes as usable because it is not true
- * if, for example, only big chunks of uncompressible data will be written to
- * the FS.
+ * UBIFS is trying to account the space which might not be usable, and this
+ * space is called "dark space". For example, if an LEB has only %512 free
+ * bytes, it is dark space, because it cannot fit a large data node.
  */
-static int calc_dark(struct ubifs_info *c, int spc)
+int ubifs_calc_dark(const struct ubifs_info *c, int spc)
 {
 	ubifs_assert(!(spc & 7));
 
@@ -518,15 +515,15 @@ static int is_lprops_dirty(struct ubifs_info *c, struct ubifs_lprops *lprops)
  * @free: new free space amount
  * @dirty: new dirty space amount
  * @flags: new flags
- * @idx_gc_cnt: change to the count of idx_gc list
+ * @idx_gc_cnt: change to the count of @idx_gc list
  *
- * This function changes LEB properties. This function does not change a LEB
- * property (@free, @dirty or @flag) if the value passed is %LPROPS_NC.
+ * This function changes LEB properties (@free, @dirty or @flag). However, the
+ * property which has the %LPROPS_NC value is not changed. Returns a pointer to
+ * the updated LEB properties on success and a negative error code on failure.
  *
- * This function returns a pointer to the updated LEB properties on success
- * and a negative error code on failure. N.B. the LEB properties may have had to
- * be copied (due to COW) and consequently the pointer returned may not be the
- * same as the pointer passed.
+ * Note, the LEB properties may have had to be copied (due to COW) and
+ * consequently the pointer returned may not be the same as the pointer
+ * passed.
  */
 const struct ubifs_lprops *ubifs_change_lp(struct ubifs_info *c,
 					   const struct ubifs_lprops *lp,
@@ -535,7 +532,7 @@ const struct ubifs_lprops *ubifs_change_lp(struct ubifs_info *c,
 {
 	/*
 	 * This is the only function that is allowed to change lprops, so we
-	 * discard the const qualifier.
+	 * discard the "const" qualifier.
 	 */
 	struct ubifs_lprops *lprops = (struct ubifs_lprops *)lp;
 
@@ -575,7 +572,7 @@ const struct ubifs_lprops *ubifs_change_lp(struct ubifs_info *c,
 		if (old_spc < c->dead_wm)
 			c->lst.total_dead -= old_spc;
 		else
-			c->lst.total_dark -= calc_dark(c, old_spc);
+			c->lst.total_dark -= ubifs_calc_dark(c, old_spc);
 
 		c->lst.total_used -= c->leb_size - old_spc;
 	}
@@ -616,7 +613,7 @@ const struct ubifs_lprops *ubifs_change_lp(struct ubifs_info *c,
 		if (new_spc < c->dead_wm)
 			c->lst.total_dead += new_spc;
 		else
-			c->lst.total_dark += calc_dark(c, new_spc);
+			c->lst.total_dark += ubifs_calc_dark(c, new_spc);
 
 		c->lst.total_used += c->leb_size - new_spc;
 	}
@@ -635,10 +632,10 @@ const struct ubifs_lprops *ubifs_change_lp(struct ubifs_info *c,
  * @c: UBIFS file-system description object
  * @st: return statistics
  */
-void ubifs_get_lp_stats(struct ubifs_info *c, struct ubifs_lp_stats *st)
+void ubifs_get_lp_stats(struct ubifs_info *c, struct ubifs_lp_stats *lst)
 {
 	spin_lock(&c->space_lock);
-	memcpy(st, &c->lst, sizeof(struct ubifs_lp_stats));
+	memcpy(lst, &c->lst, sizeof(struct ubifs_lp_stats));
 	spin_unlock(&c->space_lock);
 }
 
@@ -678,6 +675,9 @@ int ubifs_change_one_lp(struct ubifs_info *c, int lnum, int free, int dirty,
 
 out:
 	ubifs_release_lprops(c);
+	if (err)
+		ubifs_err("cannot change properties of LEB %d, error %d",
+			  lnum, err);
 	return err;
 }
 
@@ -714,6 +714,9 @@ int ubifs_update_one_lp(struct ubifs_info *c, int lnum, int free, int dirty,
 
 out:
 	ubifs_release_lprops(c);
+	if (err)
+		ubifs_err("cannot update properties of LEB %d, error %d",
+			  lnum, err);
 	return err;
 }
 
@@ -737,6 +740,8 @@ int ubifs_read_one_lp(struct ubifs_info *c, int lnum, struct ubifs_lprops *lp)
 	lpp = ubifs_lpt_lookup(c, lnum);
 	if (IS_ERR(lpp)) {
 		err = PTR_ERR(lpp);
+		ubifs_err("cannot read properties of LEB %d, error %d",
+			  lnum, err);
 		goto out;
 	}
 
@@ -1088,7 +1093,7 @@ static int scan_check_cb(struct ubifs_info *c,
 		}
 	}
 
-	sleb = ubifs_scan(c, lnum, 0, c->dbg_buf);
+	sleb = ubifs_scan(c, lnum, 0, c->dbg->buf, 0);
 	if (IS_ERR(sleb)) {
 		/*
 		 * After an unclean unmount, empty and freeable LEBs
@@ -1099,7 +1104,7 @@ static int scan_check_cb(struct ubifs_info *c,
 				  "- continuing checking");
 			lst->empty_lebs += 1;
 			lst->total_free += c->leb_size;
-			lst->total_dark += calc_dark(c, c->leb_size);
+			lst->total_dark += ubifs_calc_dark(c, c->leb_size);
 			return LPT_SCAN_CONTINUE;
 		}
 
@@ -1109,7 +1114,7 @@ static int scan_check_cb(struct ubifs_info *c,
 				  "- continuing checking");
 			lst->total_free  += lp->free;
 			lst->total_dirty += lp->dirty;
-			lst->total_dark  +=  calc_dark(c, c->leb_size);
+			lst->total_dark  +=  ubifs_calc_dark(c, c->leb_size);
 			return LPT_SCAN_CONTINUE;
 		}
 		data->err = PTR_ERR(sleb);
@@ -1227,7 +1232,7 @@ static int scan_check_cb(struct ubifs_info *c,
 		if (spc < c->dead_wm)
 			lst->total_dead += spc;
 		else
-			lst->total_dark += calc_dark(c, spc);
+			lst->total_dark += ubifs_calc_dark(c, spc);
 	}
 
 	ubifs_scan_destroy(sleb);

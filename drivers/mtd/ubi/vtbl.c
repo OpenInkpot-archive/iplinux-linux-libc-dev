@@ -58,6 +58,7 @@
 
 #include <linux/crc32.h>
 #include <linux/err.h>
+#include <linux/slab.h>
 #include <asm/div64.h>
 #include "ubi.h"
 
@@ -566,6 +567,7 @@ static int init_volumes(struct ubi_device *ubi, const struct ubi_scan_info *si,
 		vol->reserved_pebs = be32_to_cpu(vtbl[i].reserved_pebs);
 		vol->alignment = be32_to_cpu(vtbl[i].alignment);
 		vol->data_pad = be32_to_cpu(vtbl[i].data_pad);
+		vol->upd_marker = vtbl[i].upd_marker;
 		vol->vol_type = vtbl[i].vol_type == UBI_VID_DYNAMIC ?
 					UBI_DYNAMIC_VOLUME : UBI_STATIC_VOLUME;
 		vol->name_len = be16_to_cpu(vtbl[i].name_len);
@@ -577,7 +579,7 @@ static int init_volumes(struct ubi_device *ubi, const struct ubi_scan_info *si,
 		if (vtbl[i].flags & UBI_VTBL_AUTORESIZE_FLG) {
 			/* Auto re-size flag may be set only for one volume */
 			if (ubi->autoresize_vol_id != -1) {
-				ubi_err("more then one auto-resize volume (%d "
+				ubi_err("more than one auto-resize volume (%d "
 					"and %d)", ubi->autoresize_vol_id, i);
 				kfree(vol);
 				return -EINVAL;

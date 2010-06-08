@@ -18,12 +18,14 @@
 #include <linux/module.h>
 #include <linux/blkpg.h>
 #include <linux/buffer_head.h>
+#include <linux/pagevec.h>
 #include <linux/writeback.h>
 #include <linux/mpage.h>
 #include <linux/mount.h>
 #include <linux/uio.h>
 #include <linux/namei.h>
 #include <linux/log2.h>
+#include <linux/kmemleak.h>
 #include <asm/uaccess.h>
 #include "internal.h"
 
@@ -75,7 +77,7 @@ int set_blocksize(struct block_device *bdev, int size)
 		return -EINVAL;
 
 	/* Size cannot be smaller than the size supported by the device */
-	if (size < bdev_hardsect_size(bdev))
+	if (size < bdev_logical_block_size(bdev))
 		return -EINVAL;
 
 	/* Don't change the size if it is same as current */
@@ -105,7 +107,7 @@ EXPORT_SYMBOL(sb_set_blocksize);
 
 int sb_min_blocksize(struct super_block *sb, int size)
 {
-	int minsize = bdev_hardsect_size(sb->s_bdev);
+	int minsize = bdev_logical_block_size(sb->s_bdev);
 	if (size < minsize)
 		size = minsize;
 	return sb_set_blocksize(sb, size);
@@ -173,6 +175,165 @@ blkdev_direct_IO(int rw, struct kiocb *iocb, const struct iovec *iov,
 	return blockdev_direct_IO_no_locking(rw, iocb, inode, I_BDEV(inode),
 				iov, offset, nr_segs, blkdev_get_blocks, NULL);
 }
+
+int __sync_blockdev(struct block_device *bdev, int wait)
+{
+	if (!bdev)
+		return 0;
+	if (!wait)
+		return filemap_flush(bdev->bd_inode->i_mapping);
+	return filemap_write_and_wait(bdev->bd_inode->i_mapping);
+}
+
+/*
+ * Write out and wait upon all the dirty data associated with a block
+ * device via its mapping.  Does not take the superblock lock.
+ */
+int sync_blockdev(struct block_device *bdev)
+{
+	return __sync_blockdev(bdev, 1);
+}
+EXPORT_SYMBOL(sync_blockdev);
+
+/*
+ * Write out and wait upon all dirty data associated with this
+ * device.   Filesystem data as well as the underlying block
+ * device.  Takes the superblock lock.
+ */
+int fsync_bdev(struct block_device *bdev)
+{
+	struct super_block *sb = get_super(bdev);
+	if (sb) {
+		int res = sync_filesystem(sb);
+		drop_super(sb);
+		return res;
+	}
+	return sync_blockdev(bdev);
+}
+EXPORT_SYMBOL(fsync_bdev);
+
+/**
+ * freeze_bdev  --  lock a filesystem and force it into a consistent state
+ * @bdev:	blockdevice to lock
+ *
+ * If a superblock is found on this device, we take the s_umount semaphore
+ * on it to make sure nobody unmounts until the snapshot creation is done.
+ * The reference counter (bd_fsfreeze_count) guarantees that only the last
+ * unfreeze process can unfreeze the frozen filesystem actually when multiple
+ * freeze requests arrive simultaneously. It counts up in freeze_bdev() and
+ * count down in thaw_bdev(). When it becomes 0, thaw_bdev() will unfreeze
+ * actually.
+ */
+struct super_block *freeze_bdev(struct block_device *bdev)
+{
+	struct super_block *sb;
+	int error = 0;
+
+	mutex_lock(&bdev->bd_fsfreeze_mutex);
+	if (++bdev->bd_fsfreeze_count > 1) {
+		/*
+		 * We don't even need to grab a reference - the first call
+		 * to freeze_bdev grab an active reference and only the last
+		 * thaw_bdev drops it.
+		 */
+		sb = get_super(bdev);
+		drop_super(sb);
+		mutex_unlock(&bdev->bd_fsfreeze_mutex);
+		return sb;
+	}
+
+	sb = get_active_super(bdev);
+	if (!sb)
+		goto out;
+	if (sb->s_flags & MS_RDONLY) {
+		sb->s_frozen = SB_FREEZE_TRANS;
+		up_write(&sb->s_umount);
+		mutex_unlock(&bdev->bd_fsfreeze_mutex);
+		return sb;
+	}
+
+	sb->s_frozen = SB_FREEZE_WRITE;
+	smp_wmb();
+
+	sync_filesystem(sb);
+
+	sb->s_frozen = SB_FREEZE_TRANS;
+	smp_wmb();
+
+	sync_blockdev(sb->s_bdev);
+
+	if (sb->s_op->freeze_fs) {
+		error = sb->s_op->freeze_fs(sb);
+		if (error) {
+			printk(KERN_ERR
+				"VFS:Filesystem freeze failed\n");
+			sb->s_frozen = SB_UNFROZEN;
+			deactivate_locked_super(sb);
+			bdev->bd_fsfreeze_count--;
+			mutex_unlock(&bdev->bd_fsfreeze_mutex);
+			return ERR_PTR(error);
+		}
+	}
+	up_write(&sb->s_umount);
+
+ out:
+	sync_blockdev(bdev);
+	mutex_unlock(&bdev->bd_fsfreeze_mutex);
+	return sb;	/* thaw_bdev releases s->s_umount */
+}
+EXPORT_SYMBOL(freeze_bdev);
+
+/**
+ * thaw_bdev  -- unlock filesystem
+ * @bdev:	blockdevice to unlock
+ * @sb:		associated superblock
+ *
+ * Unlocks the filesystem and marks it writeable again after freeze_bdev().
+ */
+int thaw_bdev(struct block_device *bdev, struct super_block *sb)
+{
+	int error = -EINVAL;
+
+	mutex_lock(&bdev->bd_fsfreeze_mutex);
+	if (!bdev->bd_fsfreeze_count)
+		goto out_unlock;
+
+	error = 0;
+	if (--bdev->bd_fsfreeze_count > 0)
+		goto out_unlock;
+
+	if (!sb)
+		goto out_unlock;
+
+	BUG_ON(sb->s_bdev != bdev);
+	down_write(&sb->s_umount);
+	if (sb->s_flags & MS_RDONLY)
+		goto out_unfrozen;
+
+	if (sb->s_op->unfreeze_fs) {
+		error = sb->s_op->unfreeze_fs(sb);
+		if (error) {
+			printk(KERN_ERR
+				"VFS:Filesystem thaw failed\n");
+			sb->s_frozen = SB_FREEZE_TRANS;
+			bdev->bd_fsfreeze_count++;
+			mutex_unlock(&bdev->bd_fsfreeze_mutex);
+			return error;
+		}
+	}
+
+out_unfrozen:
+	sb->s_frozen = SB_UNFROZEN;
+	smp_wmb();
+	wake_up(&sb->s_wait_unfrozen);
+
+	if (sb)
+		deactivate_locked_super(sb);
+out_unlock:
+	mutex_unlock(&bdev->bd_fsfreeze_mutex);
+	return 0;
+}
+EXPORT_SYMBOL(thaw_bdev);
 
 static int blkdev_writepage(struct page *page, struct writeback_control *wbc)
 {
@@ -243,10 +404,28 @@ static loff_t block_llseek(struct file *file, loff_t offset, int origin)
  *	NULL first argument is nfsd_sync_dir() and that's not a directory.
  */
  
-static int block_fsync(struct file *filp, struct dentry *dentry, int datasync)
+int blkdev_fsync(struct file *filp, struct dentry *dentry, int datasync)
 {
-	return sync_blockdev(I_BDEV(filp->f_mapping->host));
+	struct inode *bd_inode = filp->f_mapping->host;
+	struct block_device *bdev = I_BDEV(bd_inode);
+	int error;
+
+	/*
+	 * There is no need to serialise calls to blkdev_issue_flush with
+	 * i_mutex and doing so causes performance issues with concurrent
+	 * O_SYNC writers to a block device.
+	 */
+	mutex_unlock(&bd_inode->i_mutex);
+
+	error = blkdev_issue_flush(bdev, NULL);
+	if (error == -EOPNOTSUPP)
+		error = 0;
+
+	mutex_lock(&bd_inode->i_mutex);
+
+	return error;
 }
+EXPORT_SYMBOL(blkdev_fsync);
 
 /*
  * pseudo-fs
@@ -267,7 +446,6 @@ static void bdev_destroy_inode(struct inode *inode)
 {
 	struct bdev_inode *bdi = BDEV_I(inode);
 
-	bdi->bdev.bd_inode_backing_dev_info = NULL;
 	kmem_cache_free(bdev_cachep, bdi);
 }
 
@@ -278,13 +456,14 @@ static void init_once(void *foo)
 
 	memset(bdev, 0, sizeof(*bdev));
 	mutex_init(&bdev->bd_mutex);
-	sema_init(&bdev->bd_mount_sem, 1);
 	INIT_LIST_HEAD(&bdev->bd_inodes);
 	INIT_LIST_HEAD(&bdev->bd_list);
 #ifdef CONFIG_SYSFS
 	INIT_LIST_HEAD(&bdev->bd_holder_list);
 #endif
 	inode_init_once(&ei->vfs_inode);
+	/* Initialize mutex for freeze. */
+	mutex_init(&bdev->bd_fsfreeze_mutex);
 }
 
 static inline void __bd_forget(struct inode *inode)
@@ -326,12 +505,13 @@ static struct file_system_type bd_type = {
 	.kill_sb	= kill_anon_super,
 };
 
-static struct vfsmount *bd_mnt __read_mostly;
-struct super_block *blockdev_superblock;
+struct super_block *blockdev_superblock __read_mostly;
 
 void __init bdev_cache_init(void)
 {
 	int err;
+	struct vfsmount *bd_mnt;
+
 	bdev_cachep = kmem_cache_create("bdev_cache", sizeof(struct bdev_inode),
 			0, (SLAB_HWCACHE_ALIGN|SLAB_RECLAIM_ACCOUNT|
 				SLAB_MEM_SPREAD|SLAB_PANIC),
@@ -342,6 +522,11 @@ void __init bdev_cache_init(void)
 	bd_mnt = kern_mount(&bd_type);
 	if (IS_ERR(bd_mnt))
 		panic("Cannot create bdev pseudo-fs");
+	/*
+	 * This vfsmount structure is only used to obtain the
+	 * blockdev_superblock, so tell kmemleak not to report it.
+	 */
+	kmemleak_not_leak(bd_mnt);
 	blockdev_superblock = bd_mnt->mnt_sb;	/* For writeback */
 }
 
@@ -373,7 +558,7 @@ struct block_device *bdget(dev_t dev)
 	struct block_device *bdev;
 	struct inode *inode;
 
-	inode = iget5_locked(bd_mnt->mnt_sb, hash(dev),
+	inode = iget5_locked(blockdev_superblock, hash(dev),
 			bdev_test, bdev_set, &dev);
 
 	if (!inode)
@@ -402,6 +587,16 @@ struct block_device *bdget(dev_t dev)
 }
 
 EXPORT_SYMBOL(bdget);
+
+/**
+ * bdgrab -- Grab a reference to an already referenced block device
+ * @bdev:	Block device to grab a reference to.
+ */
+struct block_device *bdgrab(struct block_device *bdev)
+{
+	atomic_inc(&bdev->bd_inode->i_count);
+	return bdev;
+}
 
 long nr_blockdev_pages(void)
 {
@@ -463,7 +658,7 @@ void bd_forget(struct inode *inode)
 
 	spin_lock(&bdev_lock);
 	if (inode->i_bdev) {
-		if (inode->i_sb != blockdev_superblock)
+		if (!sb_is_blkdev_sb(inode->i_sb))
 			bdev = inode->i_bdev;
 		__bd_forget(inode);
 	}
@@ -944,7 +1139,7 @@ EXPORT_SYMBOL(revalidate_disk);
 int check_disk_change(struct block_device *bdev)
 {
 	struct gendisk *disk = bdev->bd_disk;
-	struct block_device_operations * bdops = disk->fops;
+	const struct block_device_operations *bdops = disk->fops;
 
 	if (!bdops->media_changed)
 		return 0;
@@ -961,7 +1156,7 @@ EXPORT_SYMBOL(check_disk_change);
 
 void bd_set_size(struct block_device *bdev, loff_t size)
 {
-	unsigned bsize = bdev_hardsect_size(bdev);
+	unsigned bsize = bdev_logical_block_size(bdev);
 
 	bdev->bd_inode->i_size = size;
 	while (bsize < PAGE_CACHE_SIZE) {
@@ -1004,6 +1199,7 @@ static int __blkdev_get(struct block_device *bdev, fmode_t mode, int for_part)
 	}
 
 	lock_kernel();
+ restart:
 
 	ret = -ENXIO;
 	disk = get_gendisk(bdev->bd_dev, &partno);
@@ -1024,6 +1220,19 @@ static int __blkdev_get(struct block_device *bdev, fmode_t mode, int for_part)
 
 			if (disk->fops->open) {
 				ret = disk->fops->open(bdev, mode);
+				if (ret == -ERESTARTSYS) {
+					/* Lost a race with 'disk' being
+					 * deleted, try again.
+					 * See md.c
+					 */
+					disk_put_part(bdev->bd_part);
+					bdev->bd_part = NULL;
+					module_put(disk->fops->owner);
+					put_disk(disk);
+					bdev->bd_disk = NULL;
+					mutex_unlock(&bdev->bd_mutex);
+					goto restart;
+				}
 				if (ret)
 					goto out_clear;
 			}
@@ -1058,8 +1267,8 @@ static int __blkdev_get(struct block_device *bdev, fmode_t mode, int for_part)
 			bd_set_size(bdev, (loff_t)bdev->bd_part->nr_sects << 9);
 		}
 	} else {
-		put_disk(disk);
 		module_put(disk->fops->owner);
+		put_disk(disk);
 		disk = NULL;
 		if (bdev->bd_contains == bdev) {
 			if (bdev->bd_disk->fops->open) {
@@ -1219,6 +1428,47 @@ static long block_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 	return blkdev_ioctl(bdev, mode, cmd, arg);
 }
 
+/*
+ * Write data to the block device.  Only intended for the block device itself
+ * and the raw driver which basically is a fake block device.
+ *
+ * Does not take i_mutex for the write and thus is not for general purpose
+ * use.
+ */
+ssize_t blkdev_aio_write(struct kiocb *iocb, const struct iovec *iov,
+			 unsigned long nr_segs, loff_t pos)
+{
+	struct file *file = iocb->ki_filp;
+	ssize_t ret;
+
+	BUG_ON(iocb->ki_pos != pos);
+
+	ret = __generic_file_aio_write(iocb, iov, nr_segs, &iocb->ki_pos);
+	if (ret > 0 || ret == -EIOCBQUEUED) {
+		ssize_t err;
+
+		err = generic_write_sync(file, pos, ret);
+		if (err < 0 && ret > 0)
+			ret = err;
+	}
+	return ret;
+}
+EXPORT_SYMBOL_GPL(blkdev_aio_write);
+
+/*
+ * Try to release a page associated with block device when the system
+ * is under memory pressure.
+ */
+static int blkdev_releasepage(struct page *page, gfp_t wait)
+{
+	struct super_block *super = BDEV_I(page->mapping->host)->bdev.bd_super;
+
+	if (super && super->s_op->bdev_try_to_free_page)
+		return super->s_op->bdev_try_to_free_page(super, page, wait);
+
+	return try_to_free_buffers(page);
+}
+
 static const struct address_space_operations def_blk_aops = {
 	.readpage	= blkdev_readpage,
 	.writepage	= blkdev_writepage,
@@ -1226,6 +1476,7 @@ static const struct address_space_operations def_blk_aops = {
 	.write_begin	= blkdev_write_begin,
 	.write_end	= blkdev_write_end,
 	.writepages	= generic_writepages,
+	.releasepage	= blkdev_releasepage,
 	.direct_IO	= blkdev_direct_IO,
 };
 
@@ -1236,9 +1487,9 @@ const struct file_operations def_blk_fops = {
 	.read		= do_sync_read,
 	.write		= do_sync_write,
   	.aio_read	= generic_file_aio_read,
-  	.aio_write	= generic_file_aio_write_nolock,
+	.aio_write	= blkdev_aio_write,
 	.mmap		= generic_file_mmap,
-	.fsync		= block_fsync,
+	.fsync		= blkdev_fsync,
 	.unlocked_ioctl	= block_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl	= compat_blkdev_ioctl,
@@ -1261,7 +1512,7 @@ EXPORT_SYMBOL(ioctl_by_bdev);
 
 /**
  * lookup_bdev  - lookup a struct block_device by name
- * @path:	special file representing the block device
+ * @pathname:	special file representing the block device
  *
  * Get a reference to the blockdevice at @pathname in the current
  * namespace if possible and return it.  Return ERR_PTR(error)

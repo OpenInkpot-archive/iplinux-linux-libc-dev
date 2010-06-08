@@ -27,6 +27,7 @@
  */
 
 #include <linux/mm.h>
+#include <linux/slab.h>
 #include "ehea.h"
 #include "ehea_phyp.h"
 #include "ehea_qmr.h"
@@ -168,7 +169,7 @@ struct ehea_cq *ehea_create_cq(struct ehea_adapter *adapter,
 					     cq->fw_handle, rpage, 1);
 		if (hret < H_SUCCESS) {
 			ehea_error("register_rpage_cq failed ehea_cq=%p "
-				   "hret=%lx counter=%i act_pages=%i",
+				   "hret=%llx counter=%i act_pages=%i",
 				   cq, hret, counter, cq->attr.nr_pages);
 			goto out_kill_hwq;
 		}
@@ -178,13 +179,13 @@ struct ehea_cq *ehea_create_cq(struct ehea_adapter *adapter,
 
 			if ((hret != H_SUCCESS) || (vpage)) {
 				ehea_error("registration of pages not "
-					   "complete hret=%lx\n", hret);
+					   "complete hret=%llx\n", hret);
 				goto out_kill_hwq;
 			}
 		} else {
-			if ((hret != H_PAGE_REGISTERED) || (!vpage)) {
+			if (hret != H_PAGE_REGISTERED) {
 				ehea_error("CQ: registration of page failed "
-					   "hret=%lx\n", hret);
+					   "hret=%llx\n", hret);
 				goto out_kill_hwq;
 			}
 		}
@@ -303,7 +304,7 @@ struct ehea_eq *ehea_create_eq(struct ehea_adapter *adapter,
 				goto out_kill_hwq;
 
 		} else {
-			if ((hret != H_PAGE_REGISTERED) || (!vpage))
+			if (hret != H_PAGE_REGISTERED)
 				goto out_kill_hwq;
 
 		}
@@ -653,7 +654,7 @@ static int ehea_update_busmap(unsigned long pfn, unsigned long nr_pages, int add
 		int top = ehea_calc_index(i, EHEA_TOP_INDEX_SHIFT);
 		int dir = ehea_calc_index(i, EHEA_DIR_INDEX_SHIFT);
 		int idx = i & EHEA_INDEX_MASK;
-		
+
 		if (add) {
 			int ret = ehea_init_bmap(ehea_bmap, top, dir);
 			if (ret)
@@ -751,7 +752,7 @@ int ehea_create_busmap(void)
 
 	mutex_lock(&ehea_busmap_mutex);
 	ehea_mr_len = 0;
-	ret = walk_memory_resource(0, 1ULL << MAX_PHYSMEM_BITS, NULL,
+	ret = walk_system_ram_range(0, 1ULL << MAX_PHYSMEM_BITS, NULL,
 				   ehea_create_busmap_callback);
 	mutex_unlock(&ehea_busmap_mutex);
 	return ret;
@@ -780,7 +781,7 @@ void ehea_destroy_busmap(void)
 
 	kfree(ehea_bmap);
 	ehea_bmap = NULL;
-out_destroy:	
+out_destroy:
 	mutex_unlock(&ehea_busmap_mutex);
 }
 
@@ -837,8 +838,8 @@ static u64 ehea_reg_mr_section(int top, int dir, int idx, u64 *pt,
 		hret = ehea_h_register_rpage_mr(adapter->handle, mr->handle, 0,
 						0, pt_abs, EHEA_MAX_RPAGE);
 
-		if ((hret != H_SUCCESS)
-		    && (hret != H_PAGE_REGISTERED)) {
+		if ((hret != H_SUCCESS) &&
+		    (hret != H_PAGE_REGISTERED)) {
 			ehea_h_free_resource(adapter->handle, mr->handle,
 					     FORCE_FREE);
 			ehea_error("register_rpage_mr failed");
@@ -858,10 +859,10 @@ static u64 ehea_reg_mr_sections(int top, int dir, u64 *pt,
 	for (idx = 0; idx < EHEA_MAP_ENTRIES; idx++) {
 		if (!ehea_bmap->top[top]->dir[dir]->ent[idx])
 			continue;
-		
+
 		hret = ehea_reg_mr_section(top, dir, idx, pt, adapter, mr);
 		if ((hret != H_SUCCESS) && (hret != H_PAGE_REGISTERED))
-			    	return hret;
+			return hret;
 	}
 	return hret;
 }
@@ -879,7 +880,7 @@ static u64 ehea_reg_mr_dir_sections(int top, u64 *pt,
 
 		hret = ehea_reg_mr_sections(top, dir, pt, adapter, mr);
 		if ((hret != H_SUCCESS) && (hret != H_PAGE_REGISTERED))
-			    	return hret;
+			return hret;
 	}
 	return hret;
 }
@@ -893,7 +894,7 @@ int ehea_reg_kernel_mr(struct ehea_adapter *adapter, struct ehea_mr *mr)
 
 	unsigned long top;
 
-	pt = kzalloc(PAGE_SIZE, GFP_KERNEL);
+	pt = (void *)get_zeroed_page(GFP_KERNEL);
 	if (!pt) {
 		ehea_error("no mem");
 		ret = -ENOMEM;
@@ -937,7 +938,7 @@ int ehea_reg_kernel_mr(struct ehea_adapter *adapter, struct ehea_mr *mr)
 	mr->adapter = adapter;
 	ret = 0;
 out:
-	kfree(pt);
+	free_page((unsigned long)pt);
 	return ret;
 }
 
@@ -986,15 +987,15 @@ void print_error_data(u64 *data)
 		length = EHEA_PAGESIZE;
 
 	if (type == 0x8) /* Queue Pair */
-		ehea_error("QP (resource=%lX) state: AER=0x%lX, AERR=0x%lX, "
-			   "port=%lX", resource, data[6], data[12], data[22]);
+		ehea_error("QP (resource=%llX) state: AER=0x%llX, AERR=0x%llX, "
+			   "port=%llX", resource, data[6], data[12], data[22]);
 
 	if (type == 0x4) /* Completion Queue */
-		ehea_error("CQ (resource=%lX) state: AER=0x%lX", resource,
+		ehea_error("CQ (resource=%llX) state: AER=0x%llX", resource,
 			   data[6]);
 
 	if (type == 0x3) /* Event Queue */
-		ehea_error("EQ (resource=%lX) state: AER=0x%lX", resource,
+		ehea_error("EQ (resource=%llX) state: AER=0x%llX", resource,
 			   data[6]);
 
 	ehea_dump(data, length, "error data");
@@ -1005,7 +1006,7 @@ void ehea_error_data(struct ehea_adapter *adapter, u64 res_handle)
 	unsigned long ret;
 	u64 *rblock;
 
-	rblock = kzalloc(PAGE_SIZE, GFP_KERNEL);
+	rblock = (void *)get_zeroed_page(GFP_KERNEL);
 	if (!rblock) {
 		ehea_error("Cannot allocate rblock memory.");
 		return;
@@ -1016,11 +1017,11 @@ void ehea_error_data(struct ehea_adapter *adapter, u64 res_handle)
 				rblock);
 
 	if (ret == H_R_STATE)
-		ehea_error("No error data is available: %lX.", res_handle);
+		ehea_error("No error data is available: %llX.", res_handle);
 	else if (ret == H_SUCCESS)
 		print_error_data(rblock);
 	else
-		ehea_error("Error data could not be fetched: %lX", res_handle);
+		ehea_error("Error data could not be fetched: %llX", res_handle);
 
-	kfree(rblock);
+	free_page((unsigned long)rblock);
 }

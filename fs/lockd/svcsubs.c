@@ -10,6 +10,7 @@
 #include <linux/string.h>
 #include <linux/time.h>
 #include <linux/in.h>
+#include <linux/slab.h>
 #include <linux/mutex.h>
 #include <linux/sunrpc/svc.h>
 #include <linux/sunrpc/clnt.h>
@@ -17,7 +18,6 @@
 #include <linux/nfsd/export.h>
 #include <linux/lockd/lockd.h>
 #include <linux/lockd/share.h>
-#include <linux/lockd/sm_inter.h>
 #include <linux/module.h>
 #include <linux/mount.h>
 
@@ -418,7 +418,7 @@ EXPORT_SYMBOL_GPL(nlmsvc_unlock_all_by_sb);
 static int
 nlmsvc_match_ip(void *datap, struct nlm_host *host)
 {
-	return nlm_cmp_addr(nlm_srcaddr(host), datap);
+	return rpc_cmp_addr(nlm_srcaddr(host), datap);
 }
 
 /**

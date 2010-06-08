@@ -33,59 +33,9 @@
 #include <linux/device.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 #include "musb_core.h"
-
-#if defined(CONFIG_ARCH_OMAP2430) || defined(CONFIG_ARCH_OMAP3430)
-#include "omap2430.h"
-#endif
-
-#define MUSB_HSDMA_BASE		0x200
-#define MUSB_HSDMA_INTR		(MUSB_HSDMA_BASE + 0)
-#define MUSB_HSDMA_CONTROL		0x4
-#define MUSB_HSDMA_ADDRESS		0x8
-#define MUSB_HSDMA_COUNT		0xc
-
-#define MUSB_HSDMA_CHANNEL_OFFSET(_bchannel, _offset)		\
-		(MUSB_HSDMA_BASE + (_bchannel << 4) + _offset)
-
-/* control register (16-bit): */
-#define MUSB_HSDMA_ENABLE_SHIFT		0
-#define MUSB_HSDMA_TRANSMIT_SHIFT		1
-#define MUSB_HSDMA_MODE1_SHIFT		2
-#define MUSB_HSDMA_IRQENABLE_SHIFT		3
-#define MUSB_HSDMA_ENDPOINT_SHIFT		4
-#define MUSB_HSDMA_BUSERROR_SHIFT		8
-#define MUSB_HSDMA_BURSTMODE_SHIFT		9
-#define MUSB_HSDMA_BURSTMODE		(3 << MUSB_HSDMA_BURSTMODE_SHIFT)
-#define MUSB_HSDMA_BURSTMODE_UNSPEC	0
-#define MUSB_HSDMA_BURSTMODE_INCR4	1
-#define MUSB_HSDMA_BURSTMODE_INCR8	2
-#define MUSB_HSDMA_BURSTMODE_INCR16	3
-
-#define MUSB_HSDMA_CHANNELS		8
-
-struct musb_dma_controller;
-
-struct musb_dma_channel {
-	struct dma_channel		channel;
-	struct musb_dma_controller	*controller;
-	u32				start_addr;
-	u32				len;
-	u16				max_packet_sz;
-	u8				idx;
-	u8				epnum;
-	u8				transmit;
-};
-
-struct musb_dma_controller {
-	struct dma_controller		controller;
-	struct musb_dma_channel		channel[MUSB_HSDMA_CHANNELS];
-	void				*private_data;
-	void __iomem			*base;
-	u8				channel_count;
-	u8				used_channels;
-	u8				irq;
-};
+#include "musbhsdma.h"
 
 static int dma_controller_start(struct dma_controller *c)
 {
@@ -203,12 +153,8 @@ static void configure_channel(struct dma_channel *channel,
 				: 0);
 
 	/* address/count */
-	musb_writel(mbase,
-		MUSB_HSDMA_CHANNEL_OFFSET(bchannel, MUSB_HSDMA_ADDRESS),
-		dma_addr);
-	musb_writel(mbase,
-		MUSB_HSDMA_CHANNEL_OFFSET(bchannel, MUSB_HSDMA_COUNT),
-		len);
+	musb_write_hsdma_addr(mbase, bchannel, dma_addr);
+	musb_write_hsdma_count(mbase, bchannel, len);
 
 	/* control (this should start things) */
 	musb_writew(mbase,
@@ -250,42 +196,39 @@ static int dma_channel_abort(struct dma_channel *channel)
 	void __iomem *mbase = musb_channel->controller->base;
 
 	u8 bchannel = musb_channel->idx;
+	int offset;
 	u16 csr;
 
 	if (channel->status == MUSB_DMA_STATUS_BUSY) {
 		if (musb_channel->transmit) {
+			offset = MUSB_EP_OFFSET(musb_channel->epnum,
+						MUSB_TXCSR);
 
-			csr = musb_readw(mbase,
-				MUSB_EP_OFFSET(musb_channel->epnum,
-						MUSB_TXCSR));
-			csr &= ~(MUSB_TXCSR_AUTOSET |
-				 MUSB_TXCSR_DMAENAB |
-				 MUSB_TXCSR_DMAMODE);
-			musb_writew(mbase,
-				MUSB_EP_OFFSET(musb_channel->epnum, MUSB_TXCSR),
-				csr);
+			/*
+			 * The programming guide says that we must clear
+			 * the DMAENAB bit before the DMAMODE bit...
+			 */
+			csr = musb_readw(mbase, offset);
+			csr &= ~(MUSB_TXCSR_AUTOSET | MUSB_TXCSR_DMAENAB);
+			musb_writew(mbase, offset, csr);
+			csr &= ~MUSB_TXCSR_DMAMODE;
+			musb_writew(mbase, offset, csr);
 		} else {
-			csr = musb_readw(mbase,
-				MUSB_EP_OFFSET(musb_channel->epnum,
-						MUSB_RXCSR));
+			offset = MUSB_EP_OFFSET(musb_channel->epnum,
+						MUSB_RXCSR);
+
+			csr = musb_readw(mbase, offset);
 			csr &= ~(MUSB_RXCSR_AUTOCLEAR |
 				 MUSB_RXCSR_DMAENAB |
 				 MUSB_RXCSR_DMAMODE);
-			musb_writew(mbase,
-				MUSB_EP_OFFSET(musb_channel->epnum, MUSB_RXCSR),
-				csr);
+			musb_writew(mbase, offset, csr);
 		}
 
 		musb_writew(mbase,
 			MUSB_HSDMA_CHANNEL_OFFSET(bchannel, MUSB_HSDMA_CONTROL),
 			0);
-		musb_writel(mbase,
-			MUSB_HSDMA_CHANNEL_OFFSET(bchannel, MUSB_HSDMA_ADDRESS),
-			0);
-		musb_writel(mbase,
-			MUSB_HSDMA_CHANNEL_OFFSET(bchannel, MUSB_HSDMA_COUNT),
-			0);
-
+		musb_write_hsdma_addr(mbase, bchannel, 0);
+		musb_write_hsdma_count(mbase, bchannel, 0);
 		channel->status = MUSB_DMA_STATUS_FREE;
 	}
 
@@ -308,14 +251,38 @@ static irqreturn_t dma_controller_irq(int irq, void *private_data)
 	u8 bchannel;
 	u8 int_hsdma;
 
-	u32 addr;
+	u32 addr, count;
 	u16 csr;
 
 	spin_lock_irqsave(&musb->lock, flags);
 
 	int_hsdma = musb_readb(mbase, MUSB_HSDMA_INTR);
-	if (!int_hsdma)
-		goto done;
+
+#ifdef CONFIG_BLACKFIN
+	/* Clear DMA interrupt flags */
+	musb_writeb(mbase, MUSB_HSDMA_INTR, int_hsdma);
+#endif
+
+	if (!int_hsdma) {
+		DBG(2, "spurious DMA irq\n");
+
+		for (bchannel = 0; bchannel < MUSB_HSDMA_CHANNELS; bchannel++) {
+			musb_channel = (struct musb_dma_channel *)
+					&(controller->channel[bchannel]);
+			channel = &musb_channel->channel;
+			if (channel->status == MUSB_DMA_STATUS_BUSY) {
+				count = musb_read_hsdma_count(mbase, bchannel);
+
+				if (count == 0)
+					int_hsdma |= (1 << bchannel);
+			}
+		}
+
+		DBG(2, "int_hsdma = 0x%x\n", int_hsdma);
+
+		if (!int_hsdma)
+			goto done;
+	}
 
 	for (bchannel = 0; bchannel < MUSB_HSDMA_CHANNELS; bchannel++) {
 		if (int_hsdma & (1 << bchannel)) {
@@ -333,14 +300,12 @@ static irqreturn_t dma_controller_irq(int irq, void *private_data)
 			} else {
 				u8 devctl;
 
-				addr = musb_readl(mbase,
-						MUSB_HSDMA_CHANNEL_OFFSET(
-							bchannel,
-							MUSB_HSDMA_ADDRESS));
+				addr = musb_read_hsdma_addr(mbase,
+						bchannel);
 				channel->actual_len = addr
 					- musb_channel->start_addr;
 
-				DBG(2, "ch %p, 0x%x -> 0x%x (%d / %d) %s\n",
+				DBG(2, "ch %p, 0x%x -> 0x%x (%zu / %d) %s\n",
 					channel, musb_channel->start_addr,
 					addr, channel->actual_len,
 					musb_channel->len,
@@ -358,23 +323,32 @@ static irqreturn_t dma_controller_irq(int irq, void *private_data)
 					&& ((channel->desired_mode == 0)
 					    || (channel->actual_len &
 					    (musb_channel->max_packet_sz - 1)))
-					 ) {
+				    ) {
+					u8  epnum  = musb_channel->epnum;
+					int offset = MUSB_EP_OFFSET(epnum,
+								    MUSB_TXCSR);
+					u16 txcsr;
+
+					/*
+					 * The programming guide says that we
+					 * must clear DMAENAB before DMAMODE.
+					 */
+					musb_ep_select(mbase, epnum);
+					txcsr = musb_readw(mbase, offset);
+					txcsr &= ~(MUSB_TXCSR_DMAENAB
+							| MUSB_TXCSR_AUTOSET);
+					musb_writew(mbase, offset, txcsr);
 					/* Send out the packet */
-					musb_ep_select(mbase,
-						musb_channel->epnum);
-					musb_writew(mbase, MUSB_EP_OFFSET(
-							musb_channel->epnum,
-							MUSB_TXCSR),
-						MUSB_TXCSR_TXPKTRDY);
-				} else {
-					musb_dma_completion(
-						musb,
-						musb_channel->epnum,
-						musb_channel->transmit);
+					txcsr &= ~MUSB_TXCSR_DMAMODE;
+					txcsr |=  MUSB_TXCSR_TXPKTRDY;
+					musb_writew(mbase, offset, txcsr);
 				}
+				musb_dma_completion(musb, musb_channel->epnum,
+						    musb_channel->transmit);
 			}
 		}
 	}
+
 	retval = IRQ_HANDLED;
 done:
 	spin_unlock_irqrestore(&musb->lock, flags);
@@ -424,7 +398,7 @@ dma_controller_create(struct musb *musb, void __iomem *base)
 	controller->controller.channel_abort = dma_channel_abort;
 
 	if (request_irq(irq, dma_controller_irq, IRQF_DISABLED,
-			musb->controller->bus_id, &controller->controller)) {
+			dev_name(musb->controller), &controller->controller)) {
 		dev_err(dev, "request_irq %d failed!\n", irq);
 		dma_controller_destroy(&controller->controller);
 

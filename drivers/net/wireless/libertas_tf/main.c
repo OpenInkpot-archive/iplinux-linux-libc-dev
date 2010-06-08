@@ -7,6 +7,8 @@
  *  the Free Software Foundation; either version 2 of the License, or (at
  *  your option) any later version.
  */
+#include <linux/slab.h>
+
 #include "libertas_tf.h"
 #include "linux/etherdevice.h"
 
@@ -206,7 +208,7 @@ static int lbtf_op_tx(struct ieee80211_hw *hw, struct sk_buff *skb)
 	 * there are no buffered multicast frames to send
 	 */
 	ieee80211_stop_queues(priv->hw);
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static void lbtf_tx_work(struct work_struct *work)
@@ -318,14 +320,14 @@ static void lbtf_op_stop(struct ieee80211_hw *hw)
 }
 
 static int lbtf_op_add_interface(struct ieee80211_hw *hw,
-			struct ieee80211_if_init_conf *conf)
+			struct ieee80211_vif *vif)
 {
 	struct lbtf_private *priv = hw->priv;
 	if (priv->vif != NULL)
 		return -EOPNOTSUPP;
 
-	priv->vif = conf->vif;
-	switch (conf->type) {
+	priv->vif = vif;
+	switch (vif->type) {
 	case NL80211_IFTYPE_MESH_POINT:
 	case NL80211_IFTYPE_AP:
 		lbtf_set_mode(priv, LBTF_AP_MODE);
@@ -337,12 +339,12 @@ static int lbtf_op_add_interface(struct ieee80211_hw *hw,
 		priv->vif = NULL;
 		return -EOPNOTSUPP;
 	}
-	lbtf_set_mac_address(priv, (u8 *) conf->mac_addr);
+	lbtf_set_mac_address(priv, (u8 *) vif->addr);
 	return 0;
 }
 
 static void lbtf_op_remove_interface(struct ieee80211_hw *hw,
-			struct ieee80211_if_init_conf *conf)
+			struct ieee80211_vif *vif)
 {
 	struct lbtf_private *priv = hw->priv;
 
@@ -354,9 +356,11 @@ static void lbtf_op_remove_interface(struct ieee80211_hw *hw,
 	priv->vif = NULL;
 }
 
-static int lbtf_op_config(struct ieee80211_hw *hw, struct ieee80211_conf *conf)
+static int lbtf_op_config(struct ieee80211_hw *hw, u32 changed)
 {
 	struct lbtf_private *priv = hw->priv;
+	struct ieee80211_conf *conf = &hw->conf;
+
 	if (conf->channel->center_freq != priv->cur_freq) {
 		priv->cur_freq = conf->channel->center_freq;
 		lbtf_set_channel(priv, conf->channel->hw_value);
@@ -364,45 +368,35 @@ static int lbtf_op_config(struct ieee80211_hw *hw, struct ieee80211_conf *conf)
 	return 0;
 }
 
-static int lbtf_op_config_interface(struct ieee80211_hw *hw,
-			struct ieee80211_vif *vif,
-			struct ieee80211_if_conf *conf)
+static u64 lbtf_op_prepare_multicast(struct ieee80211_hw *hw,
+				     int mc_count, struct dev_addr_list *mclist)
 {
 	struct lbtf_private *priv = hw->priv;
-	struct sk_buff *beacon;
+	int i;
 
-	switch (priv->vif->type) {
-	case NL80211_IFTYPE_AP:
-	case NL80211_IFTYPE_MESH_POINT:
-		beacon = ieee80211_beacon_get(hw, vif);
-		if (beacon) {
-			lbtf_beacon_set(priv, beacon);
-			kfree_skb(beacon);
-			lbtf_beacon_ctrl(priv, 1, hw->conf.beacon_int);
-		}
-		break;
-	default:
-		break;
+	if (!mc_count || mc_count > MRVDRV_MAX_MULTICAST_LIST_SIZE)
+		return mc_count;
+
+	priv->nr_of_multicastmacaddr = mc_count;
+	for (i = 0; i < mc_count; i++) {
+		if (!mclist)
+			break;
+		memcpy(&priv->multicastlist[i], mclist->da_addr,
+				ETH_ALEN);
+		mclist = mclist->next;
 	}
 
-	if (conf->bssid) {
-		u8 null_bssid[ETH_ALEN] = {0};
-		bool activate = compare_ether_addr(conf->bssid, null_bssid);
-		lbtf_set_bssid(priv, activate, conf->bssid);
-	}
-
-	return 0;
+	return mc_count;
 }
 
 #define SUPPORTED_FIF_FLAGS  (FIF_PROMISC_IN_BSS | FIF_ALLMULTI)
 static void lbtf_op_configure_filter(struct ieee80211_hw *hw,
 			unsigned int changed_flags,
 			unsigned int *new_flags,
-			int mc_count, struct dev_mc_list *mclist)
+			u64 multicast)
 {
 	struct lbtf_private *priv = hw->priv;
 	int old_mac_control = priv->mac_control;
-	int i;
 	changed_flags &= SUPPORTED_FIF_FLAGS;
 	*new_flags &= SUPPORTED_FIF_FLAGS;
 
@@ -414,20 +408,12 @@ static void lbtf_op_configure_filter(struct ieee80211_hw *hw,
 	else
 		priv->mac_control &= ~CMD_ACT_MAC_PROMISCUOUS_ENABLE;
 	if (*new_flags & (FIF_ALLMULTI) ||
-	    mc_count > MRVDRV_MAX_MULTICAST_LIST_SIZE) {
+	    multicast > MRVDRV_MAX_MULTICAST_LIST_SIZE) {
 		priv->mac_control |= CMD_ACT_MAC_ALL_MULTICAST_ENABLE;
 		priv->mac_control &= ~CMD_ACT_MAC_MULTICAST_ENABLE;
-	} else if (mc_count) {
+	} else if (multicast) {
 		priv->mac_control |= CMD_ACT_MAC_MULTICAST_ENABLE;
 		priv->mac_control &= ~CMD_ACT_MAC_ALL_MULTICAST_ENABLE;
-		priv->nr_of_multicastmacaddr = mc_count;
-		for (i = 0; i < mc_count; i++) {
-			if (!mclist)
-				break;
-			memcpy(&priv->multicastlist[i], mclist->da_addr,
-					ETH_ALEN);
-			mclist = mclist->next;
-		}
 		lbtf_cmd_set_mac_multicast_addr(priv);
 	} else {
 		priv->mac_control &= ~(CMD_ACT_MAC_MULTICAST_ENABLE |
@@ -449,6 +435,29 @@ static void lbtf_op_bss_info_changed(struct ieee80211_hw *hw,
 			u32 changes)
 {
 	struct lbtf_private *priv = hw->priv;
+	struct sk_buff *beacon;
+
+	if (changes & (BSS_CHANGED_BEACON | BSS_CHANGED_BEACON_INT)) {
+		switch (priv->vif->type) {
+		case NL80211_IFTYPE_AP:
+		case NL80211_IFTYPE_MESH_POINT:
+			beacon = ieee80211_beacon_get(hw, vif);
+			if (beacon) {
+				lbtf_beacon_set(priv, beacon);
+				kfree_skb(beacon);
+				lbtf_beacon_ctrl(priv, 1,
+						 bss_conf->beacon_int);
+			}
+			break;
+		default:
+			break;
+		}
+	}
+
+	if (changes & BSS_CHANGED_BSSID) {
+		bool activate = !is_zero_ether_addr(bss_conf->bssid);
+		lbtf_set_bssid(priv, activate, bss_conf->bssid);
+	}
 
 	if (changes & BSS_CHANGED_ERP_PREAMBLE) {
 		if (bss_conf->use_short_preamble)
@@ -457,8 +466,6 @@ static void lbtf_op_bss_info_changed(struct ieee80211_hw *hw,
 			priv->preamble = CMD_TYPE_LONG_PREAMBLE;
 		lbtf_set_radio_control(priv);
 	}
-
-	return;
 }
 
 static const struct ieee80211_ops lbtf_ops = {
@@ -468,7 +475,7 @@ static const struct ieee80211_ops lbtf_ops = {
 	.add_interface		= lbtf_op_add_interface,
 	.remove_interface	= lbtf_op_remove_interface,
 	.config			= lbtf_op_config,
-	.config_interface	= lbtf_op_config_interface,
+	.prepare_multicast	= lbtf_op_prepare_multicast,
 	.configure_filter	= lbtf_op_configure_filter,
 	.bss_info_changed	= lbtf_op_bss_info_changed,
 };
@@ -490,7 +497,6 @@ int lbtf_rx(struct lbtf_private *priv, struct sk_buff *skb)
 	stats.band = IEEE80211_BAND_2GHZ;
 	stats.signal = prxpd->snr;
 	stats.noise = prxpd->nf;
-	stats.qual = prxpd->snr - prxpd->nf;
 	/* Marvell rate index has a hole at value 4 */
 	if (prxpd->rx_rate > 4)
 		--prxpd->rx_rate;
@@ -511,7 +517,8 @@ int lbtf_rx(struct lbtf_private *priv, struct sk_buff *skb)
 		skb_reserve(skb, 2);
 	}
 
-	ieee80211_rx_irqsafe(priv->hw, skb, &stats);
+	memcpy(IEEE80211_SKB_RXCB(skb), &stats, sizeof(stats));
+	ieee80211_rx_irqsafe(priv->hw, skb);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(lbtf_rx);
@@ -550,6 +557,9 @@ struct lbtf_private *lbtf_add_card(void *card, struct device *dmdev)
 	priv->band.n_channels = ARRAY_SIZE(lbtf_channels);
 	priv->band.channels = priv->channels;
 	hw->wiphy->bands[IEEE80211_BAND_2GHZ] = &priv->band;
+	hw->wiphy->interface_modes =
+		BIT(NL80211_IFTYPE_STATION) |
+		BIT(NL80211_IFTYPE_ADHOC);
 	skb_queue_head_init(&priv->bc_ps_buf);
 
 	SET_IEEE80211_DEV(hw, dmdev);
@@ -590,14 +600,14 @@ EXPORT_SYMBOL_GPL(lbtf_remove_card);
 void lbtf_send_tx_feedback(struct lbtf_private *priv, u8 retrycnt, u8 fail)
 {
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(priv->tx_skb);
-	memset(&info->status, 0, sizeof(info->status));
+
+	ieee80211_tx_info_clear_status(info);
 	/*
 	 * Commented out, otherwise we never go beyond 1Mbit/s using mac80211
 	 * default pid rc algorithm.
 	 *
 	 * info->status.retry_count = MRVL_DEFAULT_RETRIES - retrycnt;
 	 */
-	info->status.excessive_retries = fail ? 1 : 0;
 	if (!(info->flags & IEEE80211_TX_CTL_NO_ACK) && !fail)
 		info->flags |= IEEE80211_TX_STAT_ACK;
 	skb_pull(priv->tx_skb, sizeof(struct txpd));

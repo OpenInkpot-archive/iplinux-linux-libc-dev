@@ -1,7 +1,6 @@
-/* the upper-most page table pointer */
-
 #ifdef CONFIG_MMU
 
+/* the upper-most page table pointer */
 extern pmd_t *top_pmd;
 
 #define TOP_PTE(x)	pte_offset_kernel(top_pmd, x)
@@ -25,6 +24,8 @@ struct mem_type {
 
 const struct mem_type *get_mem_type(unsigned int type);
 
+extern void __flush_dcache_page(struct address_space *mapping, struct page *page);
+
 #endif
 
 struct map_desc;
@@ -32,7 +33,5 @@ struct meminfo;
 struct pglist_data;
 
 void __init create_mapping(struct map_desc *md);
-void __init bootmem_init(struct meminfo *mi);
+void __init bootmem_init(void);
 void reserve_node_zero(struct pglist_data *pgdat);
-
-extern void _text, _stext, _etext, __data_start, _end, __init_begin, __init_end;

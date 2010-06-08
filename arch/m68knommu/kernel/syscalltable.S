@@ -18,7 +18,7 @@
 .text
 ALIGN
 ENTRY(sys_call_table)
-	.long sys_ni_syscall	/* 0  -  old "setup()" system call*/
+	.long sys_restart_syscall	/* 0  -  old "setup()" system call */
 	.long sys_exit
 	.long sys_fork
 	.long sys_read
@@ -100,15 +100,15 @@ ENTRY(sys_call_table)
 	.long sys_settimeofday
 	.long sys_getgroups16	/* 80 */
 	.long sys_setgroups16
-	.long old_select
+	.long sys_old_select
 	.long sys_symlink
 	.long sys_lstat
 	.long sys_readlink	/* 85 */
 	.long sys_uselib
 	.long sys_ni_syscall	/* sys_swapon */
 	.long sys_reboot
-	.long old_readdir
-	.long old_mmap		/* 90 */
+	.long sys_old_readdir
+	.long sys_old_mmap	/* 90 */
 	.long sys_munmap
 	.long sys_truncate
 	.long sys_ftruncate
@@ -210,7 +210,7 @@ ENTRY(sys_call_table)
 	.long sys_ni_syscall	/* streams2 */
 	.long sys_vfork		/* 190 */
 	.long sys_getrlimit
-	.long sys_mmap2
+	.long sys_mmap_pgoff
 	.long sys_truncate64
 	.long sys_ftruncate64
 	.long sys_stat64	/* 195 */
@@ -347,6 +347,14 @@ ENTRY(sys_call_table)
 	.long sys_dup3
 	.long sys_pipe2
 	.long sys_inotify_init1
+	.long sys_preadv
+	.long sys_pwritev		/* 330 */
+	.long sys_rt_tgsigqueueinfo
+	.long sys_perf_event_open
+	.long sys_get_thread_area
+	.long sys_set_thread_area
+	.long sys_atomic_cmpxchg_32	/* 335 */
+	.long sys_atomic_barrier
 
 	.rept NR_syscalls-(.-sys_call_table)/4
 		.long sys_ni_syscall

@@ -47,7 +47,9 @@
 #include <mach/board.h>
 #include <mach/gpio.h>
 #include <mach/at91sam9_smc.h>
+#include <mach/at91_shdwc.h>
 
+#include "sam9_smc.h"
 #include "generic.h"
 
 
@@ -59,7 +61,7 @@ static void __init ek_map_io(void)
 	/* Setup the LEDs */
 	at91_init_leds(AT91_PIN_PA13, AT91_PIN_PA14);
 
-	/* DGBU on ttyS0. (Rx & Tx only) */
+	/* DBGU on ttyS0. (Rx & Tx only) */
 	at91_register_uart(0, 0, 0);
 
 	/* set serial console to ttyS0 (ie, DBGU) */
@@ -76,7 +78,7 @@ static void __init ek_init_irq(void)
  * DM9000 ethernet device
  */
 #if defined(CONFIG_DM9000)
-static struct resource at91sam9261_dm9000_resource[] = {
+static struct resource dm9000_resource[] = {
 	[0] = {
 		.start	= AT91_CHIPSELECT_2,
 		.end	= AT91_CHIPSELECT_2 + 3,
@@ -98,27 +100,42 @@ static struct dm9000_plat_data dm9000_platdata = {
 	.flags		= DM9000_PLATF_16BITONLY,
 };
 
-static struct platform_device at91sam9261_dm9000_device = {
+static struct platform_device dm9000_device = {
 	.name		= "dm9000",
 	.id		= 0,
-	.num_resources	= ARRAY_SIZE(at91sam9261_dm9000_resource),
-	.resource	= at91sam9261_dm9000_resource,
+	.num_resources	= ARRAY_SIZE(dm9000_resource),
+	.resource	= dm9000_resource,
 	.dev		= {
 		.platform_data	= &dm9000_platdata,
 	}
 };
 
+/*
+ * SMC timings for the DM9000.
+ * Note: These timings were calculated for MASTER_CLOCK = 100000000 according to the DM9000 timings.
+ */
+static struct sam9_smc_config __initdata dm9000_smc_config = {
+	.ncs_read_setup		= 0,
+	.nrd_setup		= 2,
+	.ncs_write_setup	= 0,
+	.nwe_setup		= 2,
+
+	.ncs_read_pulse		= 8,
+	.nrd_pulse		= 4,
+	.ncs_write_pulse	= 8,
+	.nwe_pulse		= 4,
+
+	.read_cycle		= 16,
+	.write_cycle		= 16,
+
+	.mode			= AT91_SMC_READMODE | AT91_SMC_WRITEMODE | AT91_SMC_EXNWMODE_DISABLE | AT91_SMC_BAT_WRITE | AT91_SMC_DBW_16,
+	.tdf_cycles		= 1,
+};
+
 static void __init ek_add_device_dm9000(void)
 {
-	/*
-	 * Configure Chip-Select 2 on SMC for the DM9000.
-	 * Note: These timings were calculated for MASTER_CLOCK = 100000000
-	 *  according to the DM9000 timings.
-	 */
-	at91_sys_write(AT91_SMC_SETUP(2), AT91_SMC_NWESETUP_(2) | AT91_SMC_NCS_WRSETUP_(0) | AT91_SMC_NRDSETUP_(2) | AT91_SMC_NCS_RDSETUP_(0));
-	at91_sys_write(AT91_SMC_PULSE(2), AT91_SMC_NWEPULSE_(4) | AT91_SMC_NCS_WRPULSE_(8) | AT91_SMC_NRDPULSE_(4) | AT91_SMC_NCS_RDPULSE_(8));
-	at91_sys_write(AT91_SMC_CYCLE(2), AT91_SMC_NWECYCLE_(16) | AT91_SMC_NRDCYCLE_(16));
-	at91_sys_write(AT91_SMC_MODE(2), AT91_SMC_READMODE | AT91_SMC_WRITEMODE | AT91_SMC_EXNWMODE_DISABLE | AT91_SMC_BAT_WRITE | AT91_SMC_DBW_16 | AT91_SMC_TDF_(1));
+	/* Configure chip-select 2 (DM9000) */
+	sam9_smc_configure(2, &dm9000_smc_config);
 
 	/* Configure Reset signal as output */
 	at91_set_gpio_output(AT91_PIN_PC10, 0);
@@ -126,7 +143,7 @@ static void __init ek_add_device_dm9000(void)
 	/* Configure Interrupt pin as input, no pull-up */
 	at91_set_gpio_input(AT91_PIN_PC11, 0);
 
-	platform_device_register(&at91sam9261_dm9000_device);
+	platform_device_register(&dm9000_device);
 }
 #else
 static void __init ek_add_device_dm9000(void) {}
@@ -197,6 +214,39 @@ static struct atmel_nand_data __initdata ek_nand_data = {
 #endif
 };
 
+static struct sam9_smc_config __initdata ek_nand_smc_config = {
+	.ncs_read_setup		= 0,
+	.nrd_setup		= 1,
+	.ncs_write_setup	= 0,
+	.nwe_setup		= 1,
+
+	.ncs_read_pulse		= 3,
+	.nrd_pulse		= 3,
+	.ncs_write_pulse	= 3,
+	.nwe_pulse		= 3,
+
+	.read_cycle		= 5,
+	.write_cycle		= 5,
+
+	.mode			= AT91_SMC_READMODE | AT91_SMC_WRITEMODE | AT91_SMC_EXNWMODE_DISABLE,
+	.tdf_cycles		= 2,
+};
+
+static void __init ek_add_device_nand(void)
+{
+	/* setup bus-width (8 or 16) */
+	if (ek_nand_data.bus_width_16)
+		ek_nand_smc_config.mode |= AT91_SMC_DBW_16;
+	else
+		ek_nand_smc_config.mode |= AT91_SMC_DBW_8;
+
+	/* configure chip-select 3 (NAND) */
+	sam9_smc_configure(3, &ek_nand_smc_config);
+
+	at91_add_device_nand(&ek_nand_data);
+}
+
+
 /*
  * ADS7846 Touchscreen
  */
@@ -237,7 +287,11 @@ static void __init ek_add_device_ts(void) {}
  */
 static struct at73c213_board_info at73c213_data = {
 	.ssc_id		= 1,
+#if defined(CONFIG_MACH_AT91SAM9261EK)
 	.shortname	= "AT91SAM9261-EK external DAC",
+#else
+	.shortname	= "AT91SAM9G10-EK external DAC",
+#endif
 };
 
 #if defined(CONFIG_SND_AT73C213) || defined(CONFIG_SND_AT73C213_MODULE)
@@ -364,6 +418,9 @@ static struct atmel_lcdfb_info __initdata ek_lcdc_data = {
 	.default_monspecs		= &at91fb_default_stn_monspecs,
 	.atmel_lcdfb_power_control	= at91_lcdc_stn_power_control,
 	.guard_time			= 1,
+#if defined(CONFIG_MACH_AT91SAM9G10EK)
+	.lcd_wiring_mode		= ATMEL_LCDC_WIRING_RGB,
+#endif
 };
 
 #else
@@ -417,6 +474,9 @@ static struct atmel_lcdfb_info __initdata ek_lcdc_data = {
 	.default_monspecs		= &at91fb_default_tft_monspecs,
 	.atmel_lcdfb_power_control	= at91_lcdc_tft_power_control,
 	.guard_time			= 1,
+#if defined(CONFIG_MACH_AT91SAM9G10EK)
+	.lcd_wiring_mode		= ATMEL_LCDC_WIRING_RGB,
+#endif
 };
 #endif
 
@@ -525,7 +585,7 @@ static void __init ek_board_init(void)
 	/* I2C */
 	at91_add_device_i2c(NULL, 0);
 	/* NAND */
-	at91_add_device_nand(&ek_nand_data);
+	ek_add_device_nand();
 	/* DM9000 ethernet */
 	ek_add_device_dm9000();
 
@@ -550,7 +610,11 @@ static void __init ek_board_init(void)
 	at91_gpio_leds(ek_leds, ARRAY_SIZE(ek_leds));
 }
 
+#if defined(CONFIG_MACH_AT91SAM9261EK)
 MACHINE_START(AT91SAM9261EK, "Atmel AT91SAM9261-EK")
+#else
+MACHINE_START(AT91SAM9G10EK, "Atmel AT91SAM9G10-EK")
+#endif
 	/* Maintainer: Atmel */
 	.phys_io	= AT91_BASE_SYS,
 	.io_pg_offst	= (AT91_VA_BASE_SYS >> 18) & 0xfffc,

@@ -14,6 +14,7 @@
 #include <linux/jhash.h>
 #include <linux/bitops.h>
 #include <linux/skbuff.h>
+#include <linux/slab.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
@@ -168,7 +169,7 @@ clusterip_config_init(const struct ipt_clusterip_tgt_info *i, __be32 ip,
 		char buffer[16];
 
 		/* create proc dir entry */
-		sprintf(buffer, "%u.%u.%u.%u", NIPQUAD(ip));
+		sprintf(buffer, "%pI4", &ip);
 		c->pde = proc_create_data(buffer, S_IWUSR|S_IRUSR,
 					  clusterip_procdir,
 					  &clusterip_proc_fops, c);
@@ -303,9 +304,9 @@ clusterip_tg(struct sk_buff *skb, const struct xt_target_param *par)
 
 	/* special case: ICMP error handling. conntrack distinguishes between
 	 * error messages (RELATED) and information requests (see below) */
-	if (ip_hdr(skb)->protocol == IPPROTO_ICMP
-	    && (ctinfo == IP_CT_RELATED
-		|| ctinfo == IP_CT_RELATED+IP_CT_IS_REPLY))
+	if (ip_hdr(skb)->protocol == IPPROTO_ICMP &&
+	    (ctinfo == IP_CT_RELATED ||
+	     ctinfo == IP_CT_RELATED + IP_CT_IS_REPLY))
 		return XT_CONTINUE;
 
 	/* ip_conntrack_icmp guarantees us that we only have ICMP_ECHO,
@@ -362,8 +363,8 @@ static bool clusterip_tg_check(const struct xt_tgchk_param *par)
 		return false;
 
 	}
-	if (e->ip.dmsk.s_addr != htonl(0xffffffff)
-	    || e->ip.dst.s_addr == 0) {
+	if (e->ip.dmsk.s_addr != htonl(0xffffffff) ||
+	    e->ip.dst.s_addr == 0) {
 		printk(KERN_ERR "CLUSTERIP: Please specify destination IP\n");
 		return false;
 	}
@@ -373,7 +374,7 @@ static bool clusterip_tg_check(const struct xt_tgchk_param *par)
 	config = clusterip_config_find_get(e->ip.dst.s_addr, 1);
 	if (!config) {
 		if (!(cipinfo->flags & CLUSTERIP_FLAG_NEW)) {
-			printk(KERN_WARNING "CLUSTERIP: no config found for %u.%u.%u.%u, need 'new'\n", NIPQUAD(e->ip.dst.s_addr));
+			printk(KERN_WARNING "CLUSTERIP: no config found for %pI4, need 'new'\n", &e->ip.dst.s_addr);
 			return false;
 		} else {
 			struct net_device *dev;
@@ -478,9 +479,8 @@ static void arp_print(struct arp_payload *payload)
 	}
 	hbuffer[--k]='\0';
 
-	printk("src %u.%u.%u.%u@%s, dst %u.%u.%u.%u\n",
-		NIPQUAD(payload->src_ip), hbuffer,
-		NIPQUAD(payload->dst_ip));
+	printk("src %pI4@%s, dst %pI4\n",
+		&payload->src_ip, hbuffer, &payload->dst_ip);
 }
 #endif
 
@@ -496,14 +496,14 @@ arp_mangle(unsigned int hook,
 	struct clusterip_config *c;
 
 	/* we don't care about non-ethernet and non-ipv4 ARP */
-	if (arp->ar_hrd != htons(ARPHRD_ETHER)
-	    || arp->ar_pro != htons(ETH_P_IP)
-	    || arp->ar_pln != 4 || arp->ar_hln != ETH_ALEN)
+	if (arp->ar_hrd != htons(ARPHRD_ETHER) ||
+	    arp->ar_pro != htons(ETH_P_IP) ||
+	    arp->ar_pln != 4 || arp->ar_hln != ETH_ALEN)
 		return NF_ACCEPT;
 
 	/* we only want to mangle arp requests and replies */
-	if (arp->ar_op != htons(ARPOP_REPLY)
-	    && arp->ar_op != htons(ARPOP_REQUEST))
+	if (arp->ar_op != htons(ARPOP_REPLY) &&
+	    arp->ar_op != htons(ARPOP_REQUEST))
 		return NF_ACCEPT;
 
 	payload = (void *)(arp+1);
@@ -561,8 +561,7 @@ struct clusterip_seq_position {
 
 static void *clusterip_seq_start(struct seq_file *s, loff_t *pos)
 {
-	const struct proc_dir_entry *pde = s->private;
-	struct clusterip_config *c = pde->data;
+	struct clusterip_config *c = s->private;
 	unsigned int weight;
 	u_int32_t local_nodes;
 	struct clusterip_seq_position *idx;
@@ -633,10 +632,9 @@ static int clusterip_proc_open(struct inode *inode, struct file *file)
 
 	if (!ret) {
 		struct seq_file *sf = file->private_data;
-		struct proc_dir_entry *pde = PDE(inode);
-		struct clusterip_config *c = pde->data;
+		struct clusterip_config *c = PDE(inode)->data;
 
-		sf->private = pde;
+		sf->private = c;
 
 		clusterip_config_get(c);
 	}
@@ -646,8 +644,7 @@ static int clusterip_proc_open(struct inode *inode, struct file *file)
 
 static int clusterip_proc_release(struct inode *inode, struct file *file)
 {
-	struct proc_dir_entry *pde = PDE(inode);
-	struct clusterip_config *c = pde->data;
+	struct clusterip_config *c = PDE(inode)->data;
 	int ret;
 
 	ret = seq_release(inode, file);
@@ -661,10 +658,9 @@ static int clusterip_proc_release(struct inode *inode, struct file *file)
 static ssize_t clusterip_proc_write(struct file *file, const char __user *input,
 				size_t size, loff_t *ofs)
 {
+	struct clusterip_config *c = PDE(file->f_path.dentry->d_inode)->data;
 #define PROC_WRITELEN	10
 	char buffer[PROC_WRITELEN+1];
-	const struct proc_dir_entry *pde = PDE(file->f_path.dentry->d_inode);
-	struct clusterip_config *c = pde->data;
 	unsigned long nodenum;
 
 	if (copy_from_user(buffer, input, PROC_WRITELEN))

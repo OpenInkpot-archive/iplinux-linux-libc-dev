@@ -11,6 +11,7 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <asm/io.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
@@ -263,8 +264,8 @@ static int __devinit ck804xrom_init_one (struct pci_dev *pdev,
 		/* Trim the size if we are larger than the map */
 		if (map->mtd->size > map->map.size) {
 			printk(KERN_WARNING MOD_NAME
-				" rom(%u) larger than window(%lu). fixing...\n",
-				map->mtd->size, map->map.size);
+				" rom(%llu) larger than window(%lu). fixing...\n",
+				(unsigned long long)map->mtd->size, map->map.size);
 			map->mtd->size = map->map.size;
 		}
 		if (window->rsrc.parent) {
@@ -342,9 +343,9 @@ static struct pci_device_id ck804xrom_pci_tbl[] = {
 	{ 0, }
 };
 
+#if 0
 MODULE_DEVICE_TABLE(pci, ck804xrom_pci_tbl);
 
-#if 0
 static struct pci_driver ck804xrom_driver = {
 	.name =		MOD_NAME,
 	.id_table =	ck804xrom_pci_tbl,

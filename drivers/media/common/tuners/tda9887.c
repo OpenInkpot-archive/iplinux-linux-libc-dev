@@ -4,7 +4,6 @@
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/errno.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/videodev2.h>
 #include <media/v4l2-common.h>
@@ -180,11 +179,10 @@ static struct tvnorm tvnorms[] = {
 	},{
 		.std   = V4L2_STD_SECAM_B | V4L2_STD_SECAM_G | V4L2_STD_SECAM_H,
 		.name  = "SECAM-BGH",
-		.b     = ( cPositiveAmTV  |
+		.b     = ( cNegativeFmTV  |
 			   cQSS           ),
 		.c     = ( cTopDefault),
-		.e     = ( cGating_36	  |
-			   cAudioIF_5_5   |
+		.e     = ( cAudioIF_5_5   |
 			   cVideoIF_38_90 ),
 	},{
 		.std   = V4L2_STD_SECAM_L,
@@ -464,7 +462,7 @@ static int tda9887_set_insmod(struct dvb_frontend *fe)
 			buf[1] &= ~cQSS;
 	}
 
-	if (adjust >= 0x00 && adjust < 0x20) {
+	if (adjust < 0x20) {
 		buf[2] &= ~cTopMask;
 		buf[2] |= adjust;
 	}

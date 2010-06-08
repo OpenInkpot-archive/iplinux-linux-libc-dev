@@ -21,6 +21,7 @@
 #include <linux/list.h>
 #include <linux/wait.h>
 #include <linux/percpu.h>
+#include <linux/timer.h>
 
 
 struct hrtimer_clock_base;
@@ -30,8 +31,11 @@ struct hrtimer_cpu_base;
  * Mode arguments of xxx_hrtimer functions:
  */
 enum hrtimer_mode {
-	HRTIMER_MODE_ABS,	/* Time value is absolute */
-	HRTIMER_MODE_REL,	/* Time value is relative to now */
+	HRTIMER_MODE_ABS = 0x0,		/* Time value is absolute */
+	HRTIMER_MODE_REL = 0x1,		/* Time value is relative to now */
+	HRTIMER_MODE_PINNED = 0x02,	/* Timer is bound to CPU */
+	HRTIMER_MODE_ABS_PINNED = 0x02,
+	HRTIMER_MODE_REL_PINNED = 0x03,
 };
 
 /*
@@ -43,26 +47,6 @@ enum hrtimer_restart {
 };
 
 /*
- * hrtimer callback modes:
- *
- *	HRTIMER_CB_SOFTIRQ:		Callback must run in softirq context
- *	HRTIMER_CB_IRQSAFE_PERCPU:	Callback must run in hardirq context
- *					Special mode for tick emulation and
- *					scheduler timer. Such timers are per
- *					cpu and not allowed to be migrated on
- *					cpu unplug.
- *	HRTIMER_CB_IRQSAFE_UNLOCKED:	Callback should run in hardirq context
- *					with timer->base lock unlocked
- *					used for timers which call wakeup to
- *					avoid lock order problems with rq->lock
- */
-enum hrtimer_cb_mode {
-	HRTIMER_CB_SOFTIRQ,
-	HRTIMER_CB_IRQSAFE_PERCPU,
-	HRTIMER_CB_IRQSAFE_UNLOCKED,
-};
-
-/*
  * Values to track state of the timer
  *
  * Possible states:
@@ -70,7 +54,6 @@ enum hrtimer_cb_mode {
  * 0x00		inactive
  * 0x01		enqueued into rbtree
  * 0x02		callback function running
- * 0x04		callback pending (high resolution mode)
  *
  * Special cases:
  * 0x03		callback function running and enqueued
@@ -92,8 +75,7 @@ enum hrtimer_cb_mode {
 #define HRTIMER_STATE_INACTIVE	0x00
 #define HRTIMER_STATE_ENQUEUED	0x01
 #define HRTIMER_STATE_CALLBACK	0x02
-#define HRTIMER_STATE_PENDING	0x04
-#define HRTIMER_STATE_MIGRATE	0x08
+#define HRTIMER_STATE_MIGRATE	0x04
 
 /**
  * struct hrtimer - the basic hrtimer structure
@@ -109,9 +91,6 @@ enum hrtimer_cb_mode {
  * @function:	timer expiry callback function
  * @base:	pointer to the timer base (per cpu and per clock)
  * @state:	state information (See bit values above)
- * @cb_mode:	high resolution timer feature to select the callback execution
- *		 mode
- * @cb_entry:	list head to enqueue an expired timer into the callback list
  * @start_site:	timer statistics field to store the site where the timer
  *		was started
  * @start_comm: timer statistics field to store the name of the process which
@@ -128,8 +107,6 @@ struct hrtimer {
 	enum hrtimer_restart		(*function)(struct hrtimer *);
 	struct hrtimer_clock_base	*base;
 	unsigned long			state;
-	struct list_head		cb_entry;
-	enum hrtimer_cb_mode		cb_mode;
 #ifdef CONFIG_TIMER_STATS
 	int				start_pid;
 	void				*start_site;
@@ -185,22 +162,23 @@ struct hrtimer_clock_base {
  * @expires_next:	absolute time of the next event which was scheduled
  *			via clock_set_next_event()
  * @hres_active:	State of high resolution mode
- * @check_clocks:	Indictator, when set evaluate time source and clock
- *			event devices whether high resolution mode can be
- *			activated.
- * @cb_pending:		Expired timers are moved from the rbtree to this
- *			list in the timer interrupt. The list is processed
- *			in the softirq.
- * @nr_events:		Total number of timer interrupt events
+ * @hang_detected:	The last hrtimer interrupt detected a hang
+ * @nr_events:		Total number of hrtimer interrupt events
+ * @nr_retries:		Total number of hrtimer interrupt retries
+ * @nr_hangs:		Total number of hrtimer interrupt hangs
+ * @max_hang_time:	Maximum time spent in hrtimer_interrupt
  */
 struct hrtimer_cpu_base {
-	spinlock_t			lock;
+	raw_spinlock_t			lock;
 	struct hrtimer_clock_base	clock_base[HRTIMER_MAX_CLOCK_BASES];
-	struct list_head		cb_pending;
 #ifdef CONFIG_HIGH_RES_TIMERS
 	ktime_t				expires_next;
 	int				hres_active;
+	int				hang_detected;
 	unsigned long			nr_events;
+	unsigned long			nr_retries;
+	unsigned long			nr_hangs;
+	ktime_t				max_hang_time;
 #endif
 };
 
@@ -365,6 +343,11 @@ extern int hrtimer_start(struct hrtimer *timer, ktime_t tim,
 			 const enum hrtimer_mode mode);
 extern int hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim,
 			unsigned long range_ns, const enum hrtimer_mode mode);
+extern int
+__hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim,
+			 unsigned long delta_ns,
+			 const enum hrtimer_mode mode, int wakeup);
+
 extern int hrtimer_cancel(struct hrtimer *timer);
 extern int hrtimer_try_to_cancel(struct hrtimer *timer);
 
@@ -404,8 +387,7 @@ static inline int hrtimer_active(const struct hrtimer *timer)
  */
 static inline int hrtimer_is_queued(struct hrtimer *timer)
 {
-	return timer->state &
-		(HRTIMER_STATE_ENQUEUED | HRTIMER_STATE_PENDING);
+	return timer->state & HRTIMER_STATE_ENQUEUED;
 }
 
 /*
@@ -457,46 +439,5 @@ extern u64 ktime_divns(const ktime_t kt, s64 div);
 
 /* Show pending timers: */
 extern void sysrq_timer_list_show(void);
-
-/*
- * Timer-statistics info:
- */
-#ifdef CONFIG_TIMER_STATS
-
-extern void timer_stats_update_stats(void *timer, pid_t pid, void *startf,
-				     void *timerf, char *comm,
-				     unsigned int timer_flag);
-
-static inline void timer_stats_account_hrtimer(struct hrtimer *timer)
-{
-	timer_stats_update_stats(timer, timer->start_pid, timer->start_site,
-				 timer->function, timer->start_comm, 0);
-}
-
-extern void __timer_stats_hrtimer_set_start_info(struct hrtimer *timer,
-						 void *addr);
-
-static inline void timer_stats_hrtimer_set_start_info(struct hrtimer *timer)
-{
-	__timer_stats_hrtimer_set_start_info(timer, __builtin_return_address(0));
-}
-
-static inline void timer_stats_hrtimer_clear_start_info(struct hrtimer *timer)
-{
-	timer->start_site = NULL;
-}
-#else
-static inline void timer_stats_account_hrtimer(struct hrtimer *timer)
-{
-}
-
-static inline void timer_stats_hrtimer_set_start_info(struct hrtimer *timer)
-{
-}
-
-static inline void timer_stats_hrtimer_clear_start_info(struct hrtimer *timer)
-{
-}
-#endif
 
 #endif

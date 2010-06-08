@@ -142,7 +142,7 @@ bad_clone_list[] __initdata = {
     {"PCM-4823", "PCM-4823", {0x00, 0xc0, 0x6c}}, /* Broken Advantech MoBo */
     {"REALTEK", "RTL8019", {0x00, 0x00, 0xe8}}, /* no-name with Realtek chip */
 #ifdef CONFIG_MACH_TX49XX
-    {"RBHMA4X00-RTL8019", "RBHMA4X00/RTL8019", {0x00, 0x60, 0x0a}},  /* Toshiba built-in */
+    {"RBHMA4X00-RTL8019", "RBHMA4X00-RTL8019", {0x00, 0x60, 0x0a}},  /* Toshiba built-in */
 #endif
     {"LCS-8834", "LCS-8836", {0x04, 0x04, 0x37}}, /* ShinyNet (SET) */
     {NULL,}
@@ -173,9 +173,6 @@ bad_clone_list[] __initdata = {
 
 static int ne_probe1(struct net_device *dev, unsigned long ioaddr);
 static int ne_probe_isapnp(struct net_device *dev);
-
-static int ne_open(struct net_device *dev);
-static int ne_close(struct net_device *dev);
 
 static void ne_reset_8390(struct net_device *dev);
 static void ne_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
@@ -297,7 +294,6 @@ static int __init ne_probe1(struct net_device *dev, unsigned long ioaddr)
 	int neX000, ctron, copam, bad_card;
 	int reg0, ret;
 	static unsigned version_printed;
-	DECLARE_MAC_BUF(mac);
 
 	if (!request_region(ioaddr, NE_IO_EXTENT, DRV_NAME))
 		return -EBUSY;
@@ -325,7 +321,7 @@ static int __init ne_probe1(struct net_device *dev, unsigned long ioaddr)
 	}
 
 	if (ei_debug  &&  version_printed++ == 0)
-		printk(KERN_INFO "%s" KERN_INFO "%s", version1, version2);
+		printk(KERN_INFO "%s%s", version1, version2);
 
 	printk(KERN_INFO "NE*000 ethercard probe at %#3lx:", ioaddr);
 
@@ -517,7 +513,7 @@ static int __init ne_probe1(struct net_device *dev, unsigned long ioaddr)
 	}
 #endif
 
-	printk("%s\n", print_mac(mac, dev->dev_addr));
+	printk("%pM\n", dev->dev_addr);
 
 	ei_status.name = name;
 	ei_status.tx_start_page = start_page;
@@ -537,11 +533,8 @@ static int __init ne_probe1(struct net_device *dev, unsigned long ioaddr)
 	ei_status.block_output = &ne_block_output;
 	ei_status.get_8390_hdr = &ne_get_8390_hdr;
 	ei_status.priv = 0;
-	dev->open = &ne_open;
-	dev->stop = &ne_close;
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	dev->poll_controller = eip_poll;
-#endif
+
+	dev->netdev_ops = &eip_netdev_ops;
 	NS8390p_init(dev, 0);
 
 	ret = register_netdev(dev);
@@ -556,20 +549,6 @@ out_irq:
 err_out:
 	release_region(ioaddr, NE_IO_EXTENT);
 	return ret;
-}
-
-static int ne_open(struct net_device *dev)
-{
-	eip_open(dev);
-	return 0;
-}
-
-static int ne_close(struct net_device *dev)
-{
-	if (ei_debug > 1)
-		printk(KERN_DEBUG "%s: Shutting down ethercard.\n", dev->name);
-	eip_close(dev);
-	return 0;
 }
 
 /* Hard reset the card.  This used to pause for the same period that a
@@ -950,7 +929,7 @@ static void __init ne_add_devices(void)
 }
 
 #ifdef MODULE
-int __init init_module()
+int __init init_module(void)
 {
 	int retval;
 	ne_add_devices();

@@ -280,7 +280,12 @@ static ssize_t hppfs_read(struct file *file, char __user *buf, size_t count,
 			       "errno = %d\n", err);
 			return err;
 		}
-		count = hppfs_read_file(hppfs->host_fd, buf, count);
+		err = hppfs_read_file(hppfs->host_fd, buf, count);
+		if (err < 0) {
+			printk(KERN_ERR "hppfs_read: read failed: %d\n", err);
+			return err;
+		}
+		count = err;
 		if (count > 0)
 			*ppos += count;
 	}
@@ -426,6 +431,7 @@ static int file_mode(int fmode)
 
 static int hppfs_open(struct inode *inode, struct file *file)
 {
+	const struct cred *cred = file->f_cred;
 	struct hppfs_private *data;
 	struct vfsmount *proc_mnt;
 	struct dentry *proc_dentry;
@@ -446,7 +452,7 @@ static int hppfs_open(struct inode *inode, struct file *file)
 
 	/* XXX This isn't closed anywhere */
 	data->proc_file = dentry_open(dget(proc_dentry), mntget(proc_mnt),
-				      file_mode(file->f_mode));
+				      file_mode(file->f_mode), cred);
 	err = PTR_ERR(data->proc_file);
 	if (IS_ERR(data->proc_file))
 		goto out_free1;
@@ -489,6 +495,7 @@ static int hppfs_open(struct inode *inode, struct file *file)
 
 static int hppfs_dir_open(struct inode *inode, struct file *file)
 {
+	const struct cred *cred = file->f_cred;
 	struct hppfs_private *data;
 	struct vfsmount *proc_mnt;
 	struct dentry *proc_dentry;
@@ -502,7 +509,7 @@ static int hppfs_dir_open(struct inode *inode, struct file *file)
 	proc_dentry = HPPFS_I(inode)->proc_dentry;
 	proc_mnt = inode->i_sb->s_fs_info;
 	data->proc_file = dentry_open(dget(proc_dentry), mntget(proc_mnt),
-				      file_mode(file->f_mode));
+				      file_mode(file->f_mode), cred);
 	err = PTR_ERR(data->proc_file);
 	if (IS_ERR(data->proc_file))
 		goto out_free;
@@ -639,20 +646,25 @@ static const struct super_operations hppfs_sbops = {
 static int hppfs_readlink(struct dentry *dentry, char __user *buffer,
 			  int buflen)
 {
-	struct dentry *proc_dentry;
-
-	proc_dentry = HPPFS_I(dentry->d_inode)->proc_dentry;
+	struct dentry *proc_dentry = HPPFS_I(dentry->d_inode)->proc_dentry;
 	return proc_dentry->d_inode->i_op->readlink(proc_dentry, buffer,
 						    buflen);
 }
 
 static void *hppfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
-	struct dentry *proc_dentry;
-
-	proc_dentry = HPPFS_I(dentry->d_inode)->proc_dentry;
+	struct dentry *proc_dentry = HPPFS_I(dentry->d_inode)->proc_dentry;
 
 	return proc_dentry->d_inode->i_op->follow_link(proc_dentry, nd);
+}
+
+static void hppfs_put_link(struct dentry *dentry, struct nameidata *nd,
+			   void *cookie)
+{
+	struct dentry *proc_dentry = HPPFS_I(dentry->d_inode)->proc_dentry;
+
+	if (proc_dentry->d_inode->i_op->put_link)
+		proc_dentry->d_inode->i_op->put_link(proc_dentry, nd, cookie);
 }
 
 static const struct inode_operations hppfs_dir_iops = {
@@ -662,6 +674,7 @@ static const struct inode_operations hppfs_dir_iops = {
 static const struct inode_operations hppfs_link_iops = {
 	.readlink	= hppfs_readlink,
 	.follow_link	= hppfs_follow_link,
+	.put_link	= hppfs_put_link,
 };
 
 static struct inode *get_inode(struct super_block *sb, struct dentry *dentry)
@@ -705,7 +718,7 @@ static int hppfs_fill_super(struct super_block *sb, void *d, int silent)
 	struct vfsmount *proc_mnt;
 	int err = -ENOENT;
 
-	proc_mnt = do_kern_mount("proc", 0, "proc", NULL);
+	proc_mnt = mntget(current->nsproxy->pid_ns->proc_mnt);
 	if (IS_ERR(proc_mnt))
 		goto out;
 

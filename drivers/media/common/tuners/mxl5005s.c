@@ -2789,7 +2789,10 @@ static u16 MXL_TuneRF(struct dvb_frontend *fe, u32 RF_Freq)
 
 	/* add for 2.6.5 Special setting for QAM */
 	if (state->Mod_Type == MXL_QAM) {
-		if (state->RF_IN < 680000000)
+		if (state->config->qam_gain != 0)
+			status += MXL_ControlWrite(fe, RFSYN_CHP_GAIN,
+						   state->config->qam_gain);
+		else if (state->RF_IN < 680000000)
 			status += MXL_ControlWrite(fe, RFSYN_CHP_GAIN, 3);
 		else
 			status += MXL_ControlWrite(fe, RFSYN_CHP_GAIN, 2);
@@ -3598,7 +3601,7 @@ static u16 MXL_GetInitRegister(struct dvb_frontend *fe, u8 *RegNum,
 		76, 77, 91, 134, 135, 137, 147,
 		156, 166, 167, 168, 25 };
 
-	*count = sizeof(RegAddr) / sizeof(u8);
+	*count = ARRAY_SIZE(RegAddr);
 
 	status += MXL_BlockInit(fe);
 
@@ -3630,7 +3633,7 @@ static u16 MXL_GetCHRegister(struct dvb_frontend *fe, u8 *RegNum, u8 *RegVal,
 	*/
 #endif
 
-	*count = sizeof(RegAddr) / sizeof(u8);
+	*count = ARRAY_SIZE(RegAddr);
 
 	for (i = 0 ; i < *count; i++) {
 		RegNum[i] = RegAddr[i];
@@ -3648,7 +3651,7 @@ static u16 MXL_GetCHRegister_ZeroIF(struct dvb_frontend *fe, u8 *RegNum,
 
 	u8 RegAddr[] = {43, 136};
 
-	*count = sizeof(RegAddr) / sizeof(u8);
+	*count = ARRAY_SIZE(RegAddr);
 
 	for (i = 0; i < *count; i++) {
 		RegNum[i] = RegAddr[i];
@@ -4003,12 +4006,11 @@ static int mxl5005s_set_params(struct dvb_frontend *fe,
 	/* Change tuner for new modulation type if reqd */
 	if (req_mode != state->current_mode) {
 		switch (req_mode) {
-		case VSB_8:
-		case QAM_64:
-		case QAM_256:
-		case QAM_AUTO:
+		case MXL_ATSC:
+		case MXL_QAM:
 			req_bw  = MXL5005S_BANDWIDTH_6MHZ;
 			break;
+		case MXL_DVBT:
 		default:
 			/* Assume DVB-T */
 			switch (params->u.ofdm.bandwidth) {

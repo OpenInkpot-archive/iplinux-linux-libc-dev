@@ -21,9 +21,9 @@
 #include <linux/fs.h>
 #include <linux/ptrace.h>
 #include <linux/reboot.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/proc_fs.h>
 #include <linux/io.h>
 #include <asm/syscalls.h>
 #include <asm/uaccess.h>
@@ -33,90 +33,7 @@
 
 struct task_struct *last_task_used_math = NULL;
 
-static int hlt_counter = 1;
-
-#define HARD_IDLE_TIMEOUT (HZ / 3)
-
-static int __init nohlt_setup(char *__unused)
-{
-	hlt_counter = 1;
-	return 1;
-}
-
-static int __init hlt_setup(char *__unused)
-{
-	hlt_counter = 0;
-	return 1;
-}
-
-__setup("nohlt", nohlt_setup);
-__setup("hlt", hlt_setup);
-
-static inline void hlt(void)
-{
-	__asm__ __volatile__ ("sleep" : : : "memory");
-}
-
-/*
- * The idle loop on a uniprocessor SH..
- */
-void cpu_idle(void)
-{
-	/* endless idle loop with no priority at all */
-	while (1) {
-		if (hlt_counter) {
-			while (!need_resched())
-				cpu_relax();
-		} else {
-			local_irq_disable();
-			while (!need_resched()) {
-				local_irq_enable();
-				hlt();
-				local_irq_disable();
-			}
-			local_irq_enable();
-		}
-		preempt_enable_no_resched();
-		schedule();
-		preempt_disable();
-	}
-
-}
-
-void machine_restart(char * __unused)
-{
-	extern void phys_stext(void);
-
-	phys_stext();
-}
-
-void machine_halt(void)
-{
-	for (;;);
-}
-
-void machine_power_off(void)
-{
-#if 0
-	/* Disable watchdog timer */
-	ctrl_outl(0xa5000000, WTCSR);
-	/* Configure deep standby on sleep */
-	ctrl_outl(0x03, STBCR);
-#endif
-
-	__asm__ __volatile__ (
-		"sleep\n\t"
-		"synci\n\t"
-		"nop;nop;nop;nop\n\t"
-	);
-
-	panic("Unexpected wakeup!\n");
-}
-
-void (*pm_power_off)(void) = machine_power_off;
-EXPORT_SYMBOL(pm_power_off);
-
-void show_regs(struct pt_regs * regs)
+void show_regs(struct pt_regs *regs)
 {
 	unsigned long long ah, al, bh, bl, ch, cl;
 
@@ -365,18 +282,6 @@ void show_regs(struct pt_regs * regs)
 	}
 }
 
-struct task_struct * alloc_task_struct(void)
-{
-	/* Get task descriptor pages */
-	return (struct task_struct *)
-		__get_free_pages(GFP_KERNEL, get_order(THREAD_SIZE));
-}
-
-void free_task_struct(struct task_struct *p)
-{
-	free_pages((unsigned long) p, get_order(THREAD_SIZE));
-}
-
 /*
  * Create a kernel thread
  */
@@ -396,7 +301,6 @@ ATTRIB_NORET void kernel_thread_helper(void *arg, int (*fn)(void *))
 int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
 	struct pt_regs regs;
-	int pid;
 
 	memset(&regs, 0, sizeof(regs));
 	regs.regs[2] = (unsigned long)arg;
@@ -406,13 +310,10 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 	regs.sr = (1 << 30);
 
 	/* Ok, create the new process.. */
-	pid = do_fork(flags | CLONE_VM | CLONE_UNTRACED, 0,
+	return do_fork(flags | CLONE_VM | CLONE_UNTRACED, 0,
 		      &regs, 0, NULL, NULL);
-
-	trace_mark(kernel_arch_kthread_create, "pid %d fn %p", pid, fn);
-
-	return pid;
 }
+EXPORT_SYMBOL(kernel_thread);
 
 /*
  * Free current thread data structures etc..
@@ -445,7 +346,7 @@ void exit_thread(void)
 void flush_thread(void)
 {
 
-	/* Called by fs/exec.c (flush_old_exec) to remove traces of a
+	/* Called by fs/exec.c (setup_new_exec) to remove traces of a
 	 * previously running executable. */
 #ifdef CONFIG_SH_FPU
 	if (last_task_used_math == current) {
@@ -481,13 +382,13 @@ int dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpu)
 	if (fpvalid) {
 		if (current == last_task_used_math) {
 			enable_fpu();
-			save_fpu(tsk, regs);
+			save_fpu(tsk);
 			disable_fpu();
 			last_task_used_math = 0;
 			regs->sr |= SR_FD;
 		}
 
-		memcpy(fpu, &tsk->thread.fpu.hard, sizeof(*fpu));
+		memcpy(fpu, &tsk->thread.xstate->hardfpu, sizeof(*fpu));
 	}
 
 	return fpvalid;
@@ -495,20 +396,20 @@ int dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpu)
 	return 0; /* Task didn't use the fpu at all. */
 #endif
 }
+EXPORT_SYMBOL(dump_fpu);
 
 asmlinkage void ret_from_fork(void);
 
-int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
+int copy_thread(unsigned long clone_flags, unsigned long usp,
 		unsigned long unused,
 		struct task_struct *p, struct pt_regs *regs)
 {
 	struct pt_regs *childregs;
-	unsigned long long se;			/* Sign extension */
 
 #ifdef CONFIG_SH_FPU
 	if(last_task_used_math == current) {
 		enable_fpu();
-		save_fpu(current, regs);
+		save_fpu(current);
 		disable_fpu();
 		last_task_used_math = NULL;
 		regs->sr |= SR_FD;
@@ -519,11 +420,19 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 
 	*childregs = *regs;
 
+	/*
+	 * Sign extend the edited stack.
+	 * Note that thread.pc and thread.pc will stay
+	 * 32-bit wide and context switch must take care
+	 * of NEFF sign extension.
+	 */
 	if (user_mode(regs)) {
-		childregs->regs[15] = usp;
+		childregs->regs[15] = neff_sign_extend(usp);
 		p->thread.uregs = childregs;
 	} else {
-		childregs->regs[15] = (unsigned long)task_stack_page(p) + THREAD_SIZE;
+		childregs->regs[15] =
+			neff_sign_extend((unsigned long)task_stack_page(p) +
+					 THREAD_SIZE);
 	}
 
 	childregs->regs[9] = 0; /* Set return value for child */
@@ -531,17 +440,6 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 
 	p->thread.sp = (unsigned long) childregs;
 	p->thread.pc = (unsigned long) ret_from_fork;
-
-	/*
-	 * Sign extend the edited stack.
-         * Note that thread.pc and thread.pc will stay
-	 * 32-bit wide and context switch must take care
-	 * of NEFF sign extension.
-	 */
-
-	se = childregs->regs[15];
-	se = (se & NEFF_SIGN) ? (se | NEFF_MASK) : se;
-	childregs->regs[15] = se;
 
 	return 0;
 }
@@ -593,7 +491,6 @@ asmlinkage int sys_execve(char *ufilename, char **uargv,
 	int error;
 	char *filename;
 
-	lock_kernel();
 	filename = getname((char __user *)ufilename);
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
@@ -603,23 +500,10 @@ asmlinkage int sys_execve(char *ufilename, char **uargv,
 			  (char __user * __user *)uargv,
 			  (char __user * __user *)uenvp,
 			  pregs);
-	if (error == 0) {
-		task_lock(current);
-		current->ptrace &= ~PT_DTRACE;
-		task_unlock(current);
-	}
 	putname(filename);
 out:
-	unlock_kernel();
 	return error;
 }
-
-/*
- * These bracket the sleeping functions..
- */
-extern void interruptible_sleep_on(wait_queue_head_t *q);
-
-#define mid_sched	((unsigned long) interruptible_sleep_on)
 
 #ifdef CONFIG_FRAME_POINTER
 static int in_sh64_switch_to(unsigned long pc)
@@ -662,41 +546,3 @@ unsigned long get_wchan(struct task_struct *p)
 #endif
 	return pc;
 }
-
-/* Provide a /proc/asids file that lists out the
-   ASIDs currently associated with the processes.  (If the DM.PC register is
-   examined through the debug link, this shows ASID + PC.  To make use of this,
-   the PID->ASID relationship needs to be known.  This is primarily for
-   debugging.)
-   */
-
-#if defined(CONFIG_SH64_PROC_ASIDS)
-static int
-asids_proc_info(char *buf, char **start, off_t fpos, int length, int *eof, void *data)
-{
-	int len=0;
-	struct task_struct *p;
-	read_lock(&tasklist_lock);
-	for_each_process(p) {
-		int pid = p->pid;
-
-		if (!pid)
-			continue;
-		if (p->mm)
-			len += sprintf(buf+len, "%5d : %02lx\n", pid,
-				       asid_cache(smp_processor_id()));
-		else
-			len += sprintf(buf+len, "%5d : (none)\n", pid);
-	}
-	read_unlock(&tasklist_lock);
-	*eof = 1;
-	return len;
-}
-
-static int __init register_proc_asids(void)
-{
-	create_proc_read_entry("asids", 0, NULL, asids_proc_info, NULL);
-	return 0;
-}
-__initcall(register_proc_asids);
-#endif

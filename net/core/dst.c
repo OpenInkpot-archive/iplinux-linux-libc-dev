@@ -12,11 +12,13 @@
 #include <linux/workqueue.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <net/net_namespace.h>
+#include <linux/sched.h>
 
 #include <net/dst.h>
 
@@ -79,6 +81,7 @@ loop:
 	while ((dst = next) != NULL) {
 		next = dst->next;
 		prefetch(&next->next);
+		cond_resched();
 		if (likely(atomic_read(&dst->__refcnt))) {
 			last->next = dst;
 			last = dst;
@@ -263,9 +266,11 @@ again:
 void dst_release(struct dst_entry *dst)
 {
 	if (dst) {
-		WARN_ON(atomic_read(&dst->__refcnt) < 1);
+               int newrefcnt;
+
 		smp_mb__before_atomic_dec();
-		atomic_dec(&dst->__refcnt);
+               newrefcnt = atomic_dec_return(&dst->__refcnt);
+               WARN_ON(newrefcnt < 0);
 	}
 }
 EXPORT_SYMBOL(dst_release);

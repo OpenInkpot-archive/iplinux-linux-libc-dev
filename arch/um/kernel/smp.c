@@ -25,13 +25,6 @@ DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 #include "irq_user.h"
 #include "os.h"
 
-/* CPU online map, set by smp_boot_cpus */
-cpumask_t cpu_online_map = CPU_MASK_NONE;
-cpumask_t cpu_possible_map = CPU_MASK_NONE;
-
-EXPORT_SYMBOL(cpu_online_map);
-EXPORT_SYMBOL(cpu_possible_map);
-
 /* Per CPU bogomips and other parameters
  * The only piece used here is the ipi pipe, which is set before SMP is
  * started and never changed.
@@ -118,7 +111,7 @@ void smp_prepare_cpus(unsigned int maxcpus)
 	int i;
 
 	for (i = 0; i < ncpus; ++i)
-		cpu_set(i, cpu_possible_map);
+		set_cpu_possible(i, true);
 
 	cpu_clear(me, cpu_online_map);
 	cpu_set(me, cpu_online_map);

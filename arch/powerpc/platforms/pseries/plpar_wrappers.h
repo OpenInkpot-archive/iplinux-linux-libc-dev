@@ -9,9 +9,31 @@ static inline long poll_pending(void)
 	return plpar_hcall_norets(H_POLL_PENDING);
 }
 
+static inline u8 get_cede_latency_hint(void)
+{
+	return get_lppaca()->gpr5_dword.fields.cede_latency_hint;
+}
+
+static inline void set_cede_latency_hint(u8 latency_hint)
+{
+	get_lppaca()->gpr5_dword.fields.cede_latency_hint = latency_hint;
+}
+
 static inline long cede_processor(void)
 {
 	return plpar_hcall_norets(H_CEDE);
+}
+
+static inline long extended_cede_processor(unsigned long latency_hint)
+{
+	long rc;
+	u8 old_latency_hint = get_cede_latency_hint();
+
+	set_cede_latency_hint(latency_hint);
+	rc = cede_processor();
+	set_cede_latency_hint(old_latency_hint);
+
+	return rc;
 }
 
 static inline long vpa_call(unsigned long flags, unsigned long cpu,
@@ -41,6 +63,16 @@ static inline long unregister_slb_shadow(unsigned long cpu, unsigned long vpa)
 static inline long register_slb_shadow(unsigned long cpu, unsigned long vpa)
 {
 	return vpa_call(0x3, cpu, vpa);
+}
+
+static inline long unregister_dtl(unsigned long cpu, unsigned long vpa)
+{
+	return vpa_call(0x6, cpu, vpa);
+}
+
+static inline long register_dtl(unsigned long cpu, unsigned long vpa)
+{
+	return vpa_call(0x2, cpu, vpa);
 }
 
 static inline long plpar_page_set_loaned(unsigned long vpa)
@@ -227,12 +259,12 @@ static inline long plpar_ipi(unsigned long servernum, unsigned long mfrr)
 	return plpar_hcall_norets(H_IPI, servernum, mfrr);
 }
 
-static inline long plpar_xirr(unsigned long *xirr_ret)
+static inline long plpar_xirr(unsigned long *xirr_ret, unsigned char cppr)
 {
 	long rc;
 	unsigned long retbuf[PLPAR_HCALL_BUFSIZE];
 
-	rc = plpar_hcall(H_XIRR, retbuf);
+	rc = plpar_hcall(H_XIRR, retbuf, cppr);
 
 	*xirr_ret = retbuf[0];
 

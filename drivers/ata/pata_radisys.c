@@ -81,7 +81,6 @@ static void radisys_set_piomode (struct ata_port *ap, struct ata_device *adev)
  *	radisys_set_dmamode - Initialize host controller PATA DMA timings
  *	@ap: Port whose timings we are configuring
  *	@adev: Device to program
- *	@isich: True if the device is an ICH and has IOCFG registers
  *
  *	Set MWDMA mode for device, in host controller PCI config space.
  *
@@ -140,9 +139,9 @@ static void radisys_set_dmamode (struct ata_port *ap, struct ata_device *adev)
 		pci_read_config_byte(dev, 0x4A, &udma_mode);
 
 		if (adev->xfer_mode == XFER_UDMA_2)
-			udma_mode &= ~ (1 << adev->devno);
+			udma_mode &= ~(2 << (adev->devno * 4));
 		else /* UDMA 4 */
-			udma_mode |= (1 << adev->devno);
+			udma_mode |= (2 << (adev->devno * 4));
 
 		pci_write_config_byte(dev, 0x4A, udma_mode);
 
@@ -217,9 +216,9 @@ static int radisys_init_one (struct pci_dev *pdev, const struct pci_device_id *e
 	static int printed_version;
 	static const struct ata_port_info info = {
 		.flags		= ATA_FLAG_SLAVE_POSS,
-		.pio_mask	= 0x1f,	/* pio0-4 */
-		.mwdma_mask	= 0x07, /* mwdma1-2 */
-		.udma_mask	= 0x14, /* UDMA33/66 only */
+		.pio_mask	= ATA_PIO4,
+		.mwdma_mask	= ATA_MWDMA12_ONLY,
+		.udma_mask	= ATA_UDMA24_ONLY,
 		.port_ops	= &radisys_pata_ops,
 	};
 	const struct ata_port_info *ppi[] = { &info, NULL };
@@ -228,7 +227,7 @@ static int radisys_init_one (struct pci_dev *pdev, const struct pci_device_id *e
 		dev_printk(KERN_DEBUG, &pdev->dev,
 			   "version " DRV_VERSION "\n");
 
-	return ata_pci_sff_init_one(pdev, ppi, &radisys_sht, NULL);
+	return ata_pci_sff_init_one(pdev, ppi, &radisys_sht, NULL, 0);
 }
 
 static const struct pci_device_id radisys_pci_tbl[] = {

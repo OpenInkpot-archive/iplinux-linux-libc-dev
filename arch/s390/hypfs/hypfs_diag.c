@@ -3,12 +3,16 @@
  *    Hypervisor filesystem for Linux on s390. Diag 204 and 224
  *    implementation.
  *
- *    Copyright (C) IBM Corp. 2006
+ *    Copyright IBM Corp. 2006, 2008
  *    Author(s): Michael Holzheu <holzheu@de.ibm.com>
  */
 
+#define KMSG_COMPONENT "hypfs"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+
 #include <linux/types.h>
 #include <linux/errno.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/vmalloc.h>
 #include <asm/ebcdic.h>
@@ -159,7 +163,7 @@ static inline void part_hdr__part_name(enum diag204_format type, void *hdr,
 		       LPAR_NAME_LEN);
 	EBCASC(name, LPAR_NAME_LEN);
 	name[LPAR_NAME_LEN] = 0;
-	strstrip(name);
+	strim(name);
 }
 
 struct cpu_info {
@@ -433,7 +437,7 @@ static int diag204_probe(void)
 		}
 		if (diag204((unsigned long)SUBC_STIB6 |
 			    (unsigned long)INFO_EXT, pages, buf) >= 0) {
-			diag204_store_sc = SUBC_STIB7;
+			diag204_store_sc = SUBC_STIB6;
 			diag204_info_type = INFO_EXT;
 			goto out;
 		}
@@ -483,7 +487,7 @@ out:
 
 static int diag224(void *ptr)
 {
-	int rc = -ENOTSUPP;
+	int rc = -EOPNOTSUPP;
 
 	asm volatile(
 		"	diag	%1,%2,0x224\n"
@@ -502,7 +506,7 @@ static int diag224_get_name_table(void)
 		return -ENOMEM;
 	if (diag224(diag224_cpu_names)) {
 		kfree(diag224_cpu_names);
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 	}
 	EBCASC(diag224_cpu_names + 16, (*diag224_cpu_names + 1) * 16);
 	return 0;
@@ -518,7 +522,7 @@ static int diag224_idx2name(int index, char *name)
 	memcpy(name, diag224_cpu_names + ((index + 1) * CPU_NAME_LEN),
 		CPU_NAME_LEN);
 	name[CPU_NAME_LEN] = 0;
-	strstrip(name);
+	strim(name);
 	return 0;
 }
 
@@ -527,13 +531,14 @@ __init int hypfs_diag_init(void)
 	int rc;
 
 	if (diag204_probe()) {
-		printk(KERN_ERR "hypfs: diag 204 not working.");
+		pr_err("The hardware system does not support hypfs\n");
 		return -ENODATA;
 	}
 	rc = diag224_get_name_table();
 	if (rc) {
 		diag204_free_buffer();
-		printk(KERN_ERR "hypfs: could not get name table.\n");
+		pr_err("The hardware system does not provide all "
+		       "functions required by hypfs\n");
 	}
 	return rc;
 }

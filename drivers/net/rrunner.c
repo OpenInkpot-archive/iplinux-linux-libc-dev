@@ -40,6 +40,7 @@
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/mm.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 
 #include <asm/system.h>
@@ -62,6 +63,16 @@ MODULE_DESCRIPTION("Essential RoadRunner HIPPI driver");
 MODULE_LICENSE("GPL");
 
 static char version[] __devinitdata = "rrunner.c: v0.50 11/11/2002  Jes Sorensen (jes@wildopensource.com)\n";
+
+
+static const struct net_device_ops rr_netdev_ops = {
+	.ndo_open 		= rr_open,
+	.ndo_stop		= rr_close,
+	.ndo_do_ioctl		= rr_ioctl,
+	.ndo_start_xmit		= rr_start_xmit,
+	.ndo_change_mtu		= hippi_change_mtu,
+	.ndo_set_mac_address	= hippi_mac_addr,
+};
 
 /*
  * Implementation notes:
@@ -115,10 +126,7 @@ static int __devinit rr_init_one(struct pci_dev *pdev,
 	spin_lock_init(&rrpriv->lock);
 
 	dev->irq = pdev->irq;
-	dev->open = &rr_open;
-	dev->hard_start_xmit = &rr_start_xmit;
-	dev->stop = &rr_close;
-	dev->do_ioctl = &rr_ioctl;
+	dev->netdev_ops = &rr_netdev_ops;
 
 	dev->base_addr = pci_resource_start(pdev, 0);
 
@@ -511,7 +519,6 @@ static int __devinit rr_init(struct net_device *dev)
 	struct rr_private *rrpriv;
 	struct rr_regs __iomem *regs;
 	u32 sram_size, rev;
-	DECLARE_MAC_BUF(mac);
 
 	rrpriv = netdev_priv(dev);
 	regs = rrpriv->regs;
@@ -549,7 +556,7 @@ static int __devinit rr_init(struct net_device *dev)
 	*(__be32 *)(dev->dev_addr+2) =
 	  htonl(rr_read_eeprom_word(rrpriv, offsetof(struct eeprom, manf.BoardULA[4])));
 
-	printk("  MAC: %s\n", print_mac(mac, dev->dev_addr));
+	printk("  MAC: %pM\n", dev->dev_addr);
 
 	sram_size = rr_read_eeprom_word(rrpriv, 8);
 	printk("  SRAM size 0x%06x\n", sram_size);
@@ -1006,7 +1013,6 @@ static void rx_int(struct net_device *dev, u32 rxlimit, u32 index)
 
 			netif_rx(skb);		/* send it up */
 
-			dev->last_rx = jiffies;
 			dev->stats.rx_packets++;
 			dev->stats.rx_bytes += pkt_len;
 		}
@@ -1288,7 +1294,7 @@ static void rr_dump(struct net_device *dev)
 
 	printk("Error code 0x%x\n", readl(&regs->Fail1));
 
-	index = (((readl(&regs->EvtPrd) >> 8) & 0xff ) - 1) % EVT_RING_ENTRIES;
+	index = (((readl(&regs->EvtPrd) >> 8) & 0xff) - 1) % TX_RING_ENTRIES;
 	cons = rrpriv->dirty_tx;
 	printk("TX ring index %i, TX consumer %i\n",
 	       index, cons);
@@ -1396,7 +1402,8 @@ static int rr_close(struct net_device *dev)
 }
 
 
-static int rr_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t rr_start_xmit(struct sk_buff *skb,
+				 struct net_device *dev)
 {
 	struct rr_private *rrpriv = netdev_priv(dev);
 	struct rr_regs __iomem *regs = rrpriv->regs;
@@ -1420,7 +1427,7 @@ static int rr_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		if (!(new_skb = dev_alloc_skb(len + 8))) {
 			dev_kfree_skb(skb);
 			netif_wake_queue(dev);
-			return -EBUSY;
+			return NETDEV_TX_OK;
 		}
 		skb_reserve(new_skb, 8);
 		skb_put(new_skb, len);
@@ -1461,7 +1468,7 @@ static int rr_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	spin_unlock_irqrestore(&rrpriv->lock, flags);
 
 	dev->trans_start = jiffies;
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 
@@ -1682,7 +1689,7 @@ static int rr_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	}
 }
 
-static struct pci_device_id rr_pci_tbl[] = {
+static DEFINE_PCI_DEVICE_TABLE(rr_pci_tbl) = {
 	{ PCI_VENDOR_ID_ESSENTIAL, PCI_DEVICE_ID_ESSENTIAL_ROADRUNNER,
 		PCI_ANY_ID, PCI_ANY_ID, },
 	{ 0,}
@@ -1708,9 +1715,3 @@ static void __exit rr_cleanup_module(void)
 
 module_init(rr_init_module);
 module_exit(rr_cleanup_module);
-
-/*
- * Local variables:
- * compile-command: "gcc -D__KERNEL__ -I../../include -Wall -Wstrict-prototypes -O2 -pipe -fomit-frame-pointer -fno-strength-reduce -m486 -malign-loops=2 -malign-jumps=2 -malign-functions=2 -DMODULE -DMODVERSIONS -include ../../include/linux/modversions.h -c rrunner.c"
- * End:
- */

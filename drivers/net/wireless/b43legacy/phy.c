@@ -31,6 +31,8 @@
 
 #include <linux/delay.h>
 #include <linux/pci.h>
+#include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 
 #include "b43legacy.h"
@@ -1296,12 +1298,10 @@ void b43legacy_lo_write(struct b43legacy_wldev *dev,
 	/* Sanity check. */
 	if (pair->low < -8 || pair->low > 8 ||
 	    pair->high < -8 || pair->high > 8) {
-		struct b43legacy_phy *phy = &dev->phy;
 		b43legacydbg(dev->wl,
 		       "WARNING: Writing invalid LOpair "
-		       "(low: %d, high: %d, index: %lu)\n",
-		       pair->low, pair->high,
-		       (unsigned long)(pair - phy->_lo_pairs));
+		       "(low: %d, high: %d)\n",
+		       pair->low, pair->high);
 		dump_stack();
 	}
 #endif

@@ -30,6 +30,7 @@
 #include <linux/log2.h>
 #include <linux/pci.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 
 #define DRVNAME "i5k_amb"
 
@@ -489,6 +490,13 @@ static unsigned long chipset_ids[] = {
 	PCI_DEVICE_ID_INTEL_5400_ERR,
 	0
 };
+
+static struct pci_device_id i5k_amb_ids[] __devinitdata = {
+	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_5000_ERR) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_5400_ERR) },
+	{ 0, }
+};
+MODULE_DEVICE_TABLE(pci, i5k_amb_ids);
 
 static int __devinit i5k_amb_probe(struct platform_device *pdev)
 {

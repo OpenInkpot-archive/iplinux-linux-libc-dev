@@ -23,26 +23,27 @@
 #include <linux/kvm_host.h>
 #include <linux/module.h>
 #include <linux/vmalloc.h>
+#include <linux/hrtimer.h>
 #include <linux/fs.h>
+#include <linux/slab.h>
 #include <asm/cputable.h>
 #include <asm/uaccess.h>
 #include <asm/kvm_ppc.h>
 #include <asm/tlbflush.h>
+#include "timing.h"
+#include "../mm/mmu_decl.h"
 
+#define CREATE_TRACE_POINTS
+#include "trace.h"
 
 gfn_t unalias_gfn(struct kvm *kvm, gfn_t gfn)
 {
 	return gfn;
 }
 
-int kvm_cpu_has_interrupt(struct kvm_vcpu *v)
-{
-	return !!(v->arch.pending_exceptions);
-}
-
 int kvm_arch_vcpu_runnable(struct kvm_vcpu *v)
 {
-	return !(v->arch.msr & MSR_WE);
+	return !(v->arch.msr & MSR_WE) || !!(v->arch.pending_exceptions);
 }
 
 
@@ -79,8 +80,9 @@ int kvmppc_emulate_mmio(struct kvm_run *run, struct kvm_vcpu *vcpu)
 	return r;
 }
 
-void kvm_arch_hardware_enable(void *garbage)
+int kvm_arch_hardware_enable(void *garbage)
 {
+	return 0;
 }
 
 void kvm_arch_hardware_disable(void *garbage)
@@ -98,14 +100,7 @@ void kvm_arch_hardware_unsetup(void)
 
 void kvm_arch_check_processor_compat(void *rtn)
 {
-	int r;
-
-	if (strcmp(cur_cpu_spec->platform, "ppc440") == 0)
-		r = 0;
-	else
-		r = -ENOTSUPP;
-
-	*(int *)rtn = r;
+	*(int *)rtn = kvmppc_core_check_processor_compat();
 }
 
 struct kvm *kvm_arch_create_vm(void)
@@ -122,19 +117,28 @@ struct kvm *kvm_arch_create_vm(void)
 static void kvmppc_free_vcpus(struct kvm *kvm)
 {
 	unsigned int i;
+	struct kvm_vcpu *vcpu;
 
-	for (i = 0; i < KVM_MAX_VCPUS; ++i) {
-		if (kvm->vcpus[i]) {
-			kvm_arch_vcpu_free(kvm->vcpus[i]);
-			kvm->vcpus[i] = NULL;
-		}
-	}
+	kvm_for_each_vcpu(i, vcpu, kvm)
+		kvm_arch_vcpu_free(vcpu);
+
+	mutex_lock(&kvm->lock);
+	for (i = 0; i < atomic_read(&kvm->online_vcpus); i++)
+		kvm->vcpus[i] = NULL;
+
+	atomic_set(&kvm->online_vcpus, 0);
+	mutex_unlock(&kvm->lock);
+}
+
+void kvm_arch_sync_events(struct kvm *kvm)
+{
 }
 
 void kvm_arch_destroy_vm(struct kvm *kvm)
 {
 	kvmppc_free_vcpus(kvm);
 	kvm_free_physmem(kvm);
+	cleanup_srcu_struct(&kvm->srcu);
 	kfree(kvm);
 }
 
@@ -143,7 +147,7 @@ int kvm_dev_ioctl_check_extension(long ext)
 	int r;
 
 	switch (ext) {
-	case KVM_CAP_USER_MEMORY:
+	case KVM_CAP_PPC_SEGSTATE:
 		r = 1;
 		break;
 	case KVM_CAP_COALESCED_MMIO:
@@ -163,13 +167,23 @@ long kvm_arch_dev_ioctl(struct file *filp,
 	return -EINVAL;
 }
 
-int kvm_arch_set_memory_region(struct kvm *kvm,
-                               struct kvm_userspace_memory_region *mem,
-                               struct kvm_memory_slot old,
-                               int user_alloc)
+int kvm_arch_prepare_memory_region(struct kvm *kvm,
+                                   struct kvm_memory_slot *memslot,
+                                   struct kvm_memory_slot old,
+                                   struct kvm_userspace_memory_region *mem,
+                                   int user_alloc)
 {
 	return 0;
 }
+
+void kvm_arch_commit_memory_region(struct kvm *kvm,
+               struct kvm_userspace_memory_region *mem,
+               struct kvm_memory_slot old,
+               int user_alloc)
+{
+       return;
+}
+
 
 void kvm_arch_flush_shadow(struct kvm *kvm)
 {
@@ -178,30 +192,15 @@ void kvm_arch_flush_shadow(struct kvm *kvm)
 struct kvm_vcpu *kvm_arch_vcpu_create(struct kvm *kvm, unsigned int id)
 {
 	struct kvm_vcpu *vcpu;
-	int err;
-
-	vcpu = kmem_cache_zalloc(kvm_vcpu_cache, GFP_KERNEL);
-	if (!vcpu) {
-		err = -ENOMEM;
-		goto out;
-	}
-
-	err = kvm_vcpu_init(vcpu, kvm, id);
-	if (err)
-		goto free_vcpu;
-
+	vcpu = kvmppc_core_vcpu_create(kvm, id);
+	kvmppc_create_vcpu_debugfs(vcpu, id);
 	return vcpu;
-
-free_vcpu:
-	kmem_cache_free(kvm_vcpu_cache, vcpu);
-out:
-	return ERR_PTR(err);
 }
 
 void kvm_arch_vcpu_free(struct kvm_vcpu *vcpu)
 {
-	kvm_vcpu_uninit(vcpu);
-	kmem_cache_free(kvm_vcpu_cache, vcpu);
+	kvmppc_remove_vcpu_debugfs(vcpu);
+	kvmppc_core_vcpu_free(vcpu);
 }
 
 void kvm_arch_vcpu_destroy(struct kvm_vcpu *vcpu)
@@ -211,16 +210,14 @@ void kvm_arch_vcpu_destroy(struct kvm_vcpu *vcpu)
 
 int kvm_cpu_has_pending_timer(struct kvm_vcpu *vcpu)
 {
-	unsigned int priority = exception_priority[BOOKE_INTERRUPT_DECREMENTER];
-
-	return test_bit(priority, &vcpu->arch.pending_exceptions);
+	return kvmppc_core_pending_dec(vcpu);
 }
 
 static void kvmppc_decrementer_func(unsigned long data)
 {
 	struct kvm_vcpu *vcpu = (struct kvm_vcpu *)data;
 
-	kvmppc_queue_exception(vcpu, BOOKE_INTERRUPT_DECREMENTER);
+	kvmppc_core_queue_dec(vcpu);
 
 	if (waitqueue_active(&vcpu->wq)) {
 		wake_up_interruptible(&vcpu->wq);
@@ -228,160 +225,82 @@ static void kvmppc_decrementer_func(unsigned long data)
 	}
 }
 
+/*
+ * low level hrtimer wake routine. Because this runs in hardirq context
+ * we schedule a tasklet to do the real work.
+ */
+enum hrtimer_restart kvmppc_decrementer_wakeup(struct hrtimer *timer)
+{
+	struct kvm_vcpu *vcpu;
+
+	vcpu = container_of(timer, struct kvm_vcpu, arch.dec_timer);
+	tasklet_schedule(&vcpu->arch.tasklet);
+
+	return HRTIMER_NORESTART;
+}
+
 int kvm_arch_vcpu_init(struct kvm_vcpu *vcpu)
 {
-	setup_timer(&vcpu->arch.dec_timer, kvmppc_decrementer_func,
-	            (unsigned long)vcpu);
+	hrtimer_init(&vcpu->arch.dec_timer, CLOCK_REALTIME, HRTIMER_MODE_ABS);
+	tasklet_init(&vcpu->arch.tasklet, kvmppc_decrementer_func, (ulong)vcpu);
+	vcpu->arch.dec_timer.function = kvmppc_decrementer_wakeup;
 
 	return 0;
 }
 
 void kvm_arch_vcpu_uninit(struct kvm_vcpu *vcpu)
 {
-	kvmppc_core_destroy_mmu(vcpu);
-}
-
-/* Note: clearing MSR[DE] just means that the debug interrupt will not be
- * delivered *immediately*. Instead, it simply sets the appropriate DBSR bits.
- * If those DBSR bits are still set when MSR[DE] is re-enabled, the interrupt
- * will be delivered as an "imprecise debug event" (which is indicated by
- * DBSR[IDE].
- */
-static void kvmppc_disable_debug_interrupts(void)
-{
-	mtmsr(mfmsr() & ~MSR_DE);
-}
-
-static void kvmppc_restore_host_debug_state(struct kvm_vcpu *vcpu)
-{
-	kvmppc_disable_debug_interrupts();
-
-	mtspr(SPRN_IAC1, vcpu->arch.host_iac[0]);
-	mtspr(SPRN_IAC2, vcpu->arch.host_iac[1]);
-	mtspr(SPRN_IAC3, vcpu->arch.host_iac[2]);
-	mtspr(SPRN_IAC4, vcpu->arch.host_iac[3]);
-	mtspr(SPRN_DBCR1, vcpu->arch.host_dbcr1);
-	mtspr(SPRN_DBCR2, vcpu->arch.host_dbcr2);
-	mtspr(SPRN_DBCR0, vcpu->arch.host_dbcr0);
-	mtmsr(vcpu->arch.host_msr);
-}
-
-static void kvmppc_load_guest_debug_registers(struct kvm_vcpu *vcpu)
-{
-	struct kvm_guest_debug *dbg = &vcpu->guest_debug;
-	u32 dbcr0 = 0;
-
-	vcpu->arch.host_msr = mfmsr();
-	kvmppc_disable_debug_interrupts();
-
-	/* Save host debug register state. */
-	vcpu->arch.host_iac[0] = mfspr(SPRN_IAC1);
-	vcpu->arch.host_iac[1] = mfspr(SPRN_IAC2);
-	vcpu->arch.host_iac[2] = mfspr(SPRN_IAC3);
-	vcpu->arch.host_iac[3] = mfspr(SPRN_IAC4);
-	vcpu->arch.host_dbcr0 = mfspr(SPRN_DBCR0);
-	vcpu->arch.host_dbcr1 = mfspr(SPRN_DBCR1);
-	vcpu->arch.host_dbcr2 = mfspr(SPRN_DBCR2);
-
-	/* set registers up for guest */
-
-	if (dbg->bp[0]) {
-		mtspr(SPRN_IAC1, dbg->bp[0]);
-		dbcr0 |= DBCR0_IAC1 | DBCR0_IDM;
-	}
-	if (dbg->bp[1]) {
-		mtspr(SPRN_IAC2, dbg->bp[1]);
-		dbcr0 |= DBCR0_IAC2 | DBCR0_IDM;
-	}
-	if (dbg->bp[2]) {
-		mtspr(SPRN_IAC3, dbg->bp[2]);
-		dbcr0 |= DBCR0_IAC3 | DBCR0_IDM;
-	}
-	if (dbg->bp[3]) {
-		mtspr(SPRN_IAC4, dbg->bp[3]);
-		dbcr0 |= DBCR0_IAC4 | DBCR0_IDM;
-	}
-
-	mtspr(SPRN_DBCR0, dbcr0);
-	mtspr(SPRN_DBCR1, 0);
-	mtspr(SPRN_DBCR2, 0);
+	kvmppc_mmu_destroy(vcpu);
 }
 
 void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 {
-	int i;
-
-	if (vcpu->guest_debug.enabled)
-		kvmppc_load_guest_debug_registers(vcpu);
-
-	/* Mark every guest entry in the shadow TLB entry modified, so that they
-	 * will all be reloaded on the next vcpu run (instead of being
-	 * demand-faulted). */
-	for (i = 0; i <= tlb_44x_hwater; i++)
-		kvmppc_tlbe_set_modified(vcpu, i);
+	kvmppc_core_vcpu_load(vcpu, cpu);
 }
 
 void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu)
 {
-	if (vcpu->guest_debug.enabled)
-		kvmppc_restore_host_debug_state(vcpu);
-
-	/* Don't leave guest TLB entries resident when being de-scheduled. */
-	/* XXX It would be nice to differentiate between heavyweight exit and
-	 * sched_out here, since we could avoid the TLB flush for heavyweight
-	 * exits. */
-	_tlbia();
+	kvmppc_core_vcpu_put(vcpu);
 }
 
-int kvm_arch_vcpu_ioctl_debug_guest(struct kvm_vcpu *vcpu,
-                                    struct kvm_debug_guest *dbg)
+int kvm_arch_vcpu_ioctl_set_guest_debug(struct kvm_vcpu *vcpu,
+                                        struct kvm_guest_debug *dbg)
 {
-	int i;
-
-	vcpu->guest_debug.enabled = dbg->enabled;
-	if (vcpu->guest_debug.enabled) {
-		for (i=0; i < ARRAY_SIZE(vcpu->guest_debug.bp); i++) {
-			if (dbg->breakpoints[i].enabled)
-				vcpu->guest_debug.bp[i] = dbg->breakpoints[i].address;
-			else
-				vcpu->guest_debug.bp[i] = 0;
-		}
-	}
-
-	return 0;
+	return -EINVAL;
 }
 
 static void kvmppc_complete_dcr_load(struct kvm_vcpu *vcpu,
                                      struct kvm_run *run)
 {
-	u32 *gpr = &vcpu->arch.gpr[vcpu->arch.io_gpr];
-	*gpr = run->dcr.data;
+	kvmppc_set_gpr(vcpu, vcpu->arch.io_gpr, run->dcr.data);
 }
 
 static void kvmppc_complete_mmio_load(struct kvm_vcpu *vcpu,
                                       struct kvm_run *run)
 {
-	u32 *gpr = &vcpu->arch.gpr[vcpu->arch.io_gpr];
+	ulong gpr;
 
-	if (run->mmio.len > sizeof(*gpr)) {
+	if (run->mmio.len > sizeof(gpr)) {
 		printk(KERN_ERR "bad MMIO length: %d\n", run->mmio.len);
 		return;
 	}
 
 	if (vcpu->arch.mmio_is_bigendian) {
 		switch (run->mmio.len) {
-		case 4: *gpr = *(u32 *)run->mmio.data; break;
-		case 2: *gpr = *(u16 *)run->mmio.data; break;
-		case 1: *gpr = *(u8 *)run->mmio.data; break;
+		case 4: gpr = *(u32 *)run->mmio.data; break;
+		case 2: gpr = *(u16 *)run->mmio.data; break;
+		case 1: gpr = *(u8 *)run->mmio.data; break;
 		}
 	} else {
 		/* Convert BE data from userland back to LE. */
 		switch (run->mmio.len) {
-		case 4: *gpr = ld_le32((u32 *)run->mmio.data); break;
-		case 2: *gpr = ld_le16((u16 *)run->mmio.data); break;
-		case 1: *gpr = *(u8 *)run->mmio.data; break;
+		case 4: gpr = ld_le32((u32 *)run->mmio.data); break;
+		case 2: gpr = ld_le16((u16 *)run->mmio.data); break;
+		case 1: gpr = *(u8 *)run->mmio.data; break;
 		}
 	}
+
+	kvmppc_set_gpr(vcpu, vcpu->arch.io_gpr, gpr);
 }
 
 int kvmppc_handle_load(struct kvm_run *run, struct kvm_vcpu *vcpu,
@@ -459,7 +378,7 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu, struct kvm_run *run)
 		vcpu->arch.dcr_needed = 0;
 	}
 
-	kvmppc_check_and_deliver_interrupts(vcpu);
+	kvmppc_core_deliver_interrupts(vcpu);
 
 	local_irq_disable();
 	kvm_guest_enter();
@@ -477,7 +396,7 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu, struct kvm_run *run)
 
 int kvm_vcpu_ioctl_interrupt(struct kvm_vcpu *vcpu, struct kvm_interrupt *irq)
 {
-	kvmppc_queue_exception(vcpu, BOOKE_INTERRUPT_EXTERNAL);
+	kvmppc_core_queue_external(vcpu, irq);
 
 	if (waitqueue_active(&vcpu->wq)) {
 		wake_up_interruptible(&vcpu->wq);
@@ -523,11 +442,6 @@ out:
 	return r;
 }
 
-int kvm_vm_ioctl_get_dirty_log(struct kvm *kvm, struct kvm_dirty_log *log)
-{
-	return -ENOTSUPP;
-}
-
 long kvm_arch_vm_ioctl(struct file *filp,
                        unsigned int ioctl, unsigned long arg)
 {
@@ -535,7 +449,7 @@ long kvm_arch_vm_ioctl(struct file *filp,
 
 	switch (ioctl) {
 	default:
-		r = -EINVAL;
+		r = -ENOTTY;
 	}
 
 	return r;

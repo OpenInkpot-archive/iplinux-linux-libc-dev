@@ -18,6 +18,7 @@
 #include <linux/platform_device.h>
 #include <linux/i2c.h>
 #include <linux/mfd/da903x.h>
+#include <linux/slab.h>
 
 #define DA9030_CHIP_ID		0x00
 #define DA9030_EVENT_A		0x01
@@ -151,11 +152,23 @@ int da903x_write(struct device *dev, int reg, uint8_t val)
 }
 EXPORT_SYMBOL_GPL(da903x_write);
 
+int da903x_writes(struct device *dev, int reg, int len, uint8_t *val)
+{
+	return __da903x_writes(to_i2c_client(dev), reg, len, val);
+}
+EXPORT_SYMBOL_GPL(da903x_writes);
+
 int da903x_read(struct device *dev, int reg, uint8_t *val)
 {
 	return __da903x_read(to_i2c_client(dev), reg, val);
 }
 EXPORT_SYMBOL_GPL(da903x_read);
+
+int da903x_reads(struct device *dev, int reg, int len, uint8_t *val)
+{
+	return __da903x_reads(to_i2c_client(dev), reg, len, val);
+}
+EXPORT_SYMBOL_GPL(da903x_reads);
 
 int da903x_set_bits(struct device *dev, int reg, uint8_t bit_mask)
 {
@@ -401,7 +414,7 @@ static void da903x_irq_work(struct work_struct *work)
 	enable_irq(chip->client->irq);
 }
 
-static int da903x_irq_handler(int irq, void *data)
+static irqreturn_t da903x_irq_handler(int irq, void *data)
 {
 	struct da903x_chip *chip = data;
 
@@ -435,13 +448,13 @@ static const struct i2c_device_id da903x_id_table[] = {
 };
 MODULE_DEVICE_TABLE(i2c, da903x_id_table);
 
-static int __devexit __remove_subdev(struct device *dev, void *unused)
+static int __remove_subdev(struct device *dev, void *unused)
 {
 	platform_device_unregister(to_platform_device(dev));
 	return 0;
 }
 
-static int __devexit da903x_remove_subdevs(struct da903x_chip *chip)
+static int da903x_remove_subdevs(struct da903x_chip *chip)
 {
 	return device_for_each_child(chip->dev, NULL, __remove_subdev);
 }
@@ -549,7 +562,7 @@ static int __init da903x_init(void)
 {
 	return i2c_add_driver(&da903x_driver);
 }
-module_init(da903x_init);
+subsys_initcall(da903x_init);
 
 static void __exit da903x_exit(void)
 {

@@ -42,12 +42,13 @@
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
 #include <linux/of.h>
+#include <linux/slab.h>
 #include <linux/of_platform.h>
 #include <asm/ibmebus.h>
 #include <asm/abs_addr.h>
 
 static struct device ibmebus_bus_device = { /* fake "parent" device */
-	.bus_id = "ibmebus",
+	.init_name = "ibmebus",
 };
 
 struct bus_type ibmebus_bus_type;
@@ -127,7 +128,7 @@ static int ibmebus_dma_supported(struct device *dev, u64 mask)
 	return 1;
 }
 
-static struct dma_mapping_ops ibmebus_dma_ops = {
+static struct dma_map_ops ibmebus_dma_ops = {
 	.alloc_coherent = ibmebus_alloc_coherent,
 	.free_coherent  = ibmebus_free_coherent,
 	.map_sg         = ibmebus_map_sg,
@@ -231,6 +232,7 @@ void ibmebus_free_irq(u32 ist, void *dev_id)
 	unsigned int irq = irq_find_mapping(NULL, ist);
 
 	free_irq(irq, dev_id);
+	irq_dispose_mapping(irq);
 }
 EXPORT_SYMBOL(ibmebus_free_irq);
 

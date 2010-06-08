@@ -70,6 +70,7 @@
  *					bonding can change the skb before
  *					sending (e.g. insert 8021q tag).
  *		Harald Welte	:	convert to make use of jenkins hash
+ *		Jesper D. Brouer:       Proxy ARP PVLAN RFC 3069 support.
  */
 
 #include <linux/module.h>
@@ -97,6 +98,7 @@
 #include <linux/net.h>
 #include <linux/rcupdate.h>
 #include <linux/jhash.h>
+#include <linux/slab.h>
 #ifdef CONFIG_SYSCTL
 #include <linux/sysctl.h>
 #endif
@@ -130,7 +132,7 @@ static void arp_solicit(struct neighbour *neigh, struct sk_buff *skb);
 static void arp_error_report(struct neighbour *neigh, struct sk_buff *skb);
 static void parp_redo(struct sk_buff *skb);
 
-static struct neigh_ops arp_generic_ops = {
+static const struct neigh_ops arp_generic_ops = {
 	.family =		AF_INET,
 	.solicit =		arp_solicit,
 	.error_report =		arp_error_report,
@@ -140,7 +142,7 @@ static struct neigh_ops arp_generic_ops = {
 	.queue_xmit =		dev_queue_xmit,
 };
 
-static struct neigh_ops arp_hh_ops = {
+static const struct neigh_ops arp_hh_ops = {
 	.family =		AF_INET,
 	.solicit =		arp_solicit,
 	.error_report =		arp_error_report,
@@ -150,7 +152,7 @@ static struct neigh_ops arp_hh_ops = {
 	.queue_xmit =		dev_queue_xmit,
 };
 
-static struct neigh_ops arp_direct_ops = {
+static const struct neigh_ops arp_direct_ops = {
 	.family =		AF_INET,
 	.output =		dev_queue_xmit,
 	.connected_output =	dev_queue_xmit,
@@ -158,7 +160,7 @@ static struct neigh_ops arp_direct_ops = {
 	.queue_xmit =		dev_queue_xmit,
 };
 
-struct neigh_ops arp_broken_ops = {
+const struct neigh_ops arp_broken_ops = {
 	.family =		AF_INET,
 	.solicit =		arp_solicit,
 	.error_report =		arp_error_report,
@@ -468,13 +470,13 @@ int arp_find(unsigned char *haddr, struct sk_buff *skb)
 	__be32 paddr;
 	struct neighbour *n;
 
-	if (!skb->dst) {
+	if (!skb_dst(skb)) {
 		printk(KERN_DEBUG "arp_find is called with dst==NULL\n");
 		kfree_skb(skb);
 		return 1;
 	}
 
-	paddr = skb->rtable->rt_gateway;
+	paddr = skb_rtable(skb)->rt_gateway;
 
 	if (arp_set_predefined(inet_addr_type(dev_net(dev), paddr), haddr, paddr, dev))
 		return 0;
@@ -506,7 +508,7 @@ int arp_bind_neighbour(struct dst_entry *dst)
 	if (dev == NULL)
 		return -EINVAL;
 	if (n == NULL) {
-		__be32 nexthop = ((struct rtable*)dst)->rt_gateway;
+		__be32 nexthop = ((struct rtable *)dst)->rt_gateway;
 		if (dev->flags&(IFF_LOOPBACK|IFF_POINTOPOINT))
 			nexthop = 0;
 		n = __neigh_lookup_errno(
@@ -524,11 +526,14 @@ int arp_bind_neighbour(struct dst_entry *dst)
 /*
  * Check if we can use proxy ARP for this path
  */
-
-static inline int arp_fwd_proxy(struct in_device *in_dev, struct rtable *rt)
+static inline int arp_fwd_proxy(struct in_device *in_dev,
+				struct net_device *dev,	struct rtable *rt)
 {
 	struct in_device *out_dev;
 	int imi, omi = -1;
+
+	if (rt->u.dst.dev == dev)
+		return 0;
 
 	if (!IN_DEV_PROXY_ARP(in_dev))
 		return 0;
@@ -545,6 +550,43 @@ static inline int arp_fwd_proxy(struct in_device *in_dev, struct rtable *rt)
 		in_dev_put(out_dev);
 	}
 	return (omi != imi && omi != -1);
+}
+
+/*
+ * Check for RFC3069 proxy arp private VLAN (allow to send back to same dev)
+ *
+ * RFC3069 supports proxy arp replies back to the same interface.  This
+ * is done to support (ethernet) switch features, like RFC 3069, where
+ * the individual ports are not allowed to communicate with each
+ * other, BUT they are allowed to talk to the upstream router.  As
+ * described in RFC 3069, it is possible to allow these hosts to
+ * communicate through the upstream router, by proxy_arp'ing.
+ *
+ * RFC 3069: "VLAN Aggregation for Efficient IP Address Allocation"
+ *
+ *  This technology is known by different names:
+ *    In RFC 3069 it is called VLAN Aggregation.
+ *    Cisco and Allied Telesyn call it Private VLAN.
+ *    Hewlett-Packard call it Source-Port filtering or port-isolation.
+ *    Ericsson call it MAC-Forced Forwarding (RFC Draft).
+ *
+ */
+static inline int arp_fwd_pvlan(struct in_device *in_dev,
+				struct net_device *dev,	struct rtable *rt,
+				__be32 sip, __be32 tip)
+{
+	/* Private VLAN is only concerned about the same ethernet segment */
+	if (rt->u.dst.dev != dev)
+		return 0;
+
+	/* Don't reply on self probes (often done by windowz boxes)*/
+	if (sip == tip)
+		return 0;
+
+	if (IN_DEV_PROXY_ARP_PVLAN(in_dev))
+		return 1;
+	else
+		return 0;
 }
 
 /*
@@ -619,13 +661,13 @@ struct sk_buff *arp_create(int type, int ptype, __be32 dest_ip,
 #endif
 #endif
 
-#ifdef CONFIG_FDDI
+#if defined(CONFIG_FDDI) || defined(CONFIG_FDDI_MODULE)
 	case ARPHRD_FDDI:
 		arp->ar_hrd = htons(ARPHRD_ETHER);
 		arp->ar_pro = htons(ETH_P_IP);
 		break;
 #endif
-#ifdef CONFIG_TR
+#if defined(CONFIG_TR) || defined(CONFIG_TR_MODULE)
 	case ARPHRD_IEEE802_TR:
 		arp->ar_hrd = htons(ARPHRD_IEEE802);
 		arp->ar_pro = htons(ETH_P_IP);
@@ -640,14 +682,14 @@ struct sk_buff *arp_create(int type, int ptype, __be32 dest_ip,
 	arp_ptr=(unsigned char *)(arp+1);
 
 	memcpy(arp_ptr, src_hw, dev->addr_len);
-	arp_ptr+=dev->addr_len;
-	memcpy(arp_ptr, &src_ip,4);
-	arp_ptr+=4;
+	arp_ptr += dev->addr_len;
+	memcpy(arp_ptr, &src_ip, 4);
+	arp_ptr += 4;
 	if (target_hw != NULL)
 		memcpy(arp_ptr, target_hw, dev->addr_len);
 	else
 		memset(arp_ptr, 0, dev->addr_len);
-	arp_ptr+=dev->addr_len;
+	arp_ptr += dev->addr_len;
 	memcpy(arp_ptr, &dest_ip, 4);
 
 	return skb;
@@ -814,27 +856,30 @@ static int arp_process(struct sk_buff *skb)
 	if (arp->ar_op == htons(ARPOP_REQUEST) &&
 	    ip_route_input(skb, tip, sip, 0, dev) == 0) {
 
-		rt = skb->rtable;
+		rt = skb_rtable(skb);
 		addr_type = rt->rt_type;
 
 		if (addr_type == RTN_LOCAL) {
-			n = neigh_event_ns(&arp_tbl, sha, &sip, dev);
-			if (n) {
-				int dont_send = 0;
+			int dont_send = 0;
 
-				if (!dont_send)
-					dont_send |= arp_ignore(in_dev,sip,tip);
-				if (!dont_send && IN_DEV_ARPFILTER(in_dev))
-					dont_send |= arp_filter(sip,tip,dev);
-				if (!dont_send)
+			if (!dont_send)
+				dont_send |= arp_ignore(in_dev,sip,tip);
+			if (!dont_send && IN_DEV_ARPFILTER(in_dev))
+				dont_send |= arp_filter(sip,tip,dev);
+			if (!dont_send) {
+				n = neigh_event_ns(&arp_tbl, sha, &sip, dev);
+				if (n) {
 					arp_send(ARPOP_REPLY,ETH_P_ARP,sip,dev,tip,sha,dev->dev_addr,sha);
-
-				neigh_release(n);
+					neigh_release(n);
+				}
 			}
 			goto out;
 		} else if (IN_DEV_FORWARD(in_dev)) {
-			    if (addr_type == RTN_UNICAST  && rt->u.dst.dev != dev &&
-			     (arp_fwd_proxy(in_dev, rt) || pneigh_lookup(&arp_tbl, net, &tip, dev, 0))) {
+			if (addr_type == RTN_UNICAST  &&
+			    (arp_fwd_proxy(in_dev, dev, rt) ||
+			     arp_fwd_pvlan(in_dev, dev, rt, sip, tip) ||
+			     pneigh_lookup(&arp_tbl, net, &tip, dev, 0)))
+			{
 				n = neigh_event_ns(&arp_tbl, sha, &sip, dev);
 				if (n)
 					neigh_release(n);
@@ -863,7 +908,8 @@ static int arp_process(struct sk_buff *skb)
 		   devices (strip is candidate)
 		 */
 		if (n == NULL &&
-		    arp->ar_op == htons(ARPOP_REPLY) &&
+		    (arp->ar_op == htons(ARPOP_REPLY) ||
+		     (arp->ar_op == htons(ARPOP_REQUEST) && tip == sip)) &&
 		    inet_addr_type(net, sip) == RTN_UNICAST)
 			n = __neigh_lookup(&arp_tbl, &sip, dev, 1);
 	}
@@ -892,7 +938,7 @@ static int arp_process(struct sk_buff *skb)
 out:
 	if (in_dev)
 		in_dev_put(in_dev);
-	kfree_skb(skb);
+	consume_skb(skb);
 	return 0;
 }
 
@@ -1005,7 +1051,7 @@ static int arp_req_set(struct net *net, struct arpreq *r,
 			return -EINVAL;
 	}
 	switch (dev->type) {
-#ifdef CONFIG_FDDI
+#if defined(CONFIG_FDDI) || defined(CONFIG_FDDI_MODULE)
 	case ARPHRD_FDDI:
 		/*
 		 * According to RFC 1390, FDDI devices should accept ARP
@@ -1225,8 +1271,8 @@ void arp_ifdown(struct net_device *dev)
  *	Called once on startup.
  */
 
-static struct packet_type arp_packet_type = {
-	.type =	__constant_htons(ETH_P_ARP),
+static struct packet_type arp_packet_type __read_mostly = {
+	.type =	cpu_to_be16(ETH_P_ARP),
 	.func =	arp_rcv,
 };
 
@@ -1239,8 +1285,7 @@ void __init arp_init(void)
 	dev_add_pack(&arp_packet_type);
 	arp_proc_init();
 #ifdef CONFIG_SYSCTL
-	neigh_sysctl_register(NULL, &arp_tbl.parms, NET_IPV4,
-			      NET_IPV4_NEIGH, "ipv4", NULL, NULL);
+	neigh_sysctl_register(NULL, &arp_tbl.parms, "ipv4", NULL);
 #endif
 	register_netdevice_notifier(&arp_netdev_notifier);
 }
@@ -1304,11 +1349,13 @@ static void arp_format_neigh_entry(struct seq_file *seq,
 		hbuffer[k++] = hex_asc_lo(n->ha[j]);
 		hbuffer[k++] = ':';
 	}
-	hbuffer[--k] = 0;
+	if (k != 0)
+		--k;
+	hbuffer[k] = 0;
 #if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 	}
 #endif
-	sprintf(tbuf, NIPQUAD_FMT, NIPQUAD(*(u32*)n->primary_key));
+	sprintf(tbuf, "%pI4", n->primary_key);
 	seq_printf(seq, "%-16s 0x%-10x0x%-10x%s     *        %s\n",
 		   tbuf, hatype, arp_state_to_flags(n), hbuffer, dev->name);
 	read_unlock(&n->lock);
@@ -1321,7 +1368,7 @@ static void arp_format_pneigh_entry(struct seq_file *seq,
 	int hatype = dev ? dev->type : 0;
 	char tbuf[16];
 
-	sprintf(tbuf, NIPQUAD_FMT, NIPQUAD(*(u32*)n->key));
+	sprintf(tbuf, "%pI4", n->key);
 	seq_printf(seq, "%-16s 0x%-10x0x%-10x%s     *        %s\n",
 		   tbuf, hatype, ATF_PUBL | ATF_PERM, "00:00:00:00:00:00",
 		   dev ? dev->name : "*");

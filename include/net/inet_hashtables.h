@@ -41,8 +41,8 @@
  * I'll experiment with dynamic table growth later.
  */
 struct inet_ehash_bucket {
-	struct hlist_head chain;
-	struct hlist_head twchain;
+	struct hlist_nulls_head chain;
+	struct hlist_nulls_head twchain;
 };
 
 /* There are a few simple rules, which allow for local port reuse by
@@ -77,19 +77,39 @@ struct inet_ehash_bucket {
  * ports are created in O(1) time?  I thought so. ;-)	-DaveM
  */
 struct inet_bind_bucket {
+#ifdef CONFIG_NET_NS
 	struct net		*ib_net;
+#endif
 	unsigned short		port;
 	signed short		fastreuse;
+	int			num_owners;
 	struct hlist_node	node;
 	struct hlist_head	owners;
 };
 
-#define inet_bind_bucket_for_each(tb, node, head) \
-	hlist_for_each_entry(tb, node, head, node)
+static inline struct net *ib_net(struct inet_bind_bucket *ib)
+{
+	return read_pnet(&ib->ib_net);
+}
+
+#define inet_bind_bucket_for_each(tb, pos, head) \
+	hlist_for_each_entry(tb, pos, head, node)
 
 struct inet_bind_hashbucket {
 	spinlock_t		lock;
 	struct hlist_head	chain;
+};
+
+/*
+ * Sockets can be hashed in established or listening table
+ * We must use different 'nulls' end-of-chain value for listening
+ * hash table, or we might find a socket that was closed and
+ * reallocated/inserted into established hash table
+ */
+#define LISTENING_NULLS_BASE (1U << 29)
+struct inet_listen_hashbucket {
+	spinlock_t		lock;
+	struct hlist_nulls_head	head;
 };
 
 /* This is for listening sockets, thus all sockets which possess wildcards. */
@@ -104,8 +124,8 @@ struct inet_hashinfo {
 	 * TIME_WAIT sockets use a separate chain (twchain).
 	 */
 	struct inet_ehash_bucket	*ehash;
-	rwlock_t			*ehash_locks;
-	unsigned int			ehash_size;
+	spinlock_t			*ehash_locks;
+	unsigned int			ehash_mask;
 	unsigned int			ehash_locks_mask;
 
 	/* Ok, let's try this, I give up, we do need a local binding
@@ -114,34 +134,34 @@ struct inet_hashinfo {
 	struct inet_bind_hashbucket	*bhash;
 
 	unsigned int			bhash_size;
-	/* Note : 4 bytes padding on 64 bit arches */
+	/* 4 bytes hole on 64 bit */
 
-	/* All sockets in TCP_LISTEN state will be in here.  This is the only
-	 * table where wildcard'd TCP sockets can exist.  Hash function here
-	 * is just local port number.
-	 */
-	struct hlist_head		listening_hash[INET_LHTABLE_SIZE];
+	struct kmem_cache		*bind_bucket_cachep;
 
 	/* All the above members are written once at bootup and
 	 * never written again _or_ are predominantly read-access.
 	 *
 	 * Now align to a new cache line as all the following members
-	 * are often dirty.
+	 * might be often dirty.
 	 */
-	rwlock_t			lhash_lock ____cacheline_aligned;
-	atomic_t			lhash_users;
-	wait_queue_head_t		lhash_wait;
-	struct kmem_cache			*bind_bucket_cachep;
+	/* All sockets in TCP_LISTEN state will be in here.  This is the only
+	 * table where wildcard'd TCP sockets can exist.  Hash function here
+	 * is just local port number.
+	 */
+	struct inet_listen_hashbucket	listening_hash[INET_LHTABLE_SIZE]
+					____cacheline_aligned_in_smp;
+
+	atomic_t			bsockets;
 };
 
 static inline struct inet_ehash_bucket *inet_ehash_bucket(
 	struct inet_hashinfo *hashinfo,
 	unsigned int hash)
 {
-	return &hashinfo->ehash[hash & (hashinfo->ehash_size - 1)];
+	return &hashinfo->ehash[hash & hashinfo->ehash_mask];
 }
 
-static inline rwlock_t *inet_ehash_lockp(
+static inline spinlock_t *inet_ehash_lockp(
 	struct inet_hashinfo *hashinfo,
 	unsigned int hash)
 {
@@ -164,18 +184,18 @@ static inline int inet_ehash_locks_alloc(struct inet_hashinfo *hashinfo)
 		size = 2048;
 	if (nr_pcpus >= 32)
 		size = 4096;
-	if (sizeof(rwlock_t) != 0) {
+	if (sizeof(spinlock_t) != 0) {
 #ifdef CONFIG_NUMA
-		if (size * sizeof(rwlock_t) > PAGE_SIZE)
-			hashinfo->ehash_locks = vmalloc(size * sizeof(rwlock_t));
+		if (size * sizeof(spinlock_t) > PAGE_SIZE)
+			hashinfo->ehash_locks = vmalloc(size * sizeof(spinlock_t));
 		else
 #endif
-		hashinfo->ehash_locks =	kmalloc(size * sizeof(rwlock_t),
+		hashinfo->ehash_locks =	kmalloc(size * sizeof(spinlock_t),
 						GFP_KERNEL);
 		if (!hashinfo->ehash_locks)
 			return ENOMEM;
 		for (i = 0; i < size; i++)
-			rwlock_init(&hashinfo->ehash_locks[i]);
+			spin_lock_init(&hashinfo->ehash_locks[i]);
 	}
 	hashinfo->ehash_locks_mask = size - 1;
 	return 0;
@@ -186,7 +206,7 @@ static inline void inet_ehash_locks_free(struct inet_hashinfo *hashinfo)
 	if (hashinfo->ehash_locks) {
 #ifdef CONFIG_NUMA
 		unsigned int size = (hashinfo->ehash_locks_mask + 1) *
-							sizeof(rwlock_t);
+							sizeof(spinlock_t);
 		if (size > PAGE_SIZE)
 			vfree(hashinfo->ehash_locks);
 		else
@@ -221,7 +241,7 @@ static inline int inet_lhashfn(struct net *net, const unsigned short num)
 
 static inline int inet_sk_listen_hashfn(const struct sock *sk)
 {
-	return inet_lhashfn(sock_net(sk), inet_sk(sk)->num);
+	return inet_lhashfn(sock_net(sk), inet_sk(sk)->inet_num);
 }
 
 /* Caller must disable local BH processing. */
@@ -229,28 +249,9 @@ extern void __inet_inherit_port(struct sock *sk, struct sock *child);
 
 extern void inet_put_port(struct sock *sk);
 
-extern void inet_listen_wlock(struct inet_hashinfo *hashinfo);
+void inet_hashinfo_init(struct inet_hashinfo *h);
 
-/*
- * - We may sleep inside this lock.
- * - If sleeping is not required (or called from BH),
- *   use plain read_(un)lock(&inet_hashinfo.lhash_lock).
- */
-static inline void inet_listen_lock(struct inet_hashinfo *hashinfo)
-{
-	/* read_lock synchronizes to candidates to writers */
-	read_lock(&hashinfo->lhash_lock);
-	atomic_inc(&hashinfo->lhash_users);
-	read_unlock(&hashinfo->lhash_lock);
-}
-
-static inline void inet_listen_unlock(struct inet_hashinfo *hashinfo)
-{
-	if (atomic_dec_and_test(&hashinfo->lhash_users))
-		wake_up(&hashinfo->lhash_wait);
-}
-
-extern void __inet_hash_nolisten(struct sock *sk);
+extern int __inet_hash_nolisten(struct sock *sk, struct inet_timewait_sock *tw);
 extern void inet_hash(struct sock *sk);
 extern void inet_unhash(struct sock *sk);
 
@@ -299,25 +300,25 @@ typedef __u64 __bitwise __addrpair;
 				   ((__force __u64)(__be32)(__saddr)));
 #endif /* __BIG_ENDIAN */
 #define INET_MATCH(__sk, __net, __hash, __cookie, __saddr, __daddr, __ports, __dif)\
-	(((__sk)->sk_hash == (__hash)) && sock_net((__sk)) == (__net)	&&	\
-	 ((*((__addrpair *)&(inet_sk(__sk)->daddr))) == (__cookie))	&&	\
-	 ((*((__portpair *)&(inet_sk(__sk)->dport))) == (__ports))	&&	\
+	(((__sk)->sk_hash == (__hash)) && net_eq(sock_net(__sk), (__net)) &&	\
+	 ((*((__addrpair *)&(inet_sk(__sk)->inet_daddr))) == (__cookie))  &&	\
+	 ((*((__portpair *)&(inet_sk(__sk)->inet_dport))) == (__ports))   &&	\
 	 (!((__sk)->sk_bound_dev_if) || ((__sk)->sk_bound_dev_if == (__dif))))
 #define INET_TW_MATCH(__sk, __net, __hash, __cookie, __saddr, __daddr, __ports, __dif)\
-	(((__sk)->sk_hash == (__hash)) && sock_net((__sk)) == (__net)	&&	\
+	(((__sk)->sk_hash == (__hash)) && net_eq(sock_net(__sk), (__net)) &&	\
 	 ((*((__addrpair *)&(inet_twsk(__sk)->tw_daddr))) == (__cookie)) &&	\
 	 ((*((__portpair *)&(inet_twsk(__sk)->tw_dport))) == (__ports)) &&	\
 	 (!((__sk)->sk_bound_dev_if) || ((__sk)->sk_bound_dev_if == (__dif))))
 #else /* 32-bit arch */
 #define INET_ADDR_COOKIE(__name, __saddr, __daddr)
 #define INET_MATCH(__sk, __net, __hash, __cookie, __saddr, __daddr, __ports, __dif)	\
-	(((__sk)->sk_hash == (__hash)) && sock_net((__sk)) == (__net)	&&	\
-	 (inet_sk(__sk)->daddr		== (__saddr))		&&	\
-	 (inet_sk(__sk)->rcv_saddr	== (__daddr))		&&	\
-	 ((*((__portpair *)&(inet_sk(__sk)->dport))) == (__ports))	&&	\
+	(((__sk)->sk_hash == (__hash)) && net_eq(sock_net(__sk), (__net))	&&	\
+	 (inet_sk(__sk)->inet_daddr	== (__saddr))		&&	\
+	 (inet_sk(__sk)->inet_rcv_saddr	== (__daddr))		&&	\
+	 ((*((__portpair *)&(inet_sk(__sk)->inet_dport))) == (__ports))	&&	\
 	 (!((__sk)->sk_bound_dev_if) || ((__sk)->sk_bound_dev_if == (__dif))))
 #define INET_TW_MATCH(__sk, __net, __hash,__cookie, __saddr, __daddr, __ports, __dif)	\
-	(((__sk)->sk_hash == (__hash)) && sock_net((__sk)) == (__net)	&&	\
+	(((__sk)->sk_hash == (__hash)) && net_eq(sock_net(__sk), (__net))	&&	\
 	 (inet_twsk(__sk)->tw_daddr	== (__saddr))		&&	\
 	 (inet_twsk(__sk)->tw_rcv_saddr	== (__daddr))		&&	\
 	 ((*((__portpair *)&(inet_twsk(__sk)->tw_dport))) == (__ports)) &&	\
@@ -384,16 +385,18 @@ static inline struct sock *__inet_lookup_skb(struct inet_hashinfo *hashinfo,
 	if (unlikely(sk = skb_steal_sock(skb)))
 		return sk;
 	else
-		return __inet_lookup(dev_net(skb->dst->dev), hashinfo,
+		return __inet_lookup(dev_net(skb_dst(skb)->dev), hashinfo,
 				     iph->saddr, sport,
 				     iph->daddr, dport, inet_iif(skb));
 }
 
 extern int __inet_hash_connect(struct inet_timewait_death_row *death_row,
-		struct sock *sk, u32 port_offset,
+		struct sock *sk,
+		u32 port_offset,
 		int (*check_established)(struct inet_timewait_death_row *,
 			struct sock *, __u16, struct inet_timewait_sock **),
-			       void (*hash)(struct sock *sk));
+		int (*hash)(struct sock *sk, struct inet_timewait_sock *twp));
+
 extern int inet_hash_connect(struct inet_timewait_death_row *death_row,
 			     struct sock *sk);
 #endif /* _INET_HASHTABLES_H */

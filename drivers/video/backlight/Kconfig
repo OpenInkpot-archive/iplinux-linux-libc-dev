@@ -31,6 +31,20 @@ config LCD_CORGI
 	  Say y here to support the LCD panels usually found on SHARP
 	  corgi (C7x0) and spitz (Cxx00) models.
 
+config LCD_L4F00242T03
+	tristate "Epson L4F00242T03 LCD"
+	depends on LCD_CLASS_DEVICE && SPI_MASTER && GENERIC_GPIO
+	help
+	  SPI driver for Epson L4F00242T03. This provides basic support
+	  for init and powering the LCD up/down through a sysfs interface.
+
+config LCD_LMS283GF05
+	tristate "Samsung LMS283GF05 LCD"
+	depends on LCD_CLASS_DEVICE && SPI_MASTER && GENERIC_GPIO
+	help
+	  SPI driver for Samsung LMS283GF05. This provides basic support
+	  for powering the LCD up/down through a sysfs interface.
+
 config LCD_LTV350QV
 	tristate "Samsung LTV350QV LCD Panel"
 	depends on LCD_CLASS_DEVICE && SPI_MASTER
@@ -52,11 +66,11 @@ config LCD_ILI9320
 	  then say y to include a power driver for it.
 
 config LCD_TDO24M
-	tristate "Toppoly TDO24M LCD Panels support"
+	tristate "Toppoly TDO24M  and TDO35S LCD Panels support"
 	depends on LCD_CLASS_DEVICE && SPI_MASTER
 	default n
 	help
-	  If you have a Toppoly TDO24M series LCD panel, say y here to
+	  If you have a Toppoly TDO24M/TDO35S series LCD panel, say y here to
 	  include the support for it.
 
 config LCD_VGG2432A4
@@ -84,6 +98,15 @@ config LCD_TOSA
 	  If you have an Sharp SL-6000 Zaurus say Y to enable a driver
 	  for its LCD.
 
+config LCD_HP700
+	tristate "HP Jornada 700 series LCD Driver"
+	depends on LCD_CLASS_DEVICE
+	depends on SA1100_JORNADA720_SSP && !PREEMPT
+	default y
+	help
+	  If you have an HP Jornada 700 series handheld (710/720/728)
+	  say Y to enable LCD control driver.
+
 #
 # Backlight
 #
@@ -101,7 +124,7 @@ config BACKLIGHT_CLASS_DEVICE
 config BACKLIGHT_ATMEL_LCDC
 	bool "Atmel LCDC Contrast-as-Backlight control"
 	depends on BACKLIGHT_CLASS_DEVICE && FB_ATMEL
-	default y if MACH_SAM9261EK || MACH_SAM9263EK
+	default y if MACH_SAM9261EK || MACH_SAM9G10EK || MACH_SAM9263EK
 	help
 	  This provides a backlight control internal to the Atmel LCDC
 	  driver.  If the LCD "contrast control" on your board is wired
@@ -123,17 +146,14 @@ config BACKLIGHT_ATMEL_PWM
 	  To compile this driver as a module, choose M here: the module will be
 	  called atmel-pwm-bl.
 
-config BACKLIGHT_CORGI
-	tristate "Generic (aka Sharp Corgi) Backlight Driver (DEPRECATED)"
+config BACKLIGHT_GENERIC
+	tristate "Generic (aka Sharp Corgi) Backlight Driver"
 	depends on BACKLIGHT_CLASS_DEVICE
-	default n
+	default y
 	help
 	  Say y to enable the generic platform backlight driver previously
 	  known as the Corgi backlight driver. If you have a Sharp Zaurus
-	  SL-C7xx, SL-Cxx00 or SL-6000x say y. Most users can say n.
-
-	  Note: this driver is marked as deprecated, try enable SPI and
-	  use the new corgi_lcd driver with integrated backlight control
+	  SL-C7xx, SL-Cxx00 or SL-6000x say y.
 
 config BACKLIGHT_LOCOMO
 	tristate "Sharp LOCOMO LCD/Backlight Driver"
@@ -159,6 +179,15 @@ config BACKLIGHT_HP680
 	help
 	  If you have a HP Jornada 680, say y to enable the
 	  backlight driver.
+
+config BACKLIGHT_HP700
+	tristate "HP Jornada 700 series Backlight Driver"
+	depends on BACKLIGHT_CLASS_DEVICE
+	depends on SA1100_JORNADA720_SSP && !PREEMPT
+	default y
+	help
+	  If you have an HP Jornada 700 series,
+	  say Y to include backlight control driver.
 
 config BACKLIGHT_PROGEAR
 	tristate "Frontpath ProGear Backlight Driver"
@@ -190,6 +219,13 @@ config BACKLIGHT_DA903X
 	  If you have a LCD backlight connected to the WLED output of DA9030
 	  or DA9034 WLED output, say Y here to enable this driver.
 
+config BACKLIGHT_MAX8925
+	tristate "Backlight driver for MAX8925"
+	depends on BACKLIGHT_CLASS_DEVICE && MFD_MAX8925
+	help
+	  If you have a LCD backlight connected to the WLED output of MAX8925
+	  WLED output, say Y here to enable this driver.
+
 config BACKLIGHT_MBP_NVIDIA
        tristate "MacBook Pro Nvidia Backlight Driver"
        depends on BACKLIGHT_CLASS_DEVICE && X86
@@ -214,3 +250,35 @@ config BACKLIGHT_SAHARA
 	help
 	  If you have a Tabletkiosk Sahara Touch-iT, say y to enable the
 	  backlight driver.
+
+config BACKLIGHT_WM831X
+	tristate "WM831x PMIC Backlight Driver"
+	depends on BACKLIGHT_CLASS_DEVICE && MFD_WM831X
+	help
+	  If you have a backlight driven by the ISINK and DCDC of a
+	  WM831x PMIC say y to enable the backlight driver for it.
+
+config BACKLIGHT_ADX
+	tristate "Avionic Design Xanthos Backlight Driver"
+	depends on BACKLIGHT_CLASS_DEVICE && ARCH_PXA_ADX
+	default y
+	help
+	  Say Y to enable the backlight driver on Avionic Design Xanthos-based
+	  boards.
+
+config BACKLIGHT_ADP5520
+	tristate "Backlight Driver for ADP5520/ADP5501 using WLED"
+	depends on BACKLIGHT_CLASS_DEVICE && PMIC_ADP5520
+	help
+	  If you have a LCD backlight connected to the BST/BL_SNK output of
+	  ADP5520 or ADP5501, say Y here to enable this driver.
+
+	  To compile this driver as a module, choose M here: the module will
+	  be called adp5520_bl.
+
+config BACKLIGHT_88PM860X
+	tristate "Backlight Driver for 88PM8606 using WLED"
+	depends on BACKLIGHT_CLASS_DEVICE && MFD_88PM860X
+	help
+	  Say Y to enable the backlight driver for Marvell 88PM8606.
+

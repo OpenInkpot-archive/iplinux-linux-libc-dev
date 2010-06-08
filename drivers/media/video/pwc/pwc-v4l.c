@@ -30,7 +30,6 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/poll.h>
-#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <asm/io.h>
 
@@ -337,8 +336,7 @@ static int pwc_vidioc_set_fmt(struct pwc_device *pdev, struct v4l2_format *f)
 
 }
 
-int pwc_video_do_ioctl(struct inode *inode, struct file *file,
-		       unsigned int cmd, void *arg)
+long pwc_video_do_ioctl(struct file *file, unsigned int cmd, void *arg)
 {
 	struct video_device *vdev = video_devdata(file);
 	struct pwc_device *pdev;
@@ -1034,7 +1032,7 @@ int pwc_video_do_ioctl(struct inode *inode, struct file *file,
 			if (std->index != 0)
 				return -EINVAL;
 			std->id = V4L2_STD_UNKNOWN;
-			strncpy(std->name, "webcam", sizeof(std->name));
+			strlcpy(std->name, "webcam", sizeof(std->name));
 			return 0;
 		}
 
@@ -1108,7 +1106,7 @@ int pwc_video_do_ioctl(struct inode *inode, struct file *file,
 				return -EINVAL;
 			if (buf->memory != V4L2_MEMORY_MMAP)
 				return -EINVAL;
-			if (buf->index < 0 || buf->index >= pwc_mbufs)
+			if (buf->index >= pwc_mbufs)
 				return -EINVAL;
 
 			buf->flags |= V4L2_BUF_FLAG_QUEUED;

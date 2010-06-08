@@ -58,6 +58,7 @@
 #include <linux/timer.h>
 #include <linux/pci.h>
 #include <linux/aer.h>
+#include <linux/slab.h>
 #include <asm/dma.h>
 #include <asm/io.h>
 #include <asm/system.h>
@@ -98,8 +99,11 @@ static void arcmsr_flush_hbb_cache(struct AdapterControlBlock *acb);
 static const char *arcmsr_info(struct Scsi_Host *);
 static irqreturn_t arcmsr_interrupt(struct AdapterControlBlock *acb);
 static int arcmsr_adjust_disk_queue_depth(struct scsi_device *sdev,
-								int queue_depth)
+					  int queue_depth, int reason)
 {
+	if (reason != SCSI_QDEPTH_DEFAULT)
+		return -EOPNOTSUPP;
+
 	if (queue_depth > ARCMSR_MAX_CMD_PERLUN)
 		queue_depth = ARCMSR_MAX_CMD_PERLUN;
 	scsi_adjust_queue_depth(sdev, MSG_ORDERED_TAG, queue_depth);
@@ -235,7 +239,7 @@ static int arcmsr_alloc_ccb_pool(struct AdapterControlBlock *acb)
 		uint32_t intmask_org;
 		int i, j;
 
-		acb->pmuA = ioremap(pci_resource_start(pdev, 0), pci_resource_len(pdev, 0));
+		acb->pmuA = pci_ioremap_bar(pdev, 0);
 		if (!acb->pmuA) {
 			printk(KERN_NOTICE "arcmsr%d: memory mapping region fail \n",
 							acb->host->host_no);
@@ -329,13 +333,11 @@ static int arcmsr_alloc_ccb_pool(struct AdapterControlBlock *acb)
 		reg = (struct MessageUnit_B *)(dma_coherent +
 		ARCMSR_MAX_FREECCB_NUM * sizeof(struct CommandControlBlock));
 		acb->pmuB = reg;
-		mem_base0 = ioremap(pci_resource_start(pdev, 0),
-					pci_resource_len(pdev, 0));
+		mem_base0 = pci_ioremap_bar(pdev, 0);
 		if (!mem_base0)
 			goto out;
 
-		mem_base1 = ioremap(pci_resource_start(pdev, 2),
-					pci_resource_len(pdev, 2));
+		mem_base1 = pci_ioremap_bar(pdev, 2);
 		if (!mem_base1) {
 			iounmap(mem_base0);
 			goto out;
@@ -395,9 +397,9 @@ static int arcmsr_probe(struct pci_dev *pdev,
 	acb = (struct AdapterControlBlock *)host->hostdata;
 	memset(acb, 0, sizeof (struct AdapterControlBlock));
 
-	error = pci_set_dma_mask(pdev, DMA_64BIT_MASK);
+	error = pci_set_dma_mask(pdev, DMA_BIT_MASK(64));
 	if (error) {
-		error = pci_set_dma_mask(pdev, DMA_32BIT_MASK);
+		error = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
 		if (error) {
 			printk(KERN_WARNING
 			       "scsi%d: No suitable DMA mask available\n",

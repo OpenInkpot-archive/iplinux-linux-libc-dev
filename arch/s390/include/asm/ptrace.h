@@ -172,6 +172,8 @@
 #define NUM_CRS		16
 #define NUM_ACRS	16
 
+#define NUM_CR_WORDS	3
+
 #define FPR_SIZE	8
 #define FPC_SIZE	4
 #define FPC_PAD_SIZE	4 /* gcc insists on aligning the fpregs */
@@ -272,12 +274,15 @@ typedef struct
 #define PSW_ASC_SECONDARY	0x0000800000000000UL
 #define PSW_ASC_HOME		0x0000C00000000000UL
 
-extern long psw_user32_bits;
-
 #endif /* __s390x__ */
 
+#ifdef __KERNEL__
 extern long psw_kernel_bits;
 extern long psw_user_bits;
+#ifdef CONFIG_64BIT
+extern long psw_user32_bits;
+#endif
+#endif
 
 /* This macro merges a NEW PSW mask specified by the user into
    the currently active PSW mask CURRENT, modifying only those
@@ -306,10 +311,12 @@ typedef struct
 	__u32		orig_gpr2;
 } s390_compat_regs;
 
+typedef struct
+{
+	__u32		gprs_high[NUM_GPRS];
+} s390_compat_regs_high;
 
 #ifdef __KERNEL__
-#include <asm/setup.h>
-#include <asm/page.h>
 
 /*
  * The pt_regs struct defines the way the registers are stored on
@@ -331,7 +338,7 @@ struct pt_regs
  */
 typedef struct
 {
-	unsigned long cr[3];
+	unsigned long cr[NUM_CR_WORDS];
 } per_cr_words;
 
 #define PER_EM_MASK 0xE8000000UL
@@ -482,16 +489,24 @@ struct user_regs_struct
  * These are defined as per linux/ptrace.h, which see.
  */
 #define arch_has_single_step()	(1)
-struct task_struct;
-extern void user_enable_single_step(struct task_struct *);
-extern void user_disable_single_step(struct task_struct *);
+extern void show_regs(struct pt_regs * regs);
 
 #define user_mode(regs) (((regs)->psw.mask & PSW_MASK_PSTATE) != 0)
 #define instruction_pointer(regs) ((regs)->psw.addr & PSW_ADDR_INSN)
 #define user_stack_pointer(regs)((regs)->gprs[15])
 #define regs_return_value(regs)((regs)->gprs[2])
 #define profile_pc(regs) instruction_pointer(regs)
-extern void show_regs(struct pt_regs * regs);
+
+int regs_query_register_offset(const char *name);
+const char *regs_query_register_name(unsigned int offset);
+unsigned long regs_get_register(struct pt_regs *regs, unsigned int offset);
+unsigned long regs_get_kernel_stack_nth(struct pt_regs *regs, unsigned int n);
+
+static inline unsigned long kernel_stack_pointer(struct pt_regs *regs)
+{
+	return regs->gprs[15] & PSW_ADDR_INSN;
+}
+
 #endif /* __KERNEL__ */
 #endif /* __ASSEMBLY__ */
 

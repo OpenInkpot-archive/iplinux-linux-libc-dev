@@ -13,8 +13,8 @@
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/mount.h>
-#include <linux/smp_lock.h>
 #include <linux/init.h>
 #include <linux/idr.h>
 #include <linux/namei.h>
@@ -38,7 +38,7 @@ static int proc_match(int len, const char *name, struct proc_dir_entry *de)
 #define PROC_BLOCK_SIZE	(PAGE_SIZE - 1024)
 
 static ssize_t
-proc_file_read(struct file *file, char __user *buf, size_t nbytes,
+__proc_file_read(struct file *file, char __user *buf, size_t nbytes,
 	       loff_t *ppos)
 {
 	struct inode * inode = file->f_path.dentry->d_inode;
@@ -184,19 +184,47 @@ proc_file_read(struct file *file, char __user *buf, size_t nbytes,
 }
 
 static ssize_t
+proc_file_read(struct file *file, char __user *buf, size_t nbytes,
+	       loff_t *ppos)
+{
+	struct proc_dir_entry *pde = PDE(file->f_path.dentry->d_inode);
+	ssize_t rv = -EIO;
+
+	spin_lock(&pde->pde_unload_lock);
+	if (!pde->proc_fops) {
+		spin_unlock(&pde->pde_unload_lock);
+		return rv;
+	}
+	pde->pde_users++;
+	spin_unlock(&pde->pde_unload_lock);
+
+	rv = __proc_file_read(file, buf, nbytes, ppos);
+
+	pde_users_dec(pde);
+	return rv;
+}
+
+static ssize_t
 proc_file_write(struct file *file, const char __user *buffer,
 		size_t count, loff_t *ppos)
 {
-	struct inode *inode = file->f_path.dentry->d_inode;
-	struct proc_dir_entry * dp;
-	
-	dp = PDE(inode);
+	struct proc_dir_entry *pde = PDE(file->f_path.dentry->d_inode);
+	ssize_t rv = -EIO;
 
-	if (!dp->write_proc)
-		return -EIO;
+	if (pde->write_proc) {
+		spin_lock(&pde->pde_unload_lock);
+		if (!pde->proc_fops) {
+			spin_unlock(&pde->pde_unload_lock);
+			return rv;
+		}
+		pde->pde_users++;
+		spin_unlock(&pde->pde_unload_lock);
 
-	/* FIXME: does this routine need ppos?  probably... */
-	return dp->write_proc(file, buffer, count, dp->data);
+		/* FIXME: does this routine need ppos?  probably... */
+		rv = pde->write_proc(file, buffer, count, pde->data);
+		pde_users_dec(pde);
+	}
+	return rv;
 }
 
 
@@ -264,19 +292,17 @@ static const struct inode_operations proc_file_inode_operations = {
  * returns the struct proc_dir_entry for "/proc/tty/driver", and
  * returns "serial" in residual.
  */
-static int xlate_proc_name(const char *name,
-			   struct proc_dir_entry **ret, const char **residual)
+static int __xlate_proc_name(const char *name, struct proc_dir_entry **ret,
+			     const char **residual)
 {
 	const char     		*cp = name, *next;
 	struct proc_dir_entry	*de;
 	int			len;
-	int 			rtn = 0;
 
 	de = *ret;
 	if (!de)
 		de = &proc_root;
 
-	spin_lock(&proc_subdir_lock);
 	while (1) {
 		next = strchr(cp, '/');
 		if (!next)
@@ -288,16 +314,25 @@ static int xlate_proc_name(const char *name,
 				break;
 		}
 		if (!de) {
-			rtn = -ENOENT;
-			goto out;
+			WARN(1, "name '%s'\n", name);
+			return -ENOENT;
 		}
 		cp += len + 1;
 	}
 	*residual = cp;
 	*ret = de;
-out:
+	return 0;
+}
+
+static int xlate_proc_name(const char *name, struct proc_dir_entry **ret,
+			   const char **residual)
+{
+	int rv;
+
+	spin_lock(&proc_subdir_lock);
+	rv = __xlate_proc_name(name, ret, residual);
 	spin_unlock(&proc_subdir_lock);
-	return rtn;
+	return rv;
 }
 
 static DEFINE_IDA(proc_inum_ida);
@@ -308,6 +343,21 @@ static DEFINE_SPINLOCK(proc_inum_lock); /* protects the above */
 /*
  * Return an inode number between PROC_DYNAMIC_FIRST and
  * 0xffffffff, or zero on failure.
+ *
+ * Current inode allocations in the proc-fs (hex-numbers):
+ *
+ * 00000000		reserved
+ * 00000001-00000fff	static entries	(goners)
+ *      001		root-ino
+ *
+ * 00001000-00001fff	unused
+ * 0001xxxx-7fffxxxx	pid-dir entries for pid 1-7fff
+ * 80000000-efffffff	unused
+ * f0000000-ffffffff	dynamic entries
+ *
+ * Goal:
+ *	Once we split the thing into several virtual filesystems,
+ *	we will get rid of magical ranges (and this comment, BTW).
  */
 static unsigned int get_inode_number(void)
 {
@@ -364,7 +414,7 @@ static int proc_delete_dentry(struct dentry * dentry)
 	return 1;
 }
 
-static struct dentry_operations proc_dentry_operations =
+static const struct dentry_operations proc_dentry_operations =
 {
 	.d_delete	= proc_delete_dentry,
 };
@@ -379,7 +429,6 @@ struct dentry *proc_lookup_de(struct proc_dir_entry *de, struct inode *dir,
 	struct inode *inode = NULL;
 	int error = -ENOENT;
 
-	lock_kernel();
 	spin_lock(&proc_subdir_lock);
 	for (de = de->subdir; de ; de = de->next) {
 		if (de->namelen != dentry->d_name.len)
@@ -388,7 +437,7 @@ struct dentry *proc_lookup_de(struct proc_dir_entry *de, struct inode *dir,
 			unsigned int ino;
 
 			ino = de->low_ino;
-			de_get(de);
+			pde_get(de);
 			spin_unlock(&proc_subdir_lock);
 			error = -EINVAL;
 			inode = proc_get_inode(dir->i_sb, ino, de);
@@ -397,7 +446,6 @@ struct dentry *proc_lookup_de(struct proc_dir_entry *de, struct inode *dir,
 	}
 	spin_unlock(&proc_subdir_lock);
 out_unlock:
-	unlock_kernel();
 
 	if (inode) {
 		dentry->d_op = &proc_dentry_operations;
@@ -405,7 +453,7 @@ out_unlock:
 		return NULL;
 	}
 	if (de)
-		de_put(de);
+		pde_put(de);
 	return ERR_PTR(error);
 }
 
@@ -431,8 +479,6 @@ int proc_readdir_de(struct proc_dir_entry *de, struct file *filp, void *dirent,
 	int i;
 	struct inode *inode = filp->f_path.dentry->d_inode;
 	int ret = 0;
-
-	lock_kernel();
 
 	ino = inode->i_ino;
 	i = filp->f_pos;
@@ -471,23 +517,23 @@ int proc_readdir_de(struct proc_dir_entry *de, struct file *filp, void *dirent,
 				struct proc_dir_entry *next;
 
 				/* filldir passes info to user space */
-				de_get(de);
+				pde_get(de);
 				spin_unlock(&proc_subdir_lock);
 				if (filldir(dirent, de->name, de->namelen, filp->f_pos,
 					    de->low_ino, de->mode >> 12) < 0) {
-					de_put(de);
+					pde_put(de);
 					goto out;
 				}
 				spin_lock(&proc_subdir_lock);
 				filp->f_pos++;
 				next = de->next;
-				de_put(de);
+				pde_put(de);
 				de = next;
 			} while (de);
 			spin_unlock(&proc_subdir_lock);
 	}
 	ret = 1;
-out:	unlock_kernel();
+out:
 	return ret;	
 }
 
@@ -504,6 +550,7 @@ int proc_readdir(struct file *filp, void *dirent, filldir_t filldir)
  * the /proc directory.
  */
 static const struct file_operations proc_dir_operations = {
+	.llseek			= generic_file_llseek,
 	.read			= generic_read_dir,
 	.readdir		= proc_readdir,
 };
@@ -623,6 +670,7 @@ struct proc_dir_entry *proc_symlink(const char *name,
 	}
 	return ent;
 }
+EXPORT_SYMBOL(proc_symlink);
 
 struct proc_dir_entry *proc_mkdir_mode(const char *name, mode_t mode,
 		struct proc_dir_entry *parent)
@@ -661,6 +709,7 @@ struct proc_dir_entry *proc_mkdir(const char *name,
 {
 	return proc_mkdir_mode(name, S_IRUGO | S_IXUGO, parent);
 }
+EXPORT_SYMBOL(proc_mkdir);
 
 struct proc_dir_entry *create_proc_entry(const char *name, mode_t mode,
 					 struct proc_dir_entry *parent)
@@ -689,6 +738,7 @@ struct proc_dir_entry *create_proc_entry(const char *name, mode_t mode,
 	}
 	return ent;
 }
+EXPORT_SYMBOL(create_proc_entry);
 
 struct proc_dir_entry *proc_create_data(const char *name, mode_t mode,
 					struct proc_dir_entry *parent,
@@ -723,8 +773,9 @@ out_free:
 out:
 	return NULL;
 }
+EXPORT_SYMBOL(proc_create_data);
 
-void free_proc_entry(struct proc_dir_entry *de)
+static void free_proc_entry(struct proc_dir_entry *de)
 {
 	unsigned int ino = de->low_ino;
 
@@ -738,6 +789,12 @@ void free_proc_entry(struct proc_dir_entry *de)
 	kfree(de);
 }
 
+void pde_put(struct proc_dir_entry *pde)
+{
+	if (atomic_dec_and_test(&pde->count))
+		free_proc_entry(pde);
+}
+
 /*
  * Remove a /proc entry and free it if it's not currently in use.
  */
@@ -748,11 +805,13 @@ void remove_proc_entry(const char *name, struct proc_dir_entry *parent)
 	const char *fn = name;
 	int len;
 
-	if (xlate_proc_name(name, &parent, &fn) != 0)
+	spin_lock(&proc_subdir_lock);
+	if (__xlate_proc_name(name, &parent, &fn) != 0) {
+		spin_unlock(&proc_subdir_lock);
 		return;
+	}
 	len = strlen(fn);
 
-	spin_lock(&proc_subdir_lock);
 	for (p = &parent->subdir; *p; p=&(*p)->next ) {
 		if (proc_match(len, fn, *p)) {
 			de = *p;
@@ -762,8 +821,10 @@ void remove_proc_entry(const char *name, struct proc_dir_entry *parent)
 		}
 	}
 	spin_unlock(&proc_subdir_lock);
-	if (!de)
+	if (!de) {
+		WARN(1, "name '%s'\n", name);
 		return;
+	}
 
 	spin_lock(&de->pde_unload_lock);
 	/*
@@ -806,6 +867,6 @@ continue_removing:
 	WARN(de->subdir, KERN_WARNING "%s: removing non-empty directory "
 			"'%s/%s', leaking at least '%s'\n", __func__,
 			de->parent->name, de->name, de->subdir->name);
-	if (atomic_dec_and_test(&de->count))
-		free_proc_entry(de);
+	pde_put(de);
 }
+EXPORT_SYMBOL(remove_proc_entry);

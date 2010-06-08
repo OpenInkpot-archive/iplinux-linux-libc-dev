@@ -2,7 +2,7 @@
 *******************************************************************************
 **
 **  Copyright (C) Sistina Software, Inc.  1997-2003  All rights reserved.
-**  Copyright (C) 2004-2008 Red Hat, Inc.  All rights reserved.
+**  Copyright (C) 2004-2010 Red Hat, Inc.  All rights reserved.
 **
 **  This copyrighted material is made available to anyone wishing to use,
 **  modify, copy, or redistribute it subject to the terms and conditions
@@ -99,13 +99,13 @@ struct dlm_direntry {
 
 struct dlm_dirtable {
 	struct list_head	list;
-	rwlock_t		lock;
+	spinlock_t		lock;
 };
 
 struct dlm_rsbtable {
 	struct list_head	list;
 	struct list_head	toss;
-	rwlock_t		lock;
+	spinlock_t		lock;
 };
 
 struct dlm_lkbtable {
@@ -232,11 +232,17 @@ struct dlm_lkb {
 	int8_t			lkb_status;     /* granted, waiting, convert */
 	int8_t			lkb_rqmode;	/* requested lock mode */
 	int8_t			lkb_grmode;	/* granted lock mode */
-	int8_t			lkb_bastmode;	/* requested mode */
 	int8_t			lkb_highbast;	/* highest mode bast sent for */
+
 	int8_t			lkb_wait_type;	/* type of reply waiting for */
 	int8_t			lkb_wait_count;
 	int8_t			lkb_ast_type;	/* type of ast queued for */
+	int8_t			lkb_ast_first;	/* type of first ast queued */
+
+	int8_t			lkb_bastmode;	/* req mode of queued bast */
+	int8_t			lkb_castmode;	/* gr mode of queued cast */
+	int8_t			lkb_bastmode_done; /* last delivered bastmode */
+	int8_t			lkb_castmode_done; /* last delivered castmode */
 
 	struct list_head	lkb_idtbl_list;	/* lockspace lkbtbl */
 	struct list_head	lkb_statequeue;	/* rsb g/c/w list */
@@ -245,7 +251,8 @@ struct dlm_lkb {
 	struct list_head	lkb_astqueue;	/* need ast to be sent */
 	struct list_head	lkb_ownqueue;	/* list of locks for a process */
 	struct list_head	lkb_time_list;
-	unsigned long		lkb_timestamp;
+	ktime_t			lkb_time_bast;	/* for debugging */
+	ktime_t			lkb_timestamp;
 	unsigned long		lkb_timeout_cs;
 
 	char			*lkb_lvbptr;
@@ -472,7 +479,6 @@ struct dlm_ls {
 	int			ls_low_nodeid;
 	int			ls_total_weight;
 	int			*ls_node_array;
-	gfp_t			ls_allocation;
 
 	struct dlm_rsb		ls_stub_rsb;	/* for returning errors */
 	struct dlm_lkb		ls_stub_lkb;	/* for returning errors */
@@ -481,6 +487,7 @@ struct dlm_ls {
 	struct dentry		*ls_debug_rsb_dentry; /* debugfs */
 	struct dentry		*ls_debug_waiters_dentry; /* debugfs */
 	struct dentry		*ls_debug_locks_dentry; /* debugfs */
+	struct dentry		*ls_debug_all_dentry; /* debugfs */
 
 	wait_queue_head_t	ls_uevent_wait;	/* user part of join/leave */
 	int			ls_uevent_result;

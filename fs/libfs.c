@@ -5,10 +5,13 @@
 
 #include <linux/module.h>
 #include <linux/pagemap.h>
+#include <linux/slab.h>
 #include <linux/mount.h>
 #include <linux/vfs.h>
 #include <linux/mutex.h>
 #include <linux/exportfs.h>
+#include <linux/writeback.h>
+#include <linux/buffer_head.h>
 
 #include <asm/uaccess.h>
 
@@ -44,7 +47,7 @@ static int simple_delete_dentry(struct dentry *dentry)
  */
 struct dentry *simple_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *nd)
 {
-	static struct dentry_operations simple_dentry_operations = {
+	static const struct dentry_operations simple_dentry_operations = {
 		.d_delete = simple_delete_dentry,
 	};
 
@@ -215,7 +218,7 @@ int get_sb_pseudo(struct file_system_type *fs_type, char *name,
 		return PTR_ERR(s);
 
 	s->s_flags = MS_NOUSER;
-	s->s_maxbytes = ~0ULL;
+	s->s_maxbytes = MAX_LFS_FILESIZE;
 	s->s_blocksize = PAGE_SIZE;
 	s->s_blocksize_bits = PAGE_SHIFT;
 	s->s_magic = magic;
@@ -231,7 +234,6 @@ int get_sb_pseudo(struct file_system_type *fs_type, char *name,
 	 */
 	root->i_ino = 1;
 	root->i_mode = S_IFDIR | S_IRUSR | S_IWUSR;
-	root->i_uid = root->i_gid = 0;
 	root->i_atime = root->i_mtime = root->i_ctime = CURRENT_TIME;
 	dentry = d_alloc(NULL, &d_name);
 	if (!dentry) {
@@ -243,11 +245,11 @@ int get_sb_pseudo(struct file_system_type *fs_type, char *name,
 	d_instantiate(dentry, root);
 	s->s_root = dentry;
 	s->s_flags |= MS_ACTIVE;
-	return simple_set_mnt(mnt, s);
+	simple_set_mnt(mnt, s);
+	return 0;
 
 Enomem:
-	up_write(&s->s_umount);
-	deactivate_super(s);
+	deactivate_locked_super(s);
 	return -ENOMEM;
 }
 
@@ -337,43 +339,63 @@ int simple_readpage(struct file *file, struct page *page)
 	return 0;
 }
 
-int simple_prepare_write(struct file *file, struct page *page,
-			unsigned from, unsigned to)
-{
-	if (!PageUptodate(page)) {
-		if (to - from != PAGE_CACHE_SIZE)
-			zero_user_segments(page,
-				0, from,
-				to, PAGE_CACHE_SIZE);
-	}
-	return 0;
-}
-
 int simple_write_begin(struct file *file, struct address_space *mapping,
 			loff_t pos, unsigned len, unsigned flags,
 			struct page **pagep, void **fsdata)
 {
 	struct page *page;
 	pgoff_t index;
-	unsigned from;
 
 	index = pos >> PAGE_CACHE_SHIFT;
-	from = pos & (PAGE_CACHE_SIZE - 1);
 
-	page = __grab_cache_page(mapping, index);
+	page = grab_cache_page_write_begin(mapping, index, flags);
 	if (!page)
 		return -ENOMEM;
 
 	*pagep = page;
 
-	return simple_prepare_write(file, page, from, from+len);
+	if (!PageUptodate(page) && (len != PAGE_CACHE_SIZE)) {
+		unsigned from = pos & (PAGE_CACHE_SIZE - 1);
+
+		zero_user_segments(page, 0, from, from + len, PAGE_CACHE_SIZE);
+	}
+	return 0;
 }
 
-static int simple_commit_write(struct file *file, struct page *page,
-			       unsigned from, unsigned to)
+/**
+ * simple_write_end - .write_end helper for non-block-device FSes
+ * @available: See .write_end of address_space_operations
+ * @file: 		"
+ * @mapping: 		"
+ * @pos: 		"
+ * @len: 		"
+ * @copied: 		"
+ * @page: 		"
+ * @fsdata: 		"
+ *
+ * simple_write_end does the minimum needed for updating a page after writing is
+ * done. It has the same API signature as the .write_end of
+ * address_space_operations vector. So it can just be set onto .write_end for
+ * FSes that don't need any other processing. i_mutex is assumed to be held.
+ * Block based filesystems should use generic_write_end().
+ * NOTE: Even though i_size might get updated by this function, mark_inode_dirty
+ * is not called, so a filesystem that actually does store data in .write_inode
+ * should extend on what's done here with a call to mark_inode_dirty() in the
+ * case that i_size has changed.
+ */
+int simple_write_end(struct file *file, struct address_space *mapping,
+			loff_t pos, unsigned len, unsigned copied,
+			struct page *page, void *fsdata)
 {
 	struct inode *inode = page->mapping->host;
-	loff_t pos = ((loff_t)page->index << PAGE_CACHE_SHIFT) + to;
+	loff_t last_pos = pos + copied;
+
+	/* zero the stale part of the page if we did a short copy */
+	if (copied < len) {
+		unsigned from = pos & (PAGE_CACHE_SIZE - 1);
+
+		zero_user(page, from + copied, len - copied);
+	}
 
 	if (!PageUptodate(page))
 		SetPageUptodate(page);
@@ -381,28 +403,10 @@ static int simple_commit_write(struct file *file, struct page *page,
 	 * No need to use i_size_read() here, the i_size
 	 * cannot change under us because we hold the i_mutex.
 	 */
-	if (pos > inode->i_size)
-		i_size_write(inode, pos);
+	if (last_pos > inode->i_size)
+		i_size_write(inode, last_pos);
+
 	set_page_dirty(page);
-	return 0;
-}
-
-int simple_write_end(struct file *file, struct address_space *mapping,
-			loff_t pos, unsigned len, unsigned copied,
-			struct page *page, void *fsdata)
-{
-	unsigned from = pos & (PAGE_CACHE_SIZE - 1);
-
-	/* zero the stale part of the page if we did a short copy */
-	if (copied < len) {
-		void *kaddr = kmap_atomic(page, KM_USER0);
-		memset(kaddr + from + copied, 0, len - copied);
-		flush_dcache_page(page);
-		kunmap_atomic(kaddr, KM_USER0);
-	}
-
-	simple_commit_write(file, page, from, from+copied);
-
 	unlock_page(page);
 	page_cache_release(page);
 
@@ -436,8 +440,6 @@ int simple_fill_super(struct super_block *s, int magic, struct tree_descr *files
 	 */
 	inode->i_ino = 1;
 	inode->i_mode = S_IFDIR | 0755;
-	inode->i_uid = inode->i_gid = 0;
-	inode->i_blocks = 0;
 	inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 	inode->i_op = &simple_dir_inode_operations;
 	inode->i_fop = &simple_dir_operations;
@@ -464,8 +466,6 @@ int simple_fill_super(struct super_block *s, int magic, struct tree_descr *files
 		if (!inode)
 			goto out;
 		inode->i_mode = S_IFREG | files->mode;
-		inode->i_uid = inode->i_gid = 0;
-		inode->i_blocks = 0;
 		inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 		inode->i_fop = files->ops;
 		inode->i_ino = i;
@@ -530,14 +530,18 @@ ssize_t simple_read_from_buffer(void __user *to, size_t count, loff_t *ppos,
 				const void *from, size_t available)
 {
 	loff_t pos = *ppos;
+	size_t ret;
+
 	if (pos < 0)
 		return -EINVAL;
-	if (pos >= available)
+	if (pos >= available || !count)
 		return 0;
 	if (count > available - pos)
 		count = available - pos;
-	if (copy_to_user(to, from + pos, count))
+	ret = copy_to_user(to, from + pos, count);
+	if (ret == count)
 		return -EFAULT;
+	count -= ret;
 	*ppos = pos + count;
 	return count;
 }
@@ -579,6 +583,21 @@ ssize_t memory_read_from_buffer(void *to, size_t count, loff_t *ppos,
  * possibly a read which collects the result - which is stored in a
  * file-local buffer.
  */
+
+void simple_transaction_set(struct file *file, size_t n)
+{
+	struct simple_transaction_argresp *ar = file->private_data;
+
+	BUG_ON(n > SIMPLE_TRANSACTION_LIMIT);
+
+	/*
+	 * The barrier ensures that ar->size will really remain zero until
+	 * ar->data is ready for reading.
+	 */
+	smp_mb();
+	ar->size = n;
+}
+
 char *simple_transaction_get(struct file *file, const char __user *buf, size_t size)
 {
 	struct simple_transaction_argresp *ar;
@@ -723,10 +742,11 @@ ssize_t simple_attr_write(struct file *file, const char __user *buf,
 	if (copy_from_user(attr->set_buf, buf, size))
 		goto out;
 
-	ret = len; /* claim we got the whole input */
 	attr->set_buf[size] = '\0';
 	val = simple_strtol(attr->set_buf, NULL, 0);
-	attr->set(attr->data, val);
+	ret = attr->set(attr->data, val);
+	if (ret == 0)
+		ret = len; /* on success, claim we got the whole input */
 out:
 	mutex_unlock(&attr->mutex);
 	return ret;
@@ -797,6 +817,29 @@ struct dentry *generic_fh_to_parent(struct super_block *sb, struct fid *fid,
 }
 EXPORT_SYMBOL_GPL(generic_fh_to_parent);
 
+int simple_fsync(struct file *file, struct dentry *dentry, int datasync)
+{
+	struct writeback_control wbc = {
+		.sync_mode = WB_SYNC_ALL,
+		.nr_to_write = 0, /* metadata-only; caller takes care of data */
+	};
+	struct inode *inode = dentry->d_inode;
+	int err;
+	int ret;
+
+	ret = sync_mapping_buffers(inode->i_mapping);
+	if (!(inode->i_state & I_DIRTY))
+		return ret;
+	if (datasync && !(inode->i_state & I_DIRTY_DATASYNC))
+		return ret;
+
+	err = sync_inode(inode, &wbc);
+	if (ret == 0)
+		ret = err;
+	return ret;
+}
+EXPORT_SYMBOL(simple_fsync);
+
 EXPORT_SYMBOL(dcache_dir_close);
 EXPORT_SYMBOL(dcache_dir_lseek);
 EXPORT_SYMBOL(dcache_dir_open);
@@ -808,13 +851,11 @@ EXPORT_SYMBOL(simple_write_end);
 EXPORT_SYMBOL(simple_dir_inode_operations);
 EXPORT_SYMBOL(simple_dir_operations);
 EXPORT_SYMBOL(simple_empty);
-EXPORT_SYMBOL(d_alloc_name);
 EXPORT_SYMBOL(simple_fill_super);
 EXPORT_SYMBOL(simple_getattr);
 EXPORT_SYMBOL(simple_link);
 EXPORT_SYMBOL(simple_lookup);
 EXPORT_SYMBOL(simple_pin_fs);
-EXPORT_UNUSED_SYMBOL(simple_prepare_write);
 EXPORT_SYMBOL(simple_readpage);
 EXPORT_SYMBOL(simple_release_fs);
 EXPORT_SYMBOL(simple_rename);
@@ -824,6 +865,7 @@ EXPORT_SYMBOL(simple_sync_file);
 EXPORT_SYMBOL(simple_unlink);
 EXPORT_SYMBOL(simple_read_from_buffer);
 EXPORT_SYMBOL(memory_read_from_buffer);
+EXPORT_SYMBOL(simple_transaction_set);
 EXPORT_SYMBOL(simple_transaction_get);
 EXPORT_SYMBOL(simple_transaction_read);
 EXPORT_SYMBOL(simple_transaction_release);

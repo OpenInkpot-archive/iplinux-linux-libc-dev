@@ -4,11 +4,16 @@
  * Userspace interface for accessing the
  * Access Control Lists / Control File Data Channel
  *
- * Copyright IBM Corporation 2008
+ * Copyright IBM Corporation 2008, 2009
  */
 
+#define KMSG_COMPONENT "zfcp"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+
+#include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/miscdevice.h>
+#include <asm/compat.h>
 #include <asm/ccwdev.h>
 #include "zfcp_def.h"
 #include "zfcp_ext.h"
@@ -82,19 +87,18 @@ static int zfcp_cfdc_copy_to_user(void __user  *user_buffer,
 
 static struct zfcp_adapter *zfcp_cfdc_get_adapter(u32 devno)
 {
-	struct zfcp_adapter *adapter = NULL, *cur_adapter;
-	struct ccw_dev_id dev_id;
+	char busid[9];
+	struct ccw_device *cdev;
+	struct zfcp_adapter *adapter;
 
-	read_lock_irq(&zfcp_data.config_lock);
-	list_for_each_entry(cur_adapter, &zfcp_data.adapter_list_head, list) {
-		ccw_device_get_id(cur_adapter->ccw_device, &dev_id);
-		if (dev_id.devno == devno) {
-			adapter = cur_adapter;
-			zfcp_adapter_get(adapter);
-			break;
-		}
-	}
-	read_unlock_irq(&zfcp_data.config_lock);
+	snprintf(busid, sizeof(busid), "0.0.%04x", devno);
+	cdev = get_ccwdev_by_busid(&zfcp_ccw_driver, busid);
+	if (!cdev)
+		return NULL;
+
+	adapter = zfcp_ccw_adapter_by_cdev(cdev);
+
+	put_device(&cdev->dev);
 	return adapter;
 }
 
@@ -161,7 +165,7 @@ static void zfcp_cfdc_req_to_sense(struct zfcp_cfdc_data *data,
 }
 
 static long zfcp_cfdc_dev_ioctl(struct file *file, unsigned int command,
-				unsigned long buffer)
+				unsigned long arg)
 {
 	struct zfcp_cfdc_data *data;
 	struct zfcp_cfdc_data __user *data_user;
@@ -173,7 +177,11 @@ static long zfcp_cfdc_dev_ioctl(struct file *file, unsigned int command,
 	if (command != ZFCP_CFDC_IOC)
 		return -ENOTTY;
 
-	data_user = (void __user *) buffer;
+	if (is_compat_task())
+		data_user = compat_ptr(arg);
+	else
+		data_user = (void __user *)arg;
+
 	if (!data_user)
 		return -EINVAL;
 
@@ -237,7 +245,7 @@ static long zfcp_cfdc_dev_ioctl(struct file *file, unsigned int command,
  free_sg:
 	zfcp_sg_free_table(fsf_cfdc->sg, ZFCP_CFDC_PAGES);
  adapter_put:
-	zfcp_adapter_put(adapter);
+	zfcp_ccw_adapter_put(adapter);
  free_buffer:
 	kfree(data);
  no_mem_sense:

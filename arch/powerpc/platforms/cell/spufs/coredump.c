@@ -24,6 +24,7 @@
 #include <linux/file.h>
 #include <linux/fdtable.h>
 #include <linux/fs.h>
+#include <linux/gfp.h>
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/syscalls.h>
@@ -42,7 +43,7 @@ static ssize_t do_coredump_read(int num, struct spu_context *ctx, void *buffer,
 		return spufs_coredump_read[num].read(ctx, buffer, size, off);
 
 	data = spufs_coredump_read[num].get(ctx);
-	ret = snprintf(buffer, size, "0x%.16lx", data);
+	ret = snprintf(buffer, size, "0x%.16llx", data);
 	if (ret >= size)
 		return size;
 	return ++ret; /* count trailing NULL */
@@ -54,7 +55,7 @@ static ssize_t do_coredump_read(int num, struct spu_context *ctx, void *buffer,
  */
 static int spufs_dump_write(struct file *file, const void *addr, int nr, loff_t *foffset)
 {
-	unsigned long limit = current->signal->rlim[RLIMIT_CORE].rlim_cur;
+	unsigned long limit = rlimit(RLIMIT_CORE);
 	ssize_t written;
 
 	if (*foffset + nr > limit)

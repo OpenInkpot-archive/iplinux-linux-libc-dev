@@ -12,12 +12,15 @@
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <linux/bootmem.h>
 #include <linux/highmem.h>
 #include <linux/fs.h>
 #include <linux/seq_file.h>
 #include <linux/scatterlist.h>
+#include <linux/bitmap.h>
 
+#include <asm/sections.h>
 #include <asm/page.h>
 #include <asm/pgalloc.h>
 #include <asm/pgtable.h>
@@ -240,9 +243,7 @@ void sun4c_complete_all_stores(void)
 
 	_unused = sun4c_get_context();
 	sun4c_set_context(_unused);
-#ifdef CONFIG_SUN_AUXIO
 	_unused = get_auxio();
-#endif
 }
 
 /* Bootup utility functions. */
@@ -1022,20 +1023,12 @@ static char *sun4c_lockarea(char *vaddr, unsigned long size)
 	npages = (((unsigned long)vaddr & ~PAGE_MASK) +
 		  size + (PAGE_SIZE-1)) >> PAGE_SHIFT;
 
-	scan = 0;
 	local_irq_save(flags);
-	for (;;) {
-		scan = find_next_zero_bit(sun4c_iobuffer_map,
-					  iobuffer_map_size, scan);
-		if ((base = scan) + npages > iobuffer_map_size) goto abend;
-		for (;;) {
-			if (scan >= base + npages) goto found;
-			if (test_bit(scan, sun4c_iobuffer_map)) break;
-			scan++;
-		}
-	}
+	base = bitmap_find_next_zero_area(sun4c_iobuffer_map, iobuffer_map_size,
+						0, npages, 0);
+	if (base >= iobuffer_map_size)
+		goto abend;
 
-found:
 	high = ((base + npages) << PAGE_SHIFT) + sun4c_iobuffer_start;
 	high = SUN4C_REAL_PGDIR_ALIGN(high);
 	while (high > sun4c_iobuffer_high) {
@@ -1124,8 +1117,8 @@ static void sun4c_get_scsi_sgl(struct device *dev, struct scatterlist *sg, int s
 {
 	while (sz != 0) {
 		--sz;
-		sg->dvma_address = (__u32)sun4c_lockarea(sg_virt(sg), sg->length);
-		sg->dvma_length = sg->length;
+		sg->dma_address = (__u32)sun4c_lockarea(sg_virt(sg), sg->length);
+		sg->dma_length = sg->length;
 		sg = sg_next(sg);
 	}
 }
@@ -1141,7 +1134,7 @@ static void sun4c_release_scsi_sgl(struct device *dev, struct scatterlist *sg, i
 {
 	while (sz != 0) {
 		--sz;
-		sun4c_unlockarea((char *)sg->dvma_address, sg->length);
+		sun4c_unlockarea((char *)sg->dma_address, sg->length);
 		sg = sg_next(sg);
 	}
 }
@@ -1895,7 +1888,7 @@ static void sun4c_check_pgt_cache(int low, int high)
 /* An experiment, turn off by default for now... -DaveM */
 #define SUN4C_PRELOAD_PSEG
 
-void sun4c_update_mmu_cache(struct vm_area_struct *vma, unsigned long address, pte_t pte)
+void sun4c_update_mmu_cache(struct vm_area_struct *vma, unsigned long address, pte_t *ptep)
 {
 	unsigned long flags;
 	int pseg;
@@ -1937,7 +1930,7 @@ void sun4c_update_mmu_cache(struct vm_area_struct *vma, unsigned long address, p
 			start += PAGE_SIZE;
 		}
 #ifndef SUN4C_PRELOAD_PSEG
-		sun4c_put_pte(address, pte_val(pte));
+		sun4c_put_pte(address, pte_val(*ptep));
 #endif
 		local_irq_restore(flags);
 		return;
@@ -1948,12 +1941,11 @@ void sun4c_update_mmu_cache(struct vm_area_struct *vma, unsigned long address, p
 		add_lru(entry);
 	}
 
-	sun4c_put_pte(address, pte_val(pte));
+	sun4c_put_pte(address, pte_val(*ptep));
 	local_irq_restore(flags);
 }
 
 extern void sparc_context_init(int);
-extern unsigned long end;
 extern unsigned long bootmem_init(unsigned long *pages_avail);
 extern unsigned long last_valid_pfn;
 
@@ -1964,7 +1956,7 @@ void __init sun4c_paging_init(void)
 	extern struct resource sparc_iomap;
 	unsigned long end_pfn, pages_avail;
 
-	kernel_end = (unsigned long) &end;
+	kernel_end = (unsigned long) &_end;
 	kernel_end = SUN4C_REAL_PGDIR_ALIGN(kernel_end);
 
 	pages_avail = 0;

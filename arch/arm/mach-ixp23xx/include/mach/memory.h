@@ -19,30 +19,16 @@
  */
 #define PHYS_OFFSET		(0x00000000)
 
+#define IXP23XX_PCI_SDRAM_OFFSET (*((volatile int *)IXP23XX_PCI_SDRAM_BAR) & 0xfffffff0)
 
-/*
- * Virtual view <-> DMA view memory address translations
- * virt_to_bus: Used to translate the virtual address to an
- *		address suitable to be passed to set_dma_addr
- * bus_to_virt: Used to convert an address for DMA operations
- *		to an address that the kernel can use.
- */
-#ifndef __ASSEMBLY__
+#define __phys_to_bus(x)	((x) + (IXP23XX_PCI_SDRAM_OFFSET - PHYS_OFFSET))
+#define __bus_to_phys(x)	((x) - (IXP23XX_PCI_SDRAM_OFFSET - PHYS_OFFSET))
 
-#define __virt_to_bus(v)						\
-	({ unsigned int ret;						\
-	ret = ((__virt_to_phys(v) - 0x00000000) +			\
-	 (*((volatile int *)IXP23XX_PCI_SDRAM_BAR) & 0xfffffff0)); 	\
-	ret; })
-
-#define __bus_to_virt(b)						\
-	({ unsigned int data;						\
-	data = *((volatile int *)IXP23XX_PCI_SDRAM_BAR);		\
-	 __phys_to_virt((((b - (data & 0xfffffff0)) + 0x00000000))); })
+#define __virt_to_bus(v)	__phys_to_bus(__virt_to_phys(v))
+#define __bus_to_virt(b)	__phys_to_virt(__bus_to_phys(b))
+#define __pfn_to_bus(p)		__phys_to_bus(__pfn_to_phys(p))
+#define __bus_to_pfn(b)		__phys_to_pfn(__bus_to_phys(b))
 
 #define arch_is_coherent()	1
-
-#endif
-
 
 #endif

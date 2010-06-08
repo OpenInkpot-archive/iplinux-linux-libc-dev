@@ -17,6 +17,7 @@
  * USA.
  */
 
+#include <linux/slab.h>
 
 #include "usbip_common.h"
 #include "stub.h"
@@ -40,11 +41,12 @@ struct kmem_cache *stub_priv_cache;
  * remote host.
  */
 #define MAX_BUSID 16
-static char busid_table[MAX_BUSID][BUS_ID_SIZE];
+#define BUSID_SIZE 20
+static char busid_table[MAX_BUSID][BUSID_SIZE];
 static spinlock_t busid_table_lock;
 
 
-int match_busid(char *busid)
+int match_busid(const char *busid)
 {
 	int i;
 
@@ -52,7 +54,7 @@ int match_busid(char *busid)
 
 	for (i = 0; i < MAX_BUSID; i++)
 		if (busid_table[i][0])
-			if (!strncmp(busid_table[i], busid, BUS_ID_SIZE)) {
+			if (!strncmp(busid_table[i], busid, BUSID_SIZE)) {
 				/* already registerd */
 				spin_unlock(&busid_table_lock);
 				return 0;
@@ -92,7 +94,7 @@ static int add_match_busid(char *busid)
 
 	for (i = 0; i < MAX_BUSID; i++)
 		if (!busid_table[i][0]) {
-			strncpy(busid_table[i], busid, BUS_ID_SIZE);
+			strncpy(busid_table[i], busid, BUSID_SIZE);
 			spin_unlock(&busid_table_lock);
 			return 0;
 		}
@@ -109,9 +111,9 @@ static int del_match_busid(char *busid)
 	spin_lock(&busid_table_lock);
 
 	for (i = 0; i < MAX_BUSID; i++)
-		if (!strncmp(busid_table[i], busid, BUS_ID_SIZE)) {
+		if (!strncmp(busid_table[i], busid, BUSID_SIZE)) {
 			/* found */
-			memset(busid_table[i], 0, BUS_ID_SIZE);
+			memset(busid_table[i], 0, BUSID_SIZE);
 			spin_unlock(&busid_table_lock);
 			return 0;
 		}
@@ -125,33 +127,33 @@ static ssize_t store_match_busid(struct device_driver *dev, const char *buf,
 		size_t count)
 {
 	int len;
-	char busid[BUS_ID_SIZE];
+	char busid[BUSID_SIZE];
 
 	if (count < 5)
 		return -EINVAL;
 
 	/* strnlen() does not include \0 */
-	len = strnlen(buf + 4, BUS_ID_SIZE);
+	len = strnlen(buf + 4, BUSID_SIZE);
 
 	/* busid needs to include \0 termination */
-	if (!(len < BUS_ID_SIZE))
+	if (!(len < BUSID_SIZE))
 		return -EINVAL;
 
-	strncpy(busid, buf + 4, BUS_ID_SIZE);
+	strncpy(busid, buf + 4, BUSID_SIZE);
 
 
 	if (!strncmp(buf, "add ", 4)) {
 		if (add_match_busid(busid) < 0)
 			return -ENOMEM;
 		else {
-			udbg("add busid %s\n", busid);
+			usbip_udbg("add busid %s\n", busid);
 			return count;
 		}
 	} else if (!strncmp(buf, "del ", 4)) {
 		if (del_match_busid(busid) < 0)
 			return -ENODEV;
 		else {
-			udbg("del busid %s\n", busid);
+			usbip_udbg("del busid %s\n", busid);
 			return count;
 		}
 	} else
@@ -212,12 +214,12 @@ void stub_device_cleanup_urbs(struct stub_device *sdev)
 {
 	struct stub_priv *priv;
 
-	udbg("free sdev %p\n", sdev);
+	usbip_udbg("free sdev %p\n", sdev);
 
 	while ((priv = stub_priv_pop(sdev))) {
 		struct urb *urb = priv->urb;
 
-		udbg("   free urb %p\n", urb);
+		usbip_udbg("   free urb %p\n", urb);
 		usb_kill_urb(urb);
 
 		kmem_cache_free(stub_priv_cache, priv);

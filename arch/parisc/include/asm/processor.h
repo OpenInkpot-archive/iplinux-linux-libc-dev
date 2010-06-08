@@ -17,6 +17,8 @@
 #include <asm/ptrace.h>
 #include <asm/types.h>
 #include <asm/system.h>
+#include <asm/percpu.h>
+
 #endif /* __ASSEMBLY__ */
 
 #define KERNEL_STACK_SIZE 	(4*PAGE_SIZE)
@@ -109,8 +111,7 @@ struct cpuinfo_parisc {
 };
 
 extern struct system_cpuinfo_parisc boot_cpu_data;
-extern struct cpuinfo_parisc cpu_data[NR_CPUS];
-#define current_cpu_data cpu_data[smp_processor_id()]
+DECLARE_PER_CPU(struct cpuinfo_parisc, cpu_data);
 
 #define CPU_HVERSION ((boot_cpu_data.hversion >> 4) & 0x0FFF)
 
@@ -126,6 +127,8 @@ struct thread_struct {
 	unsigned long  map_base;
 	unsigned long  flags;
 }; 
+
+#define task_pt_regs(tsk) ((struct pt_regs *)&((tsk)->thread.regs))
 
 /* Thread struct flags. */
 #define PARISC_UAC_NOPRINT	(1UL << 0)	/* see prctl and unaligned.c */

@@ -30,6 +30,7 @@
  */
 
 #include <linux/if_arp.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 #include <net/datalink.h>
 #include <net/psnap.h>
@@ -443,13 +444,14 @@ static void aarp_send_probe_phase1(struct atalk_iface *iface)
 {
 	struct ifreq atreq;
 	struct sockaddr_at *sa = (struct sockaddr_at *)&atreq.ifr_addr;
+	const struct net_device_ops *ops = iface->dev->netdev_ops;
 
 	sa->sat_addr.s_node = iface->address.s_node;
 	sa->sat_addr.s_net = ntohs(iface->address.s_net);
 
 	/* We pass the Net:Node to the drivers/cards by a Device ioctl. */
-	if (!(iface->dev->do_ioctl(iface->dev, &atreq, SIOCSIFADDR))) {
-		(void)iface->dev->do_ioctl(iface->dev, &atreq, SIOCGIFADDR);
+	if (!(ops->ndo_do_ioctl(iface->dev, &atreq, SIOCSIFADDR))) {
+		ops->ndo_do_ioctl(iface->dev, &atreq, SIOCGIFADDR);
 		if (iface->address.s_net != htons(sa->sat_addr.s_net) ||
 		    iface->address.s_node != sa->sat_addr.s_node)
 			iface->status |= ATIF_PROBE_FAIL;
@@ -598,7 +600,7 @@ int aarp_send_ddp(struct net_device *dev, struct sk_buff *skb,
 
 	/* Non ELAP we cannot do. */
 	if (dev->type != ARPHRD_ETHER)
-		return -1;
+		goto free_it;
 
 	skb->dev = dev;
 	skb->protocol = htons(ETH_P_ATALK);
@@ -633,7 +635,7 @@ int aarp_send_ddp(struct net_device *dev, struct sk_buff *skb,
 	if (!a) {
 		/* Whoops slipped... good job it's an unreliable protocol 8) */
 		write_unlock_bh(&aarp_lock);
-		return -1;
+		goto free_it;
 	}
 
 	/* Set up the queue */
@@ -662,15 +664,21 @@ out_unlock:
 	write_unlock_bh(&aarp_lock);
 
 	/* Tell the ddp layer we have taken over for this frame. */
-	return 0;
+	goto sent;
 
 sendit:
 	if (skb->sk)
 		skb->priority = skb->sk->sk_priority;
-	dev_queue_xmit(skb);
+	if (dev_queue_xmit(skb))
+		goto drop;
 sent:
-	return 1;
+	return NET_XMIT_SUCCESS;
+free_it:
+	kfree_skb(skb);
+drop:
+	return NET_XMIT_DROP;
 }
+EXPORT_SYMBOL(aarp_send_ddp);
 
 /*
  *	An entry in the aarp unresolved queue has become resolved. Send
@@ -812,7 +820,7 @@ static int aarp_rcv(struct sk_buff *skb, struct net_device *dev,
 				ma = &ifa->address;
 			else { /* We need to make a copy of the entry. */
 				da.s_node = sa.s_node;
-				da.s_net = da.s_net;
+				da.s_net = sa.s_net;
 				ma = &da;
 			}
 
@@ -995,7 +1003,6 @@ static int aarp_seq_show(struct seq_file *seq, void *v)
 	struct aarp_iter_state *iter = seq->private;
 	struct aarp_entry *entry = v;
 	unsigned long now = jiffies;
-	DECLARE_MAC_BUF(mac);
 
 	if (v == SEQ_START_TOKEN)
 		seq_puts(seq,
@@ -1006,7 +1013,7 @@ static int aarp_seq_show(struct seq_file *seq, void *v)
 			   ntohs(entry->target_addr.s_net),
 			   (unsigned int) entry->target_addr.s_node,
 			   entry->dev ? entry->dev->name : "????");
-		seq_printf(seq, "%s", print_mac(mac, entry->hwaddr));
+		seq_printf(seq, "%pM", entry->hwaddr);
 		seq_printf(seq, " %8s",
 			   dt2str((long)entry->expires_at - (long)now));
 		if (iter->table == unresolved)

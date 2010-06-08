@@ -54,6 +54,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/slab.h>
 
 #include <linux/fd.h>
 #include <linux/hdreg.h>
@@ -112,8 +113,6 @@ module_param(fd_def_df0, ulong, 0);
 MODULE_LICENSE("GPL");
 
 static struct request_queue *floppy_queue;
-#define QUEUE (floppy_queue)
-#define CURRENT elv_next_request(floppy_queue)
 
 /*
  *  Macros
@@ -156,7 +155,7 @@ static volatile int fdc_busy = -1;
 static volatile int fdc_nested;
 static DECLARE_WAIT_QUEUE_HEAD(fdc_wait);
  
-static DECLARE_WAIT_QUEUE_HEAD(motor_wait);
+static DECLARE_COMPLETION(motor_on_completion);
 
 static volatile int selected = -1;	/* currently selected drive */
 
@@ -184,8 +183,7 @@ static unsigned char mfmencode[16]={
 static unsigned char mfmdecode[128];
 
 /* floppy internal millisecond timer stuff */
-static volatile int ms_busy = -1;
-static DECLARE_WAIT_QUEUE_HEAD(ms_wait);
+static DECLARE_COMPLETION(ms_wait_completion);
 #define MS_TICKS ((amiga_eclock+50)/1000)
 
 /*
@@ -211,8 +209,7 @@ static int fd_device[4] = { 0, 0, 0, 0 };
 
 static irqreturn_t ms_isr(int irq, void *dummy)
 {
-	ms_busy = -1;
-	wake_up(&ms_wait);
+	complete(&ms_wait_completion);
 	return IRQ_HANDLED;
 }
 
@@ -220,19 +217,17 @@ static irqreturn_t ms_isr(int irq, void *dummy)
    A more generic routine would do a schedule a la timer.device */
 static void ms_delay(int ms)
 {
-	unsigned long flags;
 	int ticks;
+	static DEFINE_MUTEX(mutex);
+
 	if (ms > 0) {
-		local_irq_save(flags);
-		while (ms_busy == 0)
-			sleep_on(&ms_wait);
-		ms_busy = 0;
-		local_irq_restore(flags);
+		mutex_lock(&mutex);
 		ticks = MS_TICKS*ms-1;
 		ciaa.tblo=ticks%256;
 		ciaa.tbhi=ticks/256;
 		ciaa.crb=0x19; /*count eclock, force load, one-shoot, start */
-		sleep_on(&ms_wait);
+		wait_for_completion(&ms_wait_completion);
+		mutex_unlock(&mutex);
 	}
 }
 
@@ -254,8 +249,7 @@ static void get_fdc(int drive)
 	printk("get_fdc: drive %d  fdc_busy %d  fdc_nested %d\n",drive,fdc_busy,fdc_nested);
 #endif
 	local_irq_save(flags);
-	while (!try_fdc(drive))
-		sleep_on(&fdc_wait);
+	wait_event(fdc_wait, try_fdc(drive));
 	fdc_busy = drive;
 	fdc_nested++;
 	local_irq_restore(flags);
@@ -330,7 +324,7 @@ static void fd_deselect (int drive)
 static void motor_on_callback(unsigned long nr)
 {
 	if (!(ciaa.pra & DSKRDY) || --on_attempts == 0) {
-		wake_up (&motor_wait);
+		complete_all(&motor_on_completion);
 	} else {
 		motor_on_timer.expires = jiffies + HZ/10;
 		add_timer(&motor_on_timer);
@@ -347,11 +341,12 @@ static int fd_motor_on(int nr)
 		unit[nr].motor = 1;
 		fd_select(nr);
 
+		INIT_COMPLETION(motor_on_completion);
 		motor_on_timer.data = nr;
 		mod_timer(&motor_on_timer, jiffies + HZ/2);
 
 		on_attempts = 10;
-		sleep_on (&motor_wait);
+		wait_for_completion(&motor_on_completion);
 		fd_deselect(nr);
 	}
 
@@ -582,8 +577,7 @@ static void raw_read(int drive)
 {
 	drive&=3;
 	get_fdc(drive);
-	while (block_flag)
-		sleep_on(&wait_fd_block);
+	wait_event(wait_fd_block, !block_flag);
 	fd_select(drive);
 	/* setup adkcon bits correctly */
 	custom.adkcon = ADK_MSBSYNC;
@@ -598,8 +592,7 @@ static void raw_read(int drive)
 
 	block_flag = 1;
 
-	while (block_flag)
-		sleep_on (&wait_fd_block);
+	wait_event(wait_fd_block, !block_flag);
 
 	custom.dsklen = 0;
 	fd_deselect(drive);
@@ -616,8 +609,7 @@ static int raw_write(int drive)
 		rel_fdc();
 		return 0;
 	}
-	while (block_flag)
-		sleep_on(&wait_fd_block);
+	wait_event(wait_fd_block, !block_flag);
 	fd_select(drive);
 	/* clear adkcon bits */
 	custom.adkcon = ADK_PRECOMP1|ADK_PRECOMP0|ADK_WORDSYNC|ADK_MSBSYNC;
@@ -1294,8 +1286,7 @@ static int non_int_flush_track (unsigned long nr)
 			writepending = 0;
 			return 0;
 		}
-		while (block_flag == 2)
-			sleep_on (&wait_fd_block);
+		wait_event(wait_fd_block, block_flag != 2);
 	}
 	else {
 		local_irq_restore(flags);
@@ -1343,64 +1334,60 @@ static int get_track(int drive, int track)
 
 static void redo_fd_request(void)
 {
+	struct request *rq;
 	unsigned int cnt, block, track, sector;
 	int drive;
 	struct amiga_floppy_struct *floppy;
 	char *data;
 	unsigned long flags;
+	int err;
 
- repeat:
-	if (!CURRENT) {
+next_req:
+	rq = blk_fetch_request(floppy_queue);
+	if (!rq) {
 		/* Nothing left to do */
 		return;
 	}
 
-	floppy = CURRENT->rq_disk->private_data;
+	floppy = rq->rq_disk->private_data;
 	drive = floppy - unit;
 
+next_segment:
 	/* Here someone could investigate to be more efficient */
-	for (cnt = 0; cnt < CURRENT->current_nr_sectors; cnt++) { 
+	for (cnt = 0, err = 0; cnt < blk_rq_cur_sectors(rq); cnt++) {
 #ifdef DEBUG
 		printk("fd: sector %ld + %d requested for %s\n",
-		       CURRENT->sector,cnt,
-		       (rq_data_dir(CURRENT) == READ) ? "read" : "write");
+		       blk_rq_pos(rq), cnt,
+		       (rq_data_dir(rq) == READ) ? "read" : "write");
 #endif
-		block = CURRENT->sector + cnt;
+		block = blk_rq_pos(rq) + cnt;
 		if ((int)block > floppy->blocks) {
-			end_request(CURRENT, 0);
-			goto repeat;
+			err = -EIO;
+			break;
 		}
 
 		track = block / (floppy->dtype->sects * floppy->type->sect_mult);
 		sector = block % (floppy->dtype->sects * floppy->type->sect_mult);
-		data = CURRENT->buffer + 512 * cnt;
+		data = rq->buffer + 512 * cnt;
 #ifdef DEBUG
 		printk("access to track %d, sector %d, with buffer at "
 		       "0x%08lx\n", track, sector, data);
 #endif
 
-		if ((rq_data_dir(CURRENT) != READ) && (rq_data_dir(CURRENT) != WRITE)) {
-			printk(KERN_WARNING "do_fd_request: unknown command\n");
-			end_request(CURRENT, 0);
-			goto repeat;
-		}
 		if (get_track(drive, track) == -1) {
-			end_request(CURRENT, 0);
-			goto repeat;
+			err = -EIO;
+			break;
 		}
 
-		switch (rq_data_dir(CURRENT)) {
-		case READ:
+		if (rq_data_dir(rq) == READ) {
 			memcpy(data, floppy->trackbuf + sector * 512, 512);
-			break;
-
-		case WRITE:
+		} else {
 			memcpy(floppy->trackbuf + sector * 512, data, 512);
 
 			/* keep the drive spinning while writes are scheduled */
 			if (!fd_motor_on(drive)) {
-				end_request(CURRENT, 0);
-				goto repeat;
+				err = -EIO;
+				break;
 			}
 			/*
 			 * setup a callback to write the track buffer
@@ -1412,14 +1399,12 @@ static void redo_fd_request(void)
 		        /* reset the timer */
 			mod_timer (flush_track_timer + drive, jiffies + 1);
 			local_irq_restore(flags);
-			break;
 		}
 	}
-	CURRENT->nr_sectors -= CURRENT->current_nr_sectors;
-	CURRENT->sector += CURRENT->current_nr_sectors;
 
-	end_request(CURRENT, 1);
-	goto repeat;
+	if (__blk_end_request_cur(rq, err))
+		goto next_segment;
+	goto next_req;
 }
 
 static void do_fd_request(struct request_queue * q)
@@ -1648,7 +1633,7 @@ static int amiga_floppy_change(struct gendisk *disk)
 	return 0;
 }
 
-static struct block_device_operations floppy_fops = {
+static const struct block_device_operations floppy_fops = {
 	.owner		= THIS_MODULE,
 	.open		= floppy_open,
 	.release	= floppy_release,
@@ -1661,7 +1646,7 @@ static int __init fd_probe_drives(void)
 {
 	int drive,drives,nomem;
 
-	printk(KERN_INFO "FD: probing units\n" KERN_INFO "found ");
+	printk(KERN_INFO "FD: probing units\nfound ");
 	drives=0;
 	nomem=0;
 	for(drive=0;drive<FD_MAX_UNITS;drive++) {

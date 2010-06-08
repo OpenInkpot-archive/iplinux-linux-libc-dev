@@ -11,8 +11,10 @@
 #ifndef __ASM_ARCH_MXC_BOARD_MX31ADS_H__
 #define __ASM_ARCH_MXC_BOARD_MX31ADS_H__
 
+#include <mach/hardware.h>
+
 /* Base address of PBC controller */
-#define PBC_BASE_ADDRESS        IO_ADDRESS(CS4_BASE_ADDR)
+#define PBC_BASE_ADDRESS        MX31_CS4_BASE_ADDR_VIRT
 /* Offsets for the PBC Controller register */
 
 /* PBC Board status register offset */
@@ -90,7 +92,7 @@
 #define PBC_INTMASK_CLEAR_REG	(PBC_INTMASK_CLEAR + PBC_BASE_ADDRESS)
 #define EXPIO_PARENT_INT	IOMUX_TO_IRQ(MX31_PIN_GPIO1_4)
 
-#define MXC_EXP_IO_BASE		(MXC_MAX_INT_LINES + MXC_MAX_GPIO_LINES)
+#define MXC_EXP_IO_BASE		(MXC_BOARD_IRQ_START)
 #define MXC_IRQ_TO_EXPIO(irq)	((irq) - MXC_EXP_IO_BASE)
 
 #define EXPIO_INT_LOW_BAT	(MXC_EXP_IO_BASE + 0)
@@ -111,10 +113,5 @@
 #define EXPIO_INT_RES15		(MXC_EXP_IO_BASE + 15)
 
 #define MXC_MAX_EXP_IO_LINES	16
-
-/* mandatory for CONFIG_LL_DEBUG */
-
-#define MXC_LL_UART_PADDR	UART1_BASE_ADDR
-#define MXC_LL_UART_VADDR	AIPS1_IO_ADDRESS(UART1_BASE_ADDR)
 
 #endif /* __ASM_ARCH_MXC_BOARD_MX31ADS_H__ */

@@ -15,12 +15,11 @@
 #define _ASM_ATOMIC_H
 
 #include <linux/irqflags.h>
+#include <linux/types.h>
 #include <asm/barrier.h>
 #include <asm/cpu-features.h>
 #include <asm/war.h>
 #include <asm/system.h>
-
-typedef struct { volatile int counter; } atomic_t;
 
 #define ATOMIC_INIT(i)    { (i) }
 
@@ -50,8 +49,8 @@ typedef struct { volatile int counter; } atomic_t;
  */
 static __inline__ void atomic_add(int i, atomic_t * v)
 {
-	if (cpu_has_llsc && R10000_LLSC_WAR) {
-		unsigned long temp;
+	if (kernel_uses_llsc && R10000_LLSC_WAR) {
+		int temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -62,8 +61,8 @@ static __inline__ void atomic_add(int i, atomic_t * v)
 		"	.set	mips0					\n"
 		: "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter));
-	} else if (cpu_has_llsc) {
-		unsigned long temp;
+	} else if (kernel_uses_llsc) {
+		int temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -95,8 +94,8 @@ static __inline__ void atomic_add(int i, atomic_t * v)
  */
 static __inline__ void atomic_sub(int i, atomic_t * v)
 {
-	if (cpu_has_llsc && R10000_LLSC_WAR) {
-		unsigned long temp;
+	if (kernel_uses_llsc && R10000_LLSC_WAR) {
+		int temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -107,8 +106,8 @@ static __inline__ void atomic_sub(int i, atomic_t * v)
 		"	.set	mips0					\n"
 		: "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter));
-	} else if (cpu_has_llsc) {
-		unsigned long temp;
+	} else if (kernel_uses_llsc) {
+		int temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -136,12 +135,12 @@ static __inline__ void atomic_sub(int i, atomic_t * v)
  */
 static __inline__ int atomic_add_return(int i, atomic_t * v)
 {
-	unsigned long result;
+	int result;
 
-	smp_llsc_mb();
+	smp_mb__before_llsc();
 
-	if (cpu_has_llsc && R10000_LLSC_WAR) {
-		unsigned long temp;
+	if (kernel_uses_llsc && R10000_LLSC_WAR) {
+		int temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -154,8 +153,8 @@ static __inline__ int atomic_add_return(int i, atomic_t * v)
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
-	} else if (cpu_has_llsc) {
-		unsigned long temp;
+	} else if (kernel_uses_llsc) {
+		int temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -188,12 +187,12 @@ static __inline__ int atomic_add_return(int i, atomic_t * v)
 
 static __inline__ int atomic_sub_return(int i, atomic_t * v)
 {
-	unsigned long result;
+	int result;
 
-	smp_llsc_mb();
+	smp_mb__before_llsc();
 
-	if (cpu_has_llsc && R10000_LLSC_WAR) {
-		unsigned long temp;
+	if (kernel_uses_llsc && R10000_LLSC_WAR) {
+		int temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -206,8 +205,8 @@ static __inline__ int atomic_sub_return(int i, atomic_t * v)
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
-	} else if (cpu_has_llsc) {
-		unsigned long temp;
+	} else if (kernel_uses_llsc) {
+		int temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -248,12 +247,12 @@ static __inline__ int atomic_sub_return(int i, atomic_t * v)
  */
 static __inline__ int atomic_sub_if_positive(int i, atomic_t * v)
 {
-	unsigned long result;
+	int result;
 
-	smp_llsc_mb();
+	smp_mb__before_llsc();
 
-	if (cpu_has_llsc && R10000_LLSC_WAR) {
-		unsigned long temp;
+	if (kernel_uses_llsc && R10000_LLSC_WAR) {
+		int temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -270,8 +269,8 @@ static __inline__ int atomic_sub_if_positive(int i, atomic_t * v)
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
-	} else if (cpu_has_llsc) {
-		unsigned long temp;
+	} else if (kernel_uses_llsc) {
+		int temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -404,8 +403,6 @@ static __inline__ int atomic_add_unless(atomic_t *v, int a, int u)
 
 #ifdef CONFIG_64BIT
 
-typedef struct { volatile long counter; } atomic64_t;
-
 #define ATOMIC64_INIT(i)    { (i) }
 
 /*
@@ -431,8 +428,8 @@ typedef struct { volatile long counter; } atomic64_t;
  */
 static __inline__ void atomic64_add(long i, atomic64_t * v)
 {
-	if (cpu_has_llsc && R10000_LLSC_WAR) {
-		unsigned long temp;
+	if (kernel_uses_llsc && R10000_LLSC_WAR) {
+		long temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -443,8 +440,8 @@ static __inline__ void atomic64_add(long i, atomic64_t * v)
 		"	.set	mips0					\n"
 		: "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter));
-	} else if (cpu_has_llsc) {
-		unsigned long temp;
+	} else if (kernel_uses_llsc) {
+		long temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -476,8 +473,8 @@ static __inline__ void atomic64_add(long i, atomic64_t * v)
  */
 static __inline__ void atomic64_sub(long i, atomic64_t * v)
 {
-	if (cpu_has_llsc && R10000_LLSC_WAR) {
-		unsigned long temp;
+	if (kernel_uses_llsc && R10000_LLSC_WAR) {
+		long temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -488,8 +485,8 @@ static __inline__ void atomic64_sub(long i, atomic64_t * v)
 		"	.set	mips0					\n"
 		: "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter));
-	} else if (cpu_has_llsc) {
-		unsigned long temp;
+	} else if (kernel_uses_llsc) {
+		long temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -517,12 +514,12 @@ static __inline__ void atomic64_sub(long i, atomic64_t * v)
  */
 static __inline__ long atomic64_add_return(long i, atomic64_t * v)
 {
-	unsigned long result;
+	long result;
 
-	smp_llsc_mb();
+	smp_mb__before_llsc();
 
-	if (cpu_has_llsc && R10000_LLSC_WAR) {
-		unsigned long temp;
+	if (kernel_uses_llsc && R10000_LLSC_WAR) {
+		long temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -535,8 +532,8 @@ static __inline__ long atomic64_add_return(long i, atomic64_t * v)
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
-	} else if (cpu_has_llsc) {
-		unsigned long temp;
+	} else if (kernel_uses_llsc) {
+		long temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -569,12 +566,12 @@ static __inline__ long atomic64_add_return(long i, atomic64_t * v)
 
 static __inline__ long atomic64_sub_return(long i, atomic64_t * v)
 {
-	unsigned long result;
+	long result;
 
-	smp_llsc_mb();
+	smp_mb__before_llsc();
 
-	if (cpu_has_llsc && R10000_LLSC_WAR) {
-		unsigned long temp;
+	if (kernel_uses_llsc && R10000_LLSC_WAR) {
+		long temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -587,8 +584,8 @@ static __inline__ long atomic64_sub_return(long i, atomic64_t * v)
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
-	} else if (cpu_has_llsc) {
-		unsigned long temp;
+	} else if (kernel_uses_llsc) {
+		long temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -629,12 +626,12 @@ static __inline__ long atomic64_sub_return(long i, atomic64_t * v)
  */
 static __inline__ long atomic64_sub_if_positive(long i, atomic64_t * v)
 {
-	unsigned long result;
+	long result;
 
-	smp_llsc_mb();
+	smp_mb__before_llsc();
 
-	if (cpu_has_llsc && R10000_LLSC_WAR) {
-		unsigned long temp;
+	if (kernel_uses_llsc && R10000_LLSC_WAR) {
+		long temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -651,8 +648,8 @@ static __inline__ long atomic64_sub_if_positive(long i, atomic64_t * v)
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
 		: "memory");
-	} else if (cpu_has_llsc) {
-		unsigned long temp;
+	} else if (kernel_uses_llsc) {
+		long temp;
 
 		__asm__ __volatile__(
 		"	.set	mips3					\n"
@@ -791,11 +788,11 @@ static __inline__ int atomic64_add_unless(atomic64_t *v, long a, long u)
  * atomic*_return operations are serializing but not the non-*_return
  * versions.
  */
-#define smp_mb__before_atomic_dec()	smp_llsc_mb()
+#define smp_mb__before_atomic_dec()	smp_mb__before_llsc()
 #define smp_mb__after_atomic_dec()	smp_llsc_mb()
-#define smp_mb__before_atomic_inc()	smp_llsc_mb()
+#define smp_mb__before_atomic_inc()	smp_mb__before_llsc()
 #define smp_mb__after_atomic_inc()	smp_llsc_mb()
 
-#include <asm-generic/atomic.h>
+#include <asm-generic/atomic-long.h>
 
 #endif /* _ASM_ATOMIC_H */

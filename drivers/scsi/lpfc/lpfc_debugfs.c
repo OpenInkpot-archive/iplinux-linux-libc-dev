@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2007-2008 Emulex.  All rights reserved.           *
+ * Copyright (C) 2007-2009 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
  * www.emulex.com                                                  *
  *                                                                 *
@@ -24,6 +24,7 @@
 #include <linux/idr.h>
 #include <linux/interrupt.h>
 #include <linux/kthread.h>
+#include <linux/slab.h>
 #include <linux/pci.h>
 #include <linux/spinlock.h>
 #include <linux/ctype.h>
@@ -33,8 +34,10 @@
 #include <scsi/scsi_host.h>
 #include <scsi/scsi_transport_fc.h>
 
+#include "lpfc_hw4.h"
 #include "lpfc_hw.h"
 #include "lpfc_sli.h"
+#include "lpfc_sli4.h"
 #include "lpfc_nl.h"
 #include "lpfc_disc.h"
 #include "lpfc_scsi.h"
@@ -46,13 +49,12 @@
 #include "lpfc_compat.h"
 #include "lpfc_debugfs.h"
 
-#ifdef CONFIG_LPFC_DEBUG_FS
-/**
+#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
+/*
  * debugfs interface
  *
  * To access this interface the user should:
- * # mkdir /debug
- * # mount -t debugfs none /debug
+ * # mount -t debugfs none /sys/kernel/debug
  *
  * The lpfc debugfs directory hierarchy is:
  * lpfc/lpfcX/vportY
@@ -95,7 +97,7 @@ module_param(lpfc_debugfs_max_slow_ring_trc, int, 0);
 MODULE_PARM_DESC(lpfc_debugfs_max_slow_ring_trc,
 	"Set debugfs slow ring trace depth");
 
-int lpfc_debugfs_mask_disc_trc;
+static int lpfc_debugfs_mask_disc_trc;
 module_param(lpfc_debugfs_mask_disc_trc, int, 0);
 MODULE_PARM_DESC(lpfc_debugfs_mask_disc_trc,
 	"Set debugfs discovery trace mask");
@@ -127,7 +129,7 @@ static atomic_t lpfc_debugfs_seq_trc_cnt = ATOMIC_INIT(0);
 static unsigned long lpfc_debugfs_start_time = 0L;
 
 /**
- * lpfc_debugfs_disc_trc_data - Dump discovery logging to a buffer.
+ * lpfc_debugfs_disc_trc_data - Dump discovery logging to a buffer
  * @vport: The vport to gather the log info from.
  * @buf: The buffer to dump log into.
  * @size: The maximum amount of data to process.
@@ -187,7 +189,7 @@ lpfc_debugfs_disc_trc_data(struct lpfc_vport *vport, char *buf, int size)
 }
 
 /**
- * lpfc_debugfs_slow_ring_trc_data - Dump slow ring logging to a buffer.
+ * lpfc_debugfs_slow_ring_trc_data - Dump slow ring logging to a buffer
  * @phba: The HBA to gather the log info from.
  * @buf: The buffer to dump log into.
  * @size: The maximum amount of data to process.
@@ -250,7 +252,7 @@ lpfc_debugfs_slow_ring_trc_data(struct lpfc_hba *phba, char *buf, int size)
 static int lpfc_debugfs_last_hbq = -1;
 
 /**
- * lpfc_debugfs_hbqinfo_data - Dump host buffer queue info to a buffer.
+ * lpfc_debugfs_hbqinfo_data - Dump host buffer queue info to a buffer
  * @phba: The HBA to gather host buffer info from.
  * @buf: The buffer to dump log into.
  * @size: The maximum amount of data to process.
@@ -280,6 +282,8 @@ lpfc_debugfs_hbqinfo_data(struct lpfc_hba *phba, char *buf, int size)
 	struct lpfc_dmabuf *d_buf;
 	struct hbq_dmabuf *hbq_buf;
 
+	if (phba->sli_rev != 3)
+		return 0;
 	cnt = LPFC_HBQINFO_SIZE;
 	spin_lock_irq(&phba->hbalock);
 
@@ -369,7 +373,7 @@ skipit:
 static int lpfc_debugfs_last_hba_slim_off;
 
 /**
- * lpfc_debugfs_dumpHBASlim_data - Dump HBA SLIM info to a buffer.
+ * lpfc_debugfs_dumpHBASlim_data - Dump HBA SLIM info to a buffer
  * @phba: The HBA to gather SLIM info from.
  * @buf: The buffer to dump log into.
  * @size: The maximum amount of data to process.
@@ -399,8 +403,7 @@ lpfc_debugfs_dumpHBASlim_data(struct lpfc_hba *phba, char *buf, int size)
 
 	len +=  snprintf(buf+len, size-len, "HBA SLIM\n");
 	lpfc_memcpy_from_slim(buffer,
-		((uint8_t *)phba->MBslimaddr) + lpfc_debugfs_last_hba_slim_off,
-		1024);
+		phba->MBslimaddr + lpfc_debugfs_last_hba_slim_off, 1024);
 
 	ptr = (uint32_t *)&buffer[0];
 	off = lpfc_debugfs_last_hba_slim_off;
@@ -426,7 +429,7 @@ lpfc_debugfs_dumpHBASlim_data(struct lpfc_hba *phba, char *buf, int size)
 }
 
 /**
- * lpfc_debugfs_dumpHostSlim_data - Dump host SLIM info to a buffer.
+ * lpfc_debugfs_dumpHostSlim_data - Dump host SLIM info to a buffer
  * @phba: The HBA to gather Host SLIM info from.
  * @buf: The buffer to dump log into.
  * @size: The maximum amount of data to process.
@@ -490,18 +493,21 @@ lpfc_debugfs_dumpHostSlim_data(struct lpfc_hba *phba, char *buf, int size)
 				 pring->next_cmdidx, pring->local_getidx,
 				 pring->flag, pgpp->rspPutInx, pring->numRiocb);
 	}
-	word0 = readl(phba->HAregaddr);
-	word1 = readl(phba->CAregaddr);
-	word2 = readl(phba->HSregaddr);
-	word3 = readl(phba->HCregaddr);
-	len +=  snprintf(buf+len, size-len, "HA:%08x CA:%08x HS:%08x HC:%08x\n",
-	word0, word1, word2, word3);
+
+	if (phba->sli_rev <= LPFC_SLI_REV3) {
+		word0 = readl(phba->HAregaddr);
+		word1 = readl(phba->CAregaddr);
+		word2 = readl(phba->HSregaddr);
+		word3 = readl(phba->HCregaddr);
+		len +=  snprintf(buf+len, size-len, "HA:%08x CA:%08x HS:%08x "
+				 "HC:%08x\n", word0, word1, word2, word3);
+	}
 	spin_unlock_irq(&phba->hbalock);
 	return len;
 }
 
 /**
- * lpfc_debugfs_nodelist_data - Dump target node list to a buffer.
+ * lpfc_debugfs_nodelist_data - Dump target node list to a buffer
  * @vport: The vport to gather target node info from.
  * @buf: The buffer to dump log into.
  * @size: The maximum amount of data to process.
@@ -599,7 +605,7 @@ lpfc_debugfs_nodelist_data(struct lpfc_vport *vport, char *buf, int size)
 #endif
 
 /**
- * lpfc_debugfs_disc_trc - Store discovery trace log.
+ * lpfc_debugfs_disc_trc - Store discovery trace log
  * @vport: The vport to associate this trace string with for retrieval.
  * @mask: Log entry classification.
  * @fmt: Format string to be displayed when dumping the log.
@@ -618,7 +624,7 @@ inline void
 lpfc_debugfs_disc_trc(struct lpfc_vport *vport, int mask, char *fmt,
 	uint32_t data1, uint32_t data2, uint32_t data3)
 {
-#ifdef CONFIG_LPFC_DEBUG_FS
+#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
 	struct lpfc_debugfs_trc *dtp;
 	int index;
 
@@ -643,7 +649,7 @@ lpfc_debugfs_disc_trc(struct lpfc_vport *vport, int mask, char *fmt,
 }
 
 /**
- * lpfc_debugfs_slow_ring_trc - Store slow ring trace log.
+ * lpfc_debugfs_slow_ring_trc - Store slow ring trace log
  * @phba: The phba to associate this trace string with for retrieval.
  * @fmt: Format string to be displayed when dumping the log.
  * @data1: 1st data parameter to be applied to @fmt.
@@ -659,7 +665,7 @@ inline void
 lpfc_debugfs_slow_ring_trc(struct lpfc_hba *phba, char *fmt,
 	uint32_t data1, uint32_t data2, uint32_t data3)
 {
-#ifdef CONFIG_LPFC_DEBUG_FS
+#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
 	struct lpfc_debugfs_trc *dtp;
 	int index;
 
@@ -680,9 +686,9 @@ lpfc_debugfs_slow_ring_trc(struct lpfc_hba *phba, char *fmt,
 	return;
 }
 
-#ifdef CONFIG_LPFC_DEBUG_FS
+#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
 /**
- * lpfc_debugfs_disc_trc_open - Open the discovery trace log.
+ * lpfc_debugfs_disc_trc_open - Open the discovery trace log
  * @inode: The inode pointer that contains a vport pointer.
  * @file: The file pointer to attach the log output.
  *
@@ -732,7 +738,7 @@ out:
 }
 
 /**
- * lpfc_debugfs_slow_ring_trc_open - Open the Slow Ring trace log.
+ * lpfc_debugfs_slow_ring_trc_open - Open the Slow Ring trace log
  * @inode: The inode pointer that contains a vport pointer.
  * @file: The file pointer to attach the log output.
  *
@@ -782,7 +788,7 @@ out:
 }
 
 /**
- * lpfc_debugfs_hbqinfo_open - Open the hbqinfo debugfs buffer.
+ * lpfc_debugfs_hbqinfo_open - Open the hbqinfo debugfs buffer
  * @inode: The inode pointer that contains a vport pointer.
  * @file: The file pointer to attach the log output.
  *
@@ -824,7 +830,7 @@ out:
 }
 
 /**
- * lpfc_debugfs_dumpHBASlim_open - Open the Dump HBA SLIM debugfs buffer.
+ * lpfc_debugfs_dumpHBASlim_open - Open the Dump HBA SLIM debugfs buffer
  * @inode: The inode pointer that contains a vport pointer.
  * @file: The file pointer to attach the log output.
  *
@@ -866,7 +872,7 @@ out:
 }
 
 /**
- * lpfc_debugfs_dumpHostSlim_open - Open the Dump Host SLIM debugfs buffer.
+ * lpfc_debugfs_dumpHostSlim_open - Open the Dump Host SLIM debugfs buffer
  * @inode: The inode pointer that contains a vport pointer.
  * @file: The file pointer to attach the log output.
  *
@@ -907,8 +913,93 @@ out:
 	return rc;
 }
 
+static int
+lpfc_debugfs_dumpData_open(struct inode *inode, struct file *file)
+{
+	struct lpfc_debug *debug;
+	int rc = -ENOMEM;
+
+	if (!_dump_buf_data)
+		return -EBUSY;
+
+	debug = kmalloc(sizeof(*debug), GFP_KERNEL);
+	if (!debug)
+		goto out;
+
+	/* Round to page boundry */
+	printk(KERN_ERR "9059 BLKGRD:  %s: _dump_buf_data=0x%p\n",
+			__func__, _dump_buf_data);
+	debug->buffer = _dump_buf_data;
+	if (!debug->buffer) {
+		kfree(debug);
+		goto out;
+	}
+
+	debug->len = (1 << _dump_buf_data_order) << PAGE_SHIFT;
+	file->private_data = debug;
+
+	rc = 0;
+out:
+	return rc;
+}
+
+static int
+lpfc_debugfs_dumpDif_open(struct inode *inode, struct file *file)
+{
+	struct lpfc_debug *debug;
+	int rc = -ENOMEM;
+
+	if (!_dump_buf_dif)
+		return -EBUSY;
+
+	debug = kmalloc(sizeof(*debug), GFP_KERNEL);
+	if (!debug)
+		goto out;
+
+	/* Round to page boundry */
+	printk(KERN_ERR	"9060 BLKGRD: %s: _dump_buf_dif=0x%p file=%s\n",
+		__func__, _dump_buf_dif, file->f_dentry->d_name.name);
+	debug->buffer = _dump_buf_dif;
+	if (!debug->buffer) {
+		kfree(debug);
+		goto out;
+	}
+
+	debug->len = (1 << _dump_buf_dif_order) << PAGE_SHIFT;
+	file->private_data = debug;
+
+	rc = 0;
+out:
+	return rc;
+}
+
+static ssize_t
+lpfc_debugfs_dumpDataDif_write(struct file *file, const char __user *buf,
+		  size_t nbytes, loff_t *ppos)
+{
+	/*
+	 * The Data/DIF buffers only save one failing IO
+	 * The write op is used as a reset mechanism after an IO has
+	 * already been saved to the next one can be saved
+	 */
+	spin_lock(&_dump_buf_lock);
+
+	memset((void *)_dump_buf_data, 0,
+			((1 << PAGE_SHIFT) << _dump_buf_data_order));
+	memset((void *)_dump_buf_dif, 0,
+			((1 << PAGE_SHIFT) << _dump_buf_dif_order));
+
+	_dump_buf_done = 0;
+
+	spin_unlock(&_dump_buf_lock);
+
+	return nbytes;
+}
+
+
+
 /**
- * lpfc_debugfs_nodelist_open - Open the nodelist debugfs file.
+ * lpfc_debugfs_nodelist_open - Open the nodelist debugfs file
  * @inode: The inode pointer that contains a vport pointer.
  * @file: The file pointer to attach the log output.
  *
@@ -950,7 +1041,7 @@ out:
 }
 
 /**
- * lpfc_debugfs_lseek - Seek through a debugfs file.
+ * lpfc_debugfs_lseek - Seek through a debugfs file
  * @file: The file pointer to seek through.
  * @off: The offset to seek to or the amount to seek by.
  * @whence: Indicates how to seek.
@@ -988,7 +1079,7 @@ lpfc_debugfs_lseek(struct file *file, loff_t off, int whence)
 }
 
 /**
- * lpfc_debugfs_read - Read a debugfs file.
+ * lpfc_debugfs_read - Read a debugfs file
  * @file: The file pointer to read from.
  * @buf: The buffer to copy the data to.
  * @nbytes: The number of bytes to read.
@@ -1013,7 +1104,7 @@ lpfc_debugfs_read(struct file *file, char __user *buf,
 }
 
 /**
- * lpfc_debugfs_release - Release the buffer used to store debugfs file data.
+ * lpfc_debugfs_release - Release the buffer used to store debugfs file data
  * @inode: The inode pointer that contains a vport pointer. (unused)
  * @file: The file pointer that contains the buffer to release.
  *
@@ -1035,8 +1126,19 @@ lpfc_debugfs_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+static int
+lpfc_debugfs_dumpDataDif_release(struct inode *inode, struct file *file)
+{
+	struct lpfc_debug *debug = file->private_data;
+
+	debug->buffer = NULL;
+	kfree(debug);
+
+	return 0;
+}
+
 #undef lpfc_debugfs_op_disc_trc
-static struct file_operations lpfc_debugfs_op_disc_trc = {
+static const struct file_operations lpfc_debugfs_op_disc_trc = {
 	.owner =        THIS_MODULE,
 	.open =         lpfc_debugfs_disc_trc_open,
 	.llseek =       lpfc_debugfs_lseek,
@@ -1045,7 +1147,7 @@ static struct file_operations lpfc_debugfs_op_disc_trc = {
 };
 
 #undef lpfc_debugfs_op_nodelist
-static struct file_operations lpfc_debugfs_op_nodelist = {
+static const struct file_operations lpfc_debugfs_op_nodelist = {
 	.owner =        THIS_MODULE,
 	.open =         lpfc_debugfs_nodelist_open,
 	.llseek =       lpfc_debugfs_lseek,
@@ -1054,7 +1156,7 @@ static struct file_operations lpfc_debugfs_op_nodelist = {
 };
 
 #undef lpfc_debugfs_op_hbqinfo
-static struct file_operations lpfc_debugfs_op_hbqinfo = {
+static const struct file_operations lpfc_debugfs_op_hbqinfo = {
 	.owner =        THIS_MODULE,
 	.open =         lpfc_debugfs_hbqinfo_open,
 	.llseek =       lpfc_debugfs_lseek,
@@ -1063,7 +1165,7 @@ static struct file_operations lpfc_debugfs_op_hbqinfo = {
 };
 
 #undef lpfc_debugfs_op_dumpHBASlim
-static struct file_operations lpfc_debugfs_op_dumpHBASlim = {
+static const struct file_operations lpfc_debugfs_op_dumpHBASlim = {
 	.owner =        THIS_MODULE,
 	.open =         lpfc_debugfs_dumpHBASlim_open,
 	.llseek =       lpfc_debugfs_lseek,
@@ -1072,7 +1174,7 @@ static struct file_operations lpfc_debugfs_op_dumpHBASlim = {
 };
 
 #undef lpfc_debugfs_op_dumpHostSlim
-static struct file_operations lpfc_debugfs_op_dumpHostSlim = {
+static const struct file_operations lpfc_debugfs_op_dumpHostSlim = {
 	.owner =        THIS_MODULE,
 	.open =         lpfc_debugfs_dumpHostSlim_open,
 	.llseek =       lpfc_debugfs_lseek,
@@ -1080,8 +1182,28 @@ static struct file_operations lpfc_debugfs_op_dumpHostSlim = {
 	.release =      lpfc_debugfs_release,
 };
 
+#undef lpfc_debugfs_op_dumpData
+static const struct file_operations lpfc_debugfs_op_dumpData = {
+	.owner =        THIS_MODULE,
+	.open =         lpfc_debugfs_dumpData_open,
+	.llseek =       lpfc_debugfs_lseek,
+	.read =         lpfc_debugfs_read,
+	.write =	lpfc_debugfs_dumpDataDif_write,
+	.release =      lpfc_debugfs_dumpDataDif_release,
+};
+
+#undef lpfc_debugfs_op_dumpDif
+static const struct file_operations lpfc_debugfs_op_dumpDif = {
+	.owner =        THIS_MODULE,
+	.open =         lpfc_debugfs_dumpDif_open,
+	.llseek =       lpfc_debugfs_lseek,
+	.read =         lpfc_debugfs_read,
+	.write =	lpfc_debugfs_dumpDataDif_write,
+	.release =      lpfc_debugfs_dumpDataDif_release,
+};
+
 #undef lpfc_debugfs_op_slow_ring_trc
-static struct file_operations lpfc_debugfs_op_slow_ring_trc = {
+static const struct file_operations lpfc_debugfs_op_slow_ring_trc = {
 	.owner =        THIS_MODULE,
 	.open =         lpfc_debugfs_slow_ring_trc_open,
 	.llseek =       lpfc_debugfs_lseek,
@@ -1094,7 +1216,7 @@ static atomic_t lpfc_debugfs_hba_count;
 #endif
 
 /**
- * lpfc_debugfs_initialize - Initialize debugfs for a vport.
+ * lpfc_debugfs_initialize - Initialize debugfs for a vport
  * @vport: The vport pointer to initialize.
  *
  * Description:
@@ -1106,7 +1228,7 @@ static atomic_t lpfc_debugfs_hba_count;
 inline void
 lpfc_debugfs_initialize(struct lpfc_vport *vport)
 {
-#ifdef CONFIG_LPFC_DEBUG_FS
+#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
 	struct lpfc_hba   *phba = vport->phba;
 	char name[64];
 	uint32_t num, i;
@@ -1176,6 +1298,32 @@ lpfc_debugfs_initialize(struct lpfc_vport *vport)
 			goto debug_failed;
 		}
 
+		/* Setup dumpData */
+		snprintf(name, sizeof(name), "dumpData");
+		phba->debug_dumpData =
+			debugfs_create_file(name, S_IFREG|S_IRUGO|S_IWUSR,
+				 phba->hba_debugfs_root,
+				 phba, &lpfc_debugfs_op_dumpData);
+		if (!phba->debug_dumpData) {
+			lpfc_printf_vlog(vport, KERN_ERR, LOG_INIT,
+				"0800 Cannot create debugfs dumpData\n");
+			goto debug_failed;
+		}
+
+		/* Setup dumpDif */
+		snprintf(name, sizeof(name), "dumpDif");
+		phba->debug_dumpDif =
+			debugfs_create_file(name, S_IFREG|S_IRUGO|S_IWUSR,
+				 phba->hba_debugfs_root,
+				 phba, &lpfc_debugfs_op_dumpDif);
+		if (!phba->debug_dumpDif) {
+			lpfc_printf_vlog(vport, KERN_ERR, LOG_INIT,
+				"0801 Cannot create debugfs dumpDif\n");
+			goto debug_failed;
+		}
+
+
+
 		/* Setup slow ring trace */
 		if (lpfc_debugfs_max_slow_ring_trc) {
 			num = lpfc_debugfs_max_slow_ring_trc - 1;
@@ -1230,7 +1378,7 @@ lpfc_debugfs_initialize(struct lpfc_vport *vport)
 			debugfs_create_dir(name, phba->hba_debugfs_root);
 		if (!vport->vport_debugfs_root) {
 			lpfc_printf_vlog(vport, KERN_ERR, LOG_INIT,
-					 "0417 Cant create debugfs");
+					 "0417 Cant create debugfs\n");
 			goto debug_failed;
 		}
 		atomic_inc(&phba->debugfs_vport_count);
@@ -1283,7 +1431,7 @@ lpfc_debugfs_initialize(struct lpfc_vport *vport)
 				 vport, &lpfc_debugfs_op_nodelist);
 	if (!vport->debug_nodelist) {
 		lpfc_printf_vlog(vport, KERN_ERR, LOG_INIT,
-				 "0409 Cant create debugfs nodelist");
+				 "0409 Cant create debugfs nodelist\n");
 		goto debug_failed;
 	}
 debug_failed:
@@ -1292,7 +1440,7 @@ debug_failed:
 }
 
 /**
- * lpfc_debugfs_terminate -  Tear down debugfs infrastructure for this vport.
+ * lpfc_debugfs_terminate -  Tear down debugfs infrastructure for this vport
  * @vport: The vport pointer to remove from debugfs.
  *
  * Description:
@@ -1305,7 +1453,7 @@ debug_failed:
 inline void
 lpfc_debugfs_terminate(struct lpfc_vport *vport)
 {
-#ifdef CONFIG_LPFC_DEBUG_FS
+#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
 	struct lpfc_hba   *phba = vport->phba;
 
 	if (vport->disc_trc) {
@@ -1340,6 +1488,16 @@ lpfc_debugfs_terminate(struct lpfc_vport *vport)
 			debugfs_remove(phba->debug_dumpHostSlim); /* HostSlim */
 			phba->debug_dumpHostSlim = NULL;
 		}
+		if (phba->debug_dumpData) {
+			debugfs_remove(phba->debug_dumpData); /* dumpData */
+			phba->debug_dumpData = NULL;
+		}
+
+		if (phba->debug_dumpDif) {
+			debugfs_remove(phba->debug_dumpDif); /* dumpDif */
+			phba->debug_dumpDif = NULL;
+		}
+
 		if (phba->slow_ring_trc) {
 			kfree(phba->slow_ring_trc);
 			phba->slow_ring_trc = NULL;

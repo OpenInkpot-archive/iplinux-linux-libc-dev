@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2004-2008 Emulex.  All rights reserved.           *
+ * Copyright (C) 2004-2010 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
  * www.emulex.com                                                  *
  *                                                                 *
@@ -64,6 +64,9 @@
 #define SLI3_IOCB_CMD_SIZE	128
 #define SLI3_IOCB_RSP_SIZE	64
 
+
+/* vendor ID used in SCSI netlink calls */
+#define LPFC_NL_VENDOR_ID (SCSI_NL_VID_TYPE_PCI | PCI_VENDOR_ID_EMULEX)
 
 /* Common Transport structures and definitions */
 
@@ -468,6 +471,35 @@ struct serv_parm {	/* Structure is in Big Endian format */
 };
 
 /*
+ * Virtual Fabric Tagging Header
+ */
+struct fc_vft_header {
+	 uint32_t word0;
+#define fc_vft_hdr_r_ctl_SHIFT		24
+#define fc_vft_hdr_r_ctl_MASK		0xFF
+#define fc_vft_hdr_r_ctl_WORD		word0
+#define fc_vft_hdr_ver_SHIFT		22
+#define fc_vft_hdr_ver_MASK		0x3
+#define fc_vft_hdr_ver_WORD		word0
+#define fc_vft_hdr_type_SHIFT		18
+#define fc_vft_hdr_type_MASK		0xF
+#define fc_vft_hdr_type_WORD		word0
+#define fc_vft_hdr_e_SHIFT		16
+#define fc_vft_hdr_e_MASK		0x1
+#define fc_vft_hdr_e_WORD		word0
+#define fc_vft_hdr_priority_SHIFT	13
+#define fc_vft_hdr_priority_MASK	0x7
+#define fc_vft_hdr_priority_WORD	word0
+#define fc_vft_hdr_vf_id_SHIFT		1
+#define fc_vft_hdr_vf_id_MASK		0xFFF
+#define fc_vft_hdr_vf_id_WORD		word0
+	uint32_t word1;
+#define fc_vft_hdr_hopct_SHIFT		24
+#define fc_vft_hdr_hopct_MASK		0xFF
+#define fc_vft_hdr_hopct_WORD		word1
+};
+
+/*
  *  Extended Link Service LS_COMMAND codes (Payload Word 0)
  */
 #ifdef __BIG_ENDIAN_BITFIELD
@@ -866,6 +898,12 @@ typedef struct _D_ID {		/* Structure is in Big Endian format */
 	} un;
 } D_ID;
 
+#define RSCN_ADDRESS_FORMAT_PORT	0x0
+#define RSCN_ADDRESS_FORMAT_AREA	0x1
+#define RSCN_ADDRESS_FORMAT_DOMAIN	0x2
+#define RSCN_ADDRESS_FORMAT_FABRIC	0x3
+#define RSCN_ADDRESS_FORMAT_MASK	0x3
+
 /*
  *  Structure to define all ELS Payload types
  */
@@ -1086,21 +1124,6 @@ typedef struct {
 /* Number of 4-byte words in an IOCB. */
 #define IOCB_WORD_SZ    8
 
-/* defines for type field in fc header */
-#define FC_ELS_DATA     0x1
-#define FC_LLC_SNAP     0x5
-#define FC_FCP_DATA     0x8
-#define FC_COMMON_TRANSPORT_ULP 0x20
-
-/* defines for rctl field in fc header */
-#define FC_DEV_DATA     0x0
-#define FC_UNSOL_CTL    0x2
-#define FC_SOL_CTL      0x3
-#define FC_UNSOL_DATA   0x4
-#define FC_FCP_CMND     0x6
-#define FC_ELS_REQ      0x22
-#define FC_ELS_RSP      0x23
-
 /* network headers for Dfctl field */
 #define FC_NET_HDR      0x20
 
@@ -1143,6 +1166,10 @@ typedef struct {
 #define PCI_DEVICE_ID_HORNET        0xfe05
 #define PCI_DEVICE_ID_ZEPHYR_SCSP   0xfe11
 #define PCI_DEVICE_ID_ZEPHYR_DCSP   0xfe12
+#define PCI_VENDOR_ID_SERVERENGINE  0x19a2
+#define PCI_DEVICE_ID_TIGERSHARK    0x0704
+#define PCI_DEVICE_ID_TOMCAT        0x0714
+#define PCI_DEVICE_ID_FALCON        0xf180
 
 #define JEDEC_ID_ADDRESS            0x0080001c
 #define FIREFLY_JEDEC_ID            0x1ACC
@@ -1319,6 +1346,9 @@ typedef struct {		/* FireFly BIU registers */
 #define MBX_HEARTBEAT       0x31
 #define MBX_WRITE_VPARMS    0x32
 #define MBX_ASYNCEVT_ENABLE 0x33
+#define MBX_READ_EVENT_LOG_STATUS 0x37
+#define MBX_READ_EVENT_LOG  0x38
+#define MBX_WRITE_EVENT_LOG 0x39
 
 #define MBX_PORT_CAPABILITIES 0x3B
 #define MBX_PORT_IOV_CONTROL 0x3C
@@ -1333,15 +1363,21 @@ typedef struct {		/* FireFly BIU registers */
 #define MBX_READ_LA64       0x95
 #define MBX_REG_VPI	    0x96
 #define MBX_UNREG_VPI	    0x97
-#define MBX_REG_VNPID	    0x96
-#define MBX_UNREG_VNPID	    0x97
 
 #define MBX_WRITE_WWN       0x98
 #define MBX_SET_DEBUG       0x99
 #define MBX_LOAD_EXP_ROM    0x9C
-
-#define MBX_MAX_CMDS        0x9D
+#define MBX_SLI4_CONFIG	    0x9B
+#define MBX_SLI4_REQ_FTRS   0x9D
+#define MBX_MAX_CMDS        0x9E
+#define MBX_RESUME_RPI      0x9E
 #define MBX_SLI2_CMD_MASK   0x80
+#define MBX_REG_VFI         0x9F
+#define MBX_REG_FCFI        0xA0
+#define MBX_UNREG_VFI       0xA1
+#define MBX_UNREG_FCFI	    0xA2
+#define MBX_INIT_VFI        0xA3
+#define MBX_INIT_VPI        0xA4
 
 /* IOCB Commands */
 
@@ -1398,6 +1434,7 @@ typedef struct {		/* FireFly BIU registers */
 #define CMD_ABORT_MXRI64_CN     0x8C
 #define CMD_RCV_ELS_REQ64_CX    0x8D
 #define CMD_XMIT_ELS_RSP64_CX   0x95
+#define CMD_XMIT_BLS_RSP64_CX   0x97
 #define CMD_FCP_IWRITE64_CR     0x98
 #define CMD_FCP_IWRITE64_CX     0x99
 #define CMD_FCP_IREAD64_CR      0x9A
@@ -1431,7 +1468,13 @@ typedef struct {		/* FireFly BIU registers */
 #define CMD_IOCB_LOGENTRY_CN		0x94
 #define CMD_IOCB_LOGENTRY_ASYNC_CN	0x96
 
-#define CMD_MAX_IOCB_CMD        0xE6
+/* Data Security SLI Commands */
+#define DSSCMD_IWRITE64_CR		0xF8
+#define DSSCMD_IWRITE64_CX		0xF9
+#define DSSCMD_IREAD64_CR		0xFA
+#define DSSCMD_IREAD64_CX		0xFB
+
+#define CMD_MAX_IOCB_CMD        0xFB
 #define CMD_IOCB_MASK           0xff
 
 #define MAX_MSG_DATA            28	/* max msg data in CMD_ADAPTER_MSG
@@ -1457,6 +1500,7 @@ typedef struct {		/* FireFly BIU registers */
 #define MBXERR_BAD_RCV_LENGTH       14
 #define MBXERR_DMA_ERROR            15
 #define MBXERR_ERROR                16
+#define MBXERR_LINK_DOWN            0x33
 #define MBX_NOT_FINISHED           255
 
 #define MBX_BUSY                   0xffffff /* Attempted cmd to busy Mailbox */
@@ -1495,32 +1539,6 @@ struct ulp_bde {
 #endif
 };
 
-struct ulp_bde64 {	/* SLI-2 */
-	union ULP_BDE_TUS {
-		uint32_t w;
-		struct {
-#ifdef __BIG_ENDIAN_BITFIELD
-			uint32_t bdeFlags:8;	/* BDE Flags 0 IS A SUPPORTED
-						   VALUE !! */
-			uint32_t bdeSize:24;	/* Size of buffer (in bytes) */
-#else	/*  __LITTLE_ENDIAN_BITFIELD */
-			uint32_t bdeSize:24;	/* Size of buffer (in bytes) */
-			uint32_t bdeFlags:8;	/* BDE Flags 0 IS A SUPPORTED
-						   VALUE !! */
-#endif
-#define BUFF_TYPE_BDE_64    0x00	/* BDE (Host_resident) */
-#define BUFF_TYPE_BDE_IMMED 0x01	/* Immediate Data BDE */
-#define BUFF_TYPE_BDE_64P   0x02	/* BDE (Port-resident) */
-#define BUFF_TYPE_BDE_64I   0x08	/* Input BDE (Host-resident) */
-#define BUFF_TYPE_BDE_64IP  0x0A	/* Input BDE (Port-resident) */
-#define BUFF_TYPE_BLP_64    0x40	/* BLP (Host-resident) */
-#define BUFF_TYPE_BLP_64P   0x42	/* BLP (Port-resident) */
-		} f;
-	} tus;
-	uint32_t addrLow;
-	uint32_t addrHigh;
-};
-
 typedef struct ULP_BDL {	/* SLI-2 */
 #ifdef __BIG_ENDIAN_BITFIELD
 	uint32_t bdeFlags:8;	/* BDL Flags */
@@ -1534,6 +1552,108 @@ typedef struct ULP_BDL {	/* SLI-2 */
 	uint32_t addrHigh;	/* Address 32:63 */
 	uint32_t ulpIoTag32;	/* Can be used for 32 bit I/O Tag */
 } ULP_BDL;
+
+/*
+ * BlockGuard Definitions
+ */
+
+enum lpfc_protgrp_type {
+	LPFC_PG_TYPE_INVALID = 0, /* used to indicate errors                  */
+	LPFC_PG_TYPE_NO_DIF,	  /* no DIF data pointed to by prot grp       */
+	LPFC_PG_TYPE_EMBD_DIF,	  /* DIF is embedded (inline) with data       */
+	LPFC_PG_TYPE_DIF_BUF	  /* DIF has its own scatter/gather list      */
+};
+
+/* PDE Descriptors */
+#define LPFC_PDE1_DESCRIPTOR		0x81
+#define LPFC_PDE2_DESCRIPTOR		0x82
+#define LPFC_PDE3_DESCRIPTOR		0x83
+
+/* BlockGuard Profiles */
+enum lpfc_bg_prof_codes {
+	LPFC_PROF_INVALID,
+	LPFC_PROF_A1	= 128,	/* Full Protection			      */
+	LPFC_PROF_A2,		/* Disabled Protection Checks:A2~A4           */
+	LPFC_PROF_A3,
+	LPFC_PROF_A4,
+	LPFC_PROF_B1,		/* Embedded DIFs: B1~B3	                      */
+	LPFC_PROF_B2,
+	LPFC_PROF_B3,
+	LPFC_PROF_C1,		/* Separate DIFs: C1~C3                       */
+	LPFC_PROF_C2,
+	LPFC_PROF_C3,
+	LPFC_PROF_D1,		/* Full Protection                            */
+	LPFC_PROF_D2,		/* Partial Protection & Check Disabling       */
+	LPFC_PROF_D3,
+	LPFC_PROF_E1,		/* E1~E4:out - check-only, in - update apptag */
+	LPFC_PROF_E2,
+	LPFC_PROF_E3,
+	LPFC_PROF_E4,
+	LPFC_PROF_F1,		/* Full Translation - F1 Prot Descriptor      */
+				/* F1 Translation BDE                         */
+	LPFC_PROF_ANT1,		/* TCP checksum, DIF inline with data buffers */
+	LPFC_PROF_AST1,		/* TCP checksum, DIF split from data buffer   */
+	LPFC_PROF_ANT2,
+	LPFC_PROF_AST2
+};
+
+/* BlockGuard error-control defines */
+#define BG_EC_STOP_ERR			0x00
+#define BG_EC_CONT_ERR			0x01
+#define BG_EC_IGN_UNINIT_STOP_ERR	0x10
+#define BG_EC_IGN_UNINIT_CONT_ERR	0x11
+
+/* PDE (Protection Descriptor Entry) word 0 bit masks and shifts */
+#define PDE_DESC_TYPE_MASK		0xff000000
+#define PDE_DESC_TYPE_SHIFT		24
+#define PDE_BG_PROFILE_MASK		0x00ff0000
+#define PDE_BG_PROFILE_SHIFT		16
+#define PDE_BLOCK_LEN_MASK		0x0000fffc
+#define PDE_BLOCK_LEN_SHIFT		2
+#define PDE_ERR_CTRL_MASK		0x00000003
+#define PDE_ERR_CTRL_SHIFT		0
+/* PDE word 1 bit masks and shifts */
+#define PDE_APPTAG_MASK_MASK		0xffff0000
+#define PDE_APPTAG_MASK_SHIFT		16
+#define PDE_APPTAG_VAL_MASK		0x0000ffff
+#define PDE_APPTAG_VAL_SHIFT		0
+struct lpfc_pde {
+	uint32_t parms;     /* bitfields of descriptor, prof, len, and ec */
+	uint32_t apptag;    /* bitfields of app tag maskand app tag value */
+	uint32_t reftag;    /* reference tag occupying all 32 bits        */
+};
+
+/* inline function to set fields in parms of PDE */
+static inline void
+lpfc_pde_set_bg_parms(struct lpfc_pde *p, u8 desc, u8 prof, u16 len, u8 ec)
+{
+	uint32_t *wp = &p->parms;
+
+	/* spec indicates that adapter appends two 0's to length field */
+	len = len >> 2;
+
+	*wp &= 0;
+	*wp |= ((desc << PDE_DESC_TYPE_SHIFT) & PDE_DESC_TYPE_MASK);
+	*wp |= ((prof << PDE_BG_PROFILE_SHIFT) & PDE_BG_PROFILE_MASK);
+	*wp |= ((len << PDE_BLOCK_LEN_SHIFT) & PDE_BLOCK_LEN_MASK);
+	*wp |= ((ec << PDE_ERR_CTRL_SHIFT) & PDE_ERR_CTRL_MASK);
+	*wp = le32_to_cpu(*wp);
+}
+
+/* inline function to set apptag and reftag fields of PDE */
+static inline void
+lpfc_pde_set_dif_parms(struct lpfc_pde *p, u16 apptagmask, u16 apptagval,
+		u32 reftag)
+{
+	uint32_t *wp = &p->apptag;
+	*wp &= 0;
+	*wp |= ((apptagmask << PDE_APPTAG_MASK_SHIFT) & PDE_APPTAG_MASK_MASK);
+	*wp |= ((apptagval << PDE_APPTAG_VAL_SHIFT) & PDE_APPTAG_VAL_MASK);
+	*wp = le32_to_cpu(*wp);
+	wp = &p->reftag;
+	*wp = le32_to_cpu(reftag);
+}
+
 
 /* Structure for MB Command LOAD_SM and DOWN_LOAD */
 
@@ -2173,27 +2293,31 @@ typedef struct {
 	uint32_t rsvd1;
 	uint32_t rsvd2:8;
 	uint32_t sid:24;
-	uint32_t rsvd3;
-	uint32_t rsvd4;
+	uint32_t wwn[2];
 	uint32_t rsvd5;
-	uint16_t rsvd6;
+	uint16_t vfi;
 	uint16_t vpi;
 #else	/*  __LITTLE_ENDIAN */
 	uint32_t rsvd1;
 	uint32_t sid:24;
 	uint32_t rsvd2:8;
-	uint32_t rsvd3;
-	uint32_t rsvd4;
+	uint32_t wwn[2];
 	uint32_t rsvd5;
 	uint16_t vpi;
-	uint16_t rsvd6;
+	uint16_t vfi;
 #endif
 } REG_VPI_VAR;
 
 /* Structure for MB Command UNREG_VPI (0x97) */
 typedef struct {
 	uint32_t rsvd1;
-	uint32_t rsvd2;
+#ifdef __BIG_ENDIAN_BITFIELD
+	uint16_t rsvd2;
+	uint16_t sli4_vpi;
+#else	/*  __LITTLE_ENDIAN */
+	uint16_t sli4_vpi;
+	uint16_t rsvd2;
+#endif
 	uint32_t rsvd3;
 	uint32_t rsvd4;
 	uint32_t rsvd5;
@@ -2346,7 +2470,7 @@ typedef struct {
 	uint32_t entry_index:16;
 #endif
 
-	uint32_t rsvd1;
+	uint32_t sli4_length;
 	uint32_t word_cnt;
 	uint32_t resp_offset;
 } DUMP_VAR;
@@ -2358,6 +2482,53 @@ typedef struct {
 #define  DMP_VPD_SIZE            0x400  /* maximum amount of VPD */
 #define  DMP_RSP_OFFSET          0x14   /* word 5 contains first word of rsp */
 #define  DMP_RSP_SIZE            0x6C   /* maximum of 27 words of rsp data */
+
+#define  DMP_REGION_VPORT	 0x16   /* VPort info region */
+#define  DMP_VPORT_REGION_SIZE	 0x200
+#define  DMP_MBOX_OFFSET_WORD	 0x5
+
+#define  DMP_REGION_23	 	 0x17   /* fcoe param  and port state region */
+#define  DMP_RGN23_SIZE	 	 0x400
+
+#define  WAKE_UP_PARMS_REGION_ID    4
+#define  WAKE_UP_PARMS_WORD_SIZE   15
+
+struct vport_rec {
+	uint8_t wwpn[8];
+	uint8_t wwnn[8];
+};
+
+#define VPORT_INFO_SIG 0x32324752
+#define VPORT_INFO_REV_MASK 0xff
+#define VPORT_INFO_REV 0x1
+#define MAX_STATIC_VPORT_COUNT 16
+struct static_vport_info {
+	uint32_t 		signature;
+	uint32_t		rev;
+	struct vport_rec 	vport_list[MAX_STATIC_VPORT_COUNT];
+	uint32_t		resvd[66];
+};
+
+/* Option rom version structure */
+struct prog_id {
+#ifdef __BIG_ENDIAN_BITFIELD
+	uint8_t  type;
+	uint8_t  id;
+	uint32_t ver:4;  /* Major Version */
+	uint32_t rev:4;  /* Revision */
+	uint32_t lev:2;  /* Level */
+	uint32_t dist:2; /* Dist Type */
+	uint32_t num:4;  /* number after dist type */
+#else /*  __LITTLE_ENDIAN_BITFIELD */
+	uint32_t num:4;  /* number after dist type */
+	uint32_t dist:2; /* Dist Type */
+	uint32_t lev:2;  /* Level */
+	uint32_t rev:4;  /* Revision */
+	uint32_t ver:4;  /* Major Version */
+	uint8_t  id;
+	uint8_t  type;
+#endif
+};
 
 /* Structure for MB Command UPDATE_CFG (0x1B) */
 
@@ -2552,11 +2723,21 @@ typedef struct {
 
 	uint32_t pcbLow;       /* bit 31:0  of memory based port config block */
 	uint32_t pcbHigh;      /* bit 63:32 of memory based port config block */
-	uint32_t hbainit[6];
+	uint32_t hbainit[5];
+#ifdef __BIG_ENDIAN_BITFIELD
+	uint32_t hps	   :  1; /* bit 31 word9 Host Pointer in slim */
+	uint32_t rsvd	   : 31; /* least significant 31 bits of word 9 */
+#else   /*  __LITTLE_ENDIAN */
+	uint32_t rsvd      : 31; /* least significant 31 bits of word 9 */
+	uint32_t hps	   :  1; /* bit 31 word9 Host Pointer in slim */
+#endif
 
 #ifdef __BIG_ENDIAN_BITFIELD
-	uint32_t rsvd      : 24;  /* Reserved                             */
-	uint32_t cmv	   :  1;  /* Configure Max VPIs                   */
+	uint32_t rsvd1     : 19;  /* Reserved                             */
+	uint32_t cdss      :  1;  /* Configure Data Security SLI          */
+	uint32_t rsvd2     :  3;  /* Reserved                             */
+	uint32_t cbg       :  1;  /* Configure BlockGuard                 */
+	uint32_t cmv       :  1;  /* Configure Max VPIs                   */
 	uint32_t ccrp      :  1;  /* Config Command Ring Polling          */
 	uint32_t csah      :  1;  /* Configure Synchronous Abort Handling */
 	uint32_t chbs      :  1;  /* Cofigure Host Backing store          */
@@ -2573,10 +2754,16 @@ typedef struct {
 	uint32_t csah      :  1;  /* Configure Synchronous Abort Handling */
 	uint32_t ccrp      :  1;  /* Config Command Ring Polling          */
 	uint32_t cmv	   :  1;  /* Configure Max VPIs                   */
-	uint32_t rsvd      : 24;  /* Reserved                             */
+	uint32_t cbg       :  1;  /* Configure BlockGuard                 */
+	uint32_t rsvd2     :  3;  /* Reserved                             */
+	uint32_t cdss      :  1;  /* Configure Data Security SLI          */
+	uint32_t rsvd1     : 19;  /* Reserved                             */
 #endif
 #ifdef __BIG_ENDIAN_BITFIELD
-	uint32_t rsvd2     : 24;  /* Reserved                             */
+	uint32_t rsvd3     : 19;  /* Reserved                             */
+	uint32_t gdss      :  1;  /* Configure Data Security SLI          */
+	uint32_t rsvd4     :  3;  /* Reserved                             */
+	uint32_t gbg       :  1;  /* Grant BlockGuard                     */
 	uint32_t gmv	   :  1;  /* Grant Max VPIs                       */
 	uint32_t gcrp	   :  1;  /* Grant Command Ring Polling           */
 	uint32_t gsah	   :  1;  /* Grant Synchronous Abort Handling     */
@@ -2594,7 +2781,10 @@ typedef struct {
 	uint32_t gsah	   :  1;  /* Grant Synchronous Abort Handling     */
 	uint32_t gcrp	   :  1;  /* Grant Command Ring Polling           */
 	uint32_t gmv	   :  1;  /* Grant Max VPIs                       */
-	uint32_t rsvd2     : 24;  /* Reserved                             */
+	uint32_t gbg       :  1;  /* Grant BlockGuard                     */
+	uint32_t rsvd4     :  3;  /* Reserved                             */
+	uint32_t gdss      :  1;  /* Configure Data Security SLI          */
+	uint32_t rsvd3     : 19;  /* Reserved                             */
 #endif
 
 #ifdef __BIG_ENDIAN_BITFIELD
@@ -2607,20 +2797,20 @@ typedef struct {
 
 #ifdef __BIG_ENDIAN_BITFIELD
 	uint32_t max_hbq   : 16;  /* Max HBQs Host expect to configure    */
-	uint32_t rsvd3     : 16;  /* Max HBQs Host expect to configure    */
+	uint32_t rsvd5     : 16;  /* Max HBQs Host expect to configure    */
 #else	/*  __LITTLE_ENDIAN */
-	uint32_t rsvd3     : 16;  /* Max HBQs Host expect to configure    */
+	uint32_t rsvd5     : 16;  /* Max HBQs Host expect to configure    */
 	uint32_t max_hbq   : 16;  /* Max HBQs Host expect to configure    */
 #endif
 
-	uint32_t rsvd4;           /* Reserved                             */
+	uint32_t rsvd6;           /* Reserved                             */
 
 #ifdef __BIG_ENDIAN_BITFIELD
-	uint32_t rsvd5      : 16;  /* Reserved                             */
+	uint32_t rsvd7      : 16;  /* Reserved                             */
 	uint32_t max_vpi    : 16;  /* Max number of virt N-Ports           */
 #else	/*  __LITTLE_ENDIAN */
 	uint32_t max_vpi    : 16;  /* Max number of virt N-Ports           */
-	uint32_t rsvd5      : 16;  /* Reserved                             */
+	uint32_t rsvd7      : 16;  /* Reserved                             */
 #endif
 
 } CONFIG_PORT_VAR;
@@ -3214,6 +3404,94 @@ struct que_xri64cx_ext_fields {
 	struct lpfc_hbq_entry	buff[5];
 };
 
+struct sli3_bg_fields {
+	uint32_t filler[6];	/* word 8-13 in IOCB */
+	uint32_t bghm;		/* word 14 - BlockGuard High Water Mark */
+/* Bitfields for bgstat (BlockGuard Status - word 15 of IOCB) */
+#define BGS_BIDIR_BG_PROF_MASK		0xff000000
+#define BGS_BIDIR_BG_PROF_SHIFT		24
+#define BGS_BIDIR_ERR_COND_FLAGS_MASK	0x003f0000
+#define BGS_BIDIR_ERR_COND_SHIFT	16
+#define BGS_BG_PROFILE_MASK		0x0000ff00
+#define BGS_BG_PROFILE_SHIFT		8
+#define BGS_INVALID_PROF_MASK		0x00000020
+#define BGS_INVALID_PROF_SHIFT		5
+#define BGS_UNINIT_DIF_BLOCK_MASK	0x00000010
+#define BGS_UNINIT_DIF_BLOCK_SHIFT	4
+#define BGS_HI_WATER_MARK_PRESENT_MASK	0x00000008
+#define BGS_HI_WATER_MARK_PRESENT_SHIFT	3
+#define BGS_REFTAG_ERR_MASK		0x00000004
+#define BGS_REFTAG_ERR_SHIFT		2
+#define BGS_APPTAG_ERR_MASK		0x00000002
+#define BGS_APPTAG_ERR_SHIFT		1
+#define BGS_GUARD_ERR_MASK		0x00000001
+#define BGS_GUARD_ERR_SHIFT		0
+	uint32_t bgstat;	/* word 15 - BlockGuard Status */
+};
+
+static inline uint32_t
+lpfc_bgs_get_bidir_bg_prof(uint32_t bgstat)
+{
+	return (le32_to_cpu(bgstat) & BGS_BIDIR_BG_PROF_MASK) >>
+				BGS_BIDIR_BG_PROF_SHIFT;
+}
+
+static inline uint32_t
+lpfc_bgs_get_bidir_err_cond(uint32_t bgstat)
+{
+	return (le32_to_cpu(bgstat) & BGS_BIDIR_ERR_COND_FLAGS_MASK) >>
+				BGS_BIDIR_ERR_COND_SHIFT;
+}
+
+static inline uint32_t
+lpfc_bgs_get_bg_prof(uint32_t bgstat)
+{
+	return (le32_to_cpu(bgstat) & BGS_BG_PROFILE_MASK) >>
+				BGS_BG_PROFILE_SHIFT;
+}
+
+static inline uint32_t
+lpfc_bgs_get_invalid_prof(uint32_t bgstat)
+{
+	return (le32_to_cpu(bgstat) & BGS_INVALID_PROF_MASK) >>
+				BGS_INVALID_PROF_SHIFT;
+}
+
+static inline uint32_t
+lpfc_bgs_get_uninit_dif_block(uint32_t bgstat)
+{
+	return (le32_to_cpu(bgstat) & BGS_UNINIT_DIF_BLOCK_MASK) >>
+				BGS_UNINIT_DIF_BLOCK_SHIFT;
+}
+
+static inline uint32_t
+lpfc_bgs_get_hi_water_mark_present(uint32_t bgstat)
+{
+	return (le32_to_cpu(bgstat) & BGS_HI_WATER_MARK_PRESENT_MASK) >>
+				BGS_HI_WATER_MARK_PRESENT_SHIFT;
+}
+
+static inline uint32_t
+lpfc_bgs_get_reftag_err(uint32_t bgstat)
+{
+	return (le32_to_cpu(bgstat) & BGS_REFTAG_ERR_MASK) >>
+				BGS_REFTAG_ERR_SHIFT;
+}
+
+static inline uint32_t
+lpfc_bgs_get_apptag_err(uint32_t bgstat)
+{
+	return (le32_to_cpu(bgstat) & BGS_APPTAG_ERR_MASK) >>
+				BGS_APPTAG_ERR_SHIFT;
+}
+
+static inline uint32_t
+lpfc_bgs_get_guard_err(uint32_t bgstat)
+{
+	return (le32_to_cpu(bgstat) & BGS_GUARD_ERR_MASK) >>
+				BGS_GUARD_ERR_SHIFT;
+}
+
 #define LPFC_EXT_DATA_BDE_COUNT 3
 struct fcp_irw_ext {
 	uint32_t	io_tag64_low;
@@ -3260,7 +3538,7 @@ typedef struct _IOCB {	/* IOCB structure */
 		ASYNCSTAT_FIELDS asyncstat; /* async_status iocb */
 		QUE_XRI64_CX_FIELDS quexri64cx; /* que_xri64_cx fields */
 		struct rcv_seq64 rcvseq64;	/* RCV_SEQ64 and RCV_CONT64 */
-
+		struct sli4_bls_acc bls_acc; /* UNSOL ABTS BLS_ACC params */
 		uint32_t ulpWord[IOCB_WORD_SZ - 2];	/* generic 6 'words' */
 	} un;
 	union {
@@ -3322,6 +3600,9 @@ typedef struct _IOCB {	/* IOCB structure */
 		struct que_xri64cx_ext_fields que_xri64cx_ext_words;
 		struct fcp_irw_ext fcp_ext;
 		uint32_t sli3Words[24]; /* 96 extra bytes for SLI-3 */
+
+		/* words 8-15 for BlockGuard */
+		struct sli3_bg_fields sli3_bg;
 	} unsli3;
 
 #define ulpCt_h ulpXS
@@ -3429,3 +3710,5 @@ lpfc_error_lost_link(IOCB_t *iocbp)
 #define MENLO_TIMEOUT 30
 #define SETVAR_MLOMNT 0x103107
 #define SETVAR_MLORST 0x103007
+
+#define BPL_ALIGN_SZ 8 /* 8 byte alignment for bpl and mbufs */

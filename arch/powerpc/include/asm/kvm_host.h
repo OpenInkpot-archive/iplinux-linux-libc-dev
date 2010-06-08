@@ -21,7 +21,8 @@
 #define __POWERPC_KVM_HOST_H__
 
 #include <linux/mutex.h>
-#include <linux/timer.h>
+#include <linux/hrtimer.h>
+#include <linux/interrupt.h>
 #include <linux/types.h>
 #include <linux/kvm_types.h>
 #include <asm/kvm_asm.h>
@@ -34,7 +35,10 @@
 #define KVM_COALESCED_MMIO_PAGE_OFFSET 1
 
 /* We don't currently support large pages. */
-#define KVM_PAGES_PER_HPAGE (1<<31)
+#define KVM_NR_PAGE_SIZES	1
+#define KVM_PAGES_PER_HPAGE(x)	(1UL<<31)
+
+#define HPTEG_CACHE_NUM 1024
 
 struct kvm;
 struct kvm_run;
@@ -62,87 +66,201 @@ struct kvm_vcpu_stat {
 	u32 dec_exits;
 	u32 ext_intr_exits;
 	u32 halt_wakeup;
+#ifdef CONFIG_PPC64
+	u32 pf_storage;
+	u32 pf_instruc;
+	u32 sp_storage;
+	u32 sp_instruc;
+	u32 queue_intr;
+	u32 ld;
+	u32 ld_slow;
+	u32 st;
+	u32 st_slow;
+#endif
 };
 
-struct tlbe {
-	u32 tid; /* Only the low 8 bits are used. */
-	u32 word0;
-	u32 word1;
-	u32 word2;
+enum kvm_exit_types {
+	MMIO_EXITS,
+	DCR_EXITS,
+	SIGNAL_EXITS,
+	ITLB_REAL_MISS_EXITS,
+	ITLB_VIRT_MISS_EXITS,
+	DTLB_REAL_MISS_EXITS,
+	DTLB_VIRT_MISS_EXITS,
+	SYSCALL_EXITS,
+	ISI_EXITS,
+	DSI_EXITS,
+	EMULATED_INST_EXITS,
+	EMULATED_MTMSRWE_EXITS,
+	EMULATED_WRTEE_EXITS,
+	EMULATED_MTSPR_EXITS,
+	EMULATED_MFSPR_EXITS,
+	EMULATED_MTMSR_EXITS,
+	EMULATED_MFMSR_EXITS,
+	EMULATED_TLBSX_EXITS,
+	EMULATED_TLBWE_EXITS,
+	EMULATED_RFI_EXITS,
+	DEC_EXITS,
+	EXT_INTR_EXITS,
+	HALT_WAKEUP,
+	USR_PR_INST,
+	FP_UNAVAIL,
+	DEBUG_EXITS,
+	TIMEINGUEST,
+	__NUMBER_OF_KVM_EXIT_TYPES
+};
+
+/* allow access to big endian 32bit upper/lower parts and 64bit var */
+struct kvmppc_exit_timing {
+	union {
+		u64 tv64;
+		struct {
+			u32 tbu, tbl;
+		} tv32;
+	};
 };
 
 struct kvm_arch {
 };
 
+struct kvmppc_pte {
+	u64 eaddr;
+	u64 vpage;
+	u64 raddr;
+	bool may_read;
+	bool may_write;
+	bool may_execute;
+};
+
+struct kvmppc_mmu {
+	/* book3s_64 only */
+	void (*slbmte)(struct kvm_vcpu *vcpu, u64 rb, u64 rs);
+	u64  (*slbmfee)(struct kvm_vcpu *vcpu, u64 slb_nr);
+	u64  (*slbmfev)(struct kvm_vcpu *vcpu, u64 slb_nr);
+	void (*slbie)(struct kvm_vcpu *vcpu, u64 slb_nr);
+	void (*slbia)(struct kvm_vcpu *vcpu);
+	/* book3s */
+	void (*mtsrin)(struct kvm_vcpu *vcpu, u32 srnum, ulong value);
+	u32  (*mfsrin)(struct kvm_vcpu *vcpu, u32 srnum);
+	int  (*xlate)(struct kvm_vcpu *vcpu, gva_t eaddr, struct kvmppc_pte *pte, bool data);
+	void (*reset_msr)(struct kvm_vcpu *vcpu);
+	void (*tlbie)(struct kvm_vcpu *vcpu, ulong addr, bool large);
+	int  (*esid_to_vsid)(struct kvm_vcpu *vcpu, u64 esid, u64 *vsid);
+	u64  (*ea_to_vp)(struct kvm_vcpu *vcpu, gva_t eaddr, bool data);
+	bool (*is_dcbz32)(struct kvm_vcpu *vcpu);
+};
+
+struct hpte_cache {
+	u64 host_va;
+	u64 pfn;
+	ulong slot;
+	struct kvmppc_pte pte;
+};
+
 struct kvm_vcpu_arch {
-	/* Unmodified copy of the guest's TLB. */
-	struct tlbe guest_tlb[PPC44x_TLB_SIZE];
-	/* TLB that's actually used when the guest is running. */
-	struct tlbe shadow_tlb[PPC44x_TLB_SIZE];
-	/* Pages which are referenced in the shadow TLB. */
-	struct page *shadow_pages[PPC44x_TLB_SIZE];
-
-	/* Track which TLB entries we've modified in the current exit. */
-	u8 shadow_tlb_mod[PPC44x_TLB_SIZE];
-
-	u32 host_stack;
+	ulong host_stack;
 	u32 host_pid;
-	u32 host_dbcr0;
-	u32 host_dbcr1;
-	u32 host_dbcr2;
-	u32 host_iac[4];
-	u32 host_msr;
+#ifdef CONFIG_PPC64
+	ulong host_msr;
+	ulong host_r2;
+	void *host_retip;
+	ulong trampoline_lowmem;
+	ulong trampoline_enter;
+	ulong highmem_handler;
+	ulong rmcall;
+	ulong host_paca_phys;
+	struct kvmppc_mmu mmu;
+#endif
+
+	ulong gpr[32];
 
 	u64 fpr[32];
-	u32 gpr[32];
+	u32 fpscr;
 
-	u32 pc;
+#ifdef CONFIG_ALTIVEC
+	vector128 vr[32];
+	vector128 vscr;
+#endif
+
+#ifdef CONFIG_VSX
+	u64 vsr[32];
+#endif
+
+	ulong pc;
+	ulong ctr;
+	ulong lr;
+
+#ifdef CONFIG_BOOKE
+	ulong xer;
 	u32 cr;
-	u32 ctr;
-	u32 lr;
-	u32 xer;
+#endif
 
-	u32 msr;
+	ulong msr;
+#ifdef CONFIG_PPC64
+	ulong shadow_msr;
+	ulong shadow_srr1;
+	ulong hflags;
+	ulong guest_owned_ext;
+#endif
 	u32 mmucr;
-	u32 sprg0;
-	u32 sprg1;
-	u32 sprg2;
-	u32 sprg3;
-	u32 sprg4;
-	u32 sprg5;
-	u32 sprg6;
-	u32 sprg7;
-	u32 srr0;
-	u32 srr1;
-	u32 csrr0;
-	u32 csrr1;
-	u32 dsrr0;
-	u32 dsrr1;
-	u32 dear;
-	u32 esr;
+	ulong sprg0;
+	ulong sprg1;
+	ulong sprg2;
+	ulong sprg3;
+	ulong sprg4;
+	ulong sprg5;
+	ulong sprg6;
+	ulong sprg7;
+	ulong srr0;
+	ulong srr1;
+	ulong csrr0;
+	ulong csrr1;
+	ulong dsrr0;
+	ulong dsrr1;
+	ulong dear;
+	ulong esr;
 	u32 dec;
 	u32 decar;
 	u32 tbl;
 	u32 tbu;
 	u32 tcr;
 	u32 tsr;
-	u32 ivor[16];
-	u32 ivpr;
+	u32 ivor[64];
+	ulong ivpr;
 	u32 pir;
+	u32 pvr;
 
 	u32 shadow_pid;
 	u32 pid;
 	u32 swap_pid;
 
-	u32 pvr;
 	u32 ccr0;
 	u32 ccr1;
 	u32 dbcr0;
 	u32 dbcr1;
+	u32 dbsr;
+
+#ifdef CONFIG_KVM_EXIT_TIMING
+	struct kvmppc_exit_timing timing_exit;
+	struct kvmppc_exit_timing timing_last_enter;
+	u32 last_exit_type;
+	u32 timing_count_type[__NUMBER_OF_KVM_EXIT_TYPES];
+	u64 timing_sum_duration[__NUMBER_OF_KVM_EXIT_TYPES];
+	u64 timing_sum_quad_duration[__NUMBER_OF_KVM_EXIT_TYPES];
+	u64 timing_min_duration[__NUMBER_OF_KVM_EXIT_TYPES];
+	u64 timing_max_duration[__NUMBER_OF_KVM_EXIT_TYPES];
+	u64 timing_last_exit;
+	struct dentry *debugfs_exit_timing;
+#endif
 
 	u32 last_inst;
-	u32 fault_dear;
-	u32 fault_esr;
+#ifdef CONFIG_PPC64
+	ulong fault_dsisr;
+#endif
+	ulong fault_dear;
+	ulong fault_esr;
+	ulong queued_dear;
+	ulong queued_esr;
 	gpa_t paddr_accessed;
 
 	u8 io_gpr; /* GPR used as IO source/target */
@@ -152,14 +270,15 @@ struct kvm_vcpu_arch {
 
 	u32 cpr0_cfgaddr; /* holds the last set cpr0_cfgaddr */
 
-	struct timer_list dec_timer;
+	struct hrtimer dec_timer;
+	struct tasklet_struct tasklet;
+	u64 dec_jiffies;
 	unsigned long pending_exceptions;
-};
 
-struct kvm_guest_debug {
-	int enabled;
-	unsigned long bp[4];
-	int singlestep;
+#ifdef CONFIG_PPC64
+	struct hpte_cache hpte_cache[HPTEG_CACHE_NUM];
+	int hpte_cache_offset;
+#endif
 };
 
 #endif /* __POWERPC_KVM_HOST_H__ */

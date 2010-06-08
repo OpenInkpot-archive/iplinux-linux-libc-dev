@@ -82,6 +82,7 @@
  *
  */
 
+#include <linux/bitops.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/slab.h>
@@ -434,7 +435,6 @@ static void initialize_dma_trm_ctx(struct dma_trm_ctx *d)
 /* Count the number of available iso contexts */
 static int get_nb_iso_ctx(struct ti_ohci *ohci, int reg)
 {
-	int i,ctx=0;
 	u32 tmp;
 
 	reg_write(ohci, reg, 0xffffffff);
@@ -443,11 +443,7 @@ static int get_nb_iso_ctx(struct ti_ohci *ohci, int reg)
 	DBGMSG("Iso contexts reg: %08x implemented: %08x", reg, tmp);
 
 	/* Count the number of contexts */
-	for (i=0; i<32; i++) {
-	    	if (tmp & 1) ctx++;
-		tmp >>= 1;
-	}
-	return ctx;
+	return hweight32(tmp);
 }
 
 /* Global initialization */
@@ -2973,7 +2969,7 @@ alloc_dma_trm_ctx(struct ti_ohci *ohci, struct dma_trm_ctx *d,
 	return 0;
 }
 
-static void ohci_set_hw_config_rom(struct hpsb_host *host, quadlet_t *config_rom)
+static void ohci_set_hw_config_rom(struct hpsb_host *host, __be32 *config_rom)
 {
 	struct ti_ohci *ohci = host->hostdata;
 
@@ -3199,15 +3195,16 @@ static int __devinit ohci1394_pci_probe(struct pci_dev *dev,
 	/* Now enable LPS, which we need in order to start accessing
 	 * most of the registers.  In fact, on some cards (ALI M5251),
 	 * accessing registers in the SClk domain without LPS enabled
-	 * will lock up the machine.  Wait 50msec to make sure we have
-	 * full link enabled.  */
+	 * will lock up the machine. */
 	reg_write(ohci, OHCI1394_HCControlSet, OHCI1394_HCControl_LPS);
 
 	/* Disable and clear interrupts */
 	reg_write(ohci, OHCI1394_IntEventClear, 0xffffffff);
 	reg_write(ohci, OHCI1394_IntMaskClear, 0xffffffff);
 
-	mdelay(50);
+	/* Flush MMIO writes and wait to make sure we have full link enabled. */
+	reg_read(ohci, OHCI1394_Version);
+	msleep(50);
 
 	/* Determine the number of available IR and IT contexts. */
 	ohci->nb_iso_rcv_ctx =
@@ -3233,8 +3230,9 @@ static int __devinit ohci1394_pci_probe(struct pci_dev *dev,
 	 * we need to get to that "no event", so enough should be initialized
 	 * by that point.
 	 */
-	if (request_irq(dev->irq, ohci_irq_handler, IRQF_SHARED,
-			 OHCI1394_DRIVER_NAME, ohci)) {
+	err = request_irq(dev->irq, ohci_irq_handler, IRQF_SHARED,
+			  OHCI1394_DRIVER_NAME, ohci);
+	if (err) {
 		PRINT_G(KERN_ERR, "Failed to allocate interrupt %d", dev->irq);
 		goto err;
 	}
@@ -3381,6 +3379,7 @@ static int ohci1394_pci_suspend(struct pci_dev *dev, pm_message_t state)
 	ohci_devctl(ohci->host, RESET_BUS, LONG_RESET_NO_FORCE_ROOT);
 	ohci_soft_reset(ohci);
 
+	free_irq(dev->irq, ohci);
 	err = pci_save_state(dev);
 	if (err) {
 		PRINT(KERN_ERR, "pci_save_state failed with %d", err);
@@ -3420,7 +3419,16 @@ static int ohci1394_pci_resume(struct pci_dev *dev)
 	reg_write(ohci, OHCI1394_HCControlSet, OHCI1394_HCControl_LPS);
 	reg_write(ohci, OHCI1394_IntEventClear, 0xffffffff);
 	reg_write(ohci, OHCI1394_IntMaskClear, 0xffffffff);
-	mdelay(50);
+	reg_read(ohci, OHCI1394_Version);
+	msleep(50);
+
+	err = request_irq(dev->irq, ohci_irq_handler, IRQF_SHARED,
+			  OHCI1394_DRIVER_NAME, ohci);
+	if (err) {
+		PRINT_G(KERN_ERR, "Failed to allocate interrupt %d", dev->irq);
+		return err;
+	}
+
 	ohci_initialize(ohci);
 
 	hpsb_resume_host(ohci->host);

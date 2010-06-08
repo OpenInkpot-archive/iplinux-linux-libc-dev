@@ -15,7 +15,8 @@
 
 #include <linux/kernel.h>
 #include <linux/mutex.h>
-#include <linux/workqueue.h>
+#include <linux/interrupt.h>
+#include <linux/completion.h>
 
 #include <linux/mfd/wm8350/audio.h>
 #include <linux/mfd/wm8350/gpio.h>
@@ -29,6 +30,7 @@
  */
 #define WM8350_RESET_ID                         0x00
 #define WM8350_ID                               0x01
+#define WM8350_REVISION				0x02
 #define WM8350_SYSTEM_CONTROL_1                 0x03
 #define WM8350_SYSTEM_CONTROL_2                 0x04
 #define WM8350_SYSTEM_HIBERNATE                 0x05
@@ -57,6 +59,10 @@
 #define WM8350_OVER_CURRENT_INT_STATUS_MASK     0x25
 #define WM8350_GPIO_INT_STATUS_MASK             0x26
 #define WM8350_COMPARATOR_INT_STATUS_MASK       0x27
+#define WM8350_CHARGER_OVERRIDES		0xE2
+#define WM8350_MISC_OVERRIDES			0xE3
+#define WM8350_COMPARATOR_OVERRIDES		0xE7
+#define WM8350_STATE_MACHINE_STATUS		0xE9
 
 #define WM8350_MAX_REGISTER                     0xFF
 
@@ -75,6 +81,11 @@
 #define WM8350_CHIP_REV_MASK                    0x7000
 #define WM8350_CONF_STS_MASK                    0x0C00
 #define WM8350_CUST_ID_MASK                     0x00FF
+
+/*
+ * R2 (0x02) - Revision
+ */
+#define WM8350_MASK_REV_MASK			0x00FF
 
 /*
  * R3 (0x03) - System Control 1
@@ -523,6 +534,35 @@
 #define WM8350_DC2_STS                          0x0002
 #define WM8350_DC1_STS                          0x0001
 
+/*
+ * R226 (0xE2) - Charger status
+ */
+#define WM8350_CHG_BATT_HOT_OVRDE		0x8000
+#define WM8350_CHG_BATT_COLD_OVRDE		0x4000
+
+/*
+ * R227 (0xE3) - Misc Overrides
+ */
+#define WM8350_USB_LIMIT_OVRDE			0x0400
+
+/*
+ * R227 (0xE7) - Comparator Overrides
+ */
+#define WM8350_USB_FB_OVRDE			0x8000
+#define WM8350_WALL_FB_OVRDE			0x4000
+#define WM8350_BATT_FB_OVRDE			0x2000
+
+
+/*
+ * R233 (0xE9) - State Machinine Status
+ */
+#define WM8350_USB_SM_MASK			0x0700
+#define WM8350_USB_SM_SHIFT			8
+
+#define WM8350_USB_SM_100_SLV   1
+#define WM8350_USB_SM_500_SLV   5
+#define WM8350_USB_SM_STDBY_SLV 7
+
 /* WM8350 wake up conditions */
 #define WM8350_IRQ_WKUP_OFF_STATE		43
 #define WM8350_IRQ_WKUP_HIB_STATE		44
@@ -536,8 +576,11 @@
 #define WM8350_REV_E				0x4
 #define WM8350_REV_F				0x5
 #define WM8350_REV_G				0x6
+#define WM8350_REV_H				0x7
 
 #define WM8350_NUM_IRQ				63
+
+#define WM8350_NUM_IRQ_REGS 7
 
 struct wm8350_reg_access {
 	u16 readable;		/* Mask of readable bits */
@@ -549,17 +592,23 @@ extern const u16 wm8350_mode0_defaults[];
 extern const u16 wm8350_mode1_defaults[];
 extern const u16 wm8350_mode2_defaults[];
 extern const u16 wm8350_mode3_defaults[];
+extern const u16 wm8351_mode0_defaults[];
+extern const u16 wm8351_mode1_defaults[];
+extern const u16 wm8351_mode2_defaults[];
+extern const u16 wm8351_mode3_defaults[];
+extern const u16 wm8352_mode0_defaults[];
+extern const u16 wm8352_mode1_defaults[];
+extern const u16 wm8352_mode2_defaults[];
+extern const u16 wm8352_mode3_defaults[];
 
 struct wm8350;
 
-struct wm8350_irq {
-	void (*handler) (struct wm8350 *, int, void *);
-	void *data;
+struct wm8350_hwmon {
+	struct platform_device *pdev;
+	struct device *classdev;
 };
 
 struct wm8350 {
-	int rev;		/* chip revision */
-
 	struct device *dev;
 
 	/* device IO */
@@ -572,15 +621,19 @@ struct wm8350 {
 			 void *src);
 	u16 *reg_cache;
 
+	struct mutex auxadc_mutex;
+	struct completion auxadc_done;
+
 	/* Interrupt handling */
-	struct work_struct irq_work;
-	struct mutex irq_mutex; /* IRQ table mutex */
-	struct wm8350_irq irq[WM8350_NUM_IRQ];
+	struct mutex irq_lock;
 	int chip_irq;
+	int irq_base;
+	u16 irq_masks[WM8350_NUM_IRQ_REGS];
 
 	/* Client devices */
 	struct wm8350_codec codec;
 	struct wm8350_gpio gpio;
+	struct wm8350_hwmon hwmon;
 	struct wm8350_pmic pmic;
 	struct wm8350_power power;
 	struct wm8350_rtc rtc;
@@ -592,9 +645,15 @@ struct wm8350 {
  *
  * @init: Function called during driver initialisation.  Should be
  *        used by the platform to configure GPIO functions and similar.
+ * @irq_high: Set if WM8350 IRQ is active high.
+ * @irq_base: Base IRQ for genirq (not currently used).
+ * @gpio_base: Base for gpiolib.
  */
 struct wm8350_platform_data {
 	int (*init)(struct wm8350 *wm8350);
+	int irq_high;
+	int irq_base;
+	int gpio_base;
 };
 
 
@@ -620,12 +679,35 @@ int wm8350_block_write(struct wm8350 *wm8350, int reg, int size, u16 *src);
 /*
  * WM8350 internal interrupts
  */
-int wm8350_register_irq(struct wm8350 *wm8350, int irq,
-			void (*handler) (struct wm8350 *, int, void *),
-			void *data);
-int wm8350_free_irq(struct wm8350 *wm8350, int irq);
-int wm8350_mask_irq(struct wm8350 *wm8350, int irq);
-int wm8350_unmask_irq(struct wm8350 *wm8350, int irq);
+static inline int wm8350_register_irq(struct wm8350 *wm8350, int irq,
+				      irq_handler_t handler,
+				      unsigned long flags,
+				      const char *name, void *data)
+{
+	if (!wm8350->irq_base)
+		return -ENODEV;
 
+	return request_threaded_irq(irq + wm8350->irq_base, NULL,
+				    handler, flags, name, data);
+}
+
+static inline void wm8350_free_irq(struct wm8350 *wm8350, int irq, void *data)
+{
+	free_irq(irq + wm8350->irq_base, data);
+}
+
+static inline void wm8350_mask_irq(struct wm8350 *wm8350, int irq)
+{
+	disable_irq(irq + wm8350->irq_base);
+}
+
+static inline void wm8350_unmask_irq(struct wm8350 *wm8350, int irq)
+{
+	enable_irq(irq + wm8350->irq_base);
+}
+
+int wm8350_irq_init(struct wm8350 *wm8350, int irq,
+		    struct wm8350_platform_data *pdata);
+int wm8350_irq_exit(struct wm8350 *wm8350);
 
 #endif

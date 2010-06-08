@@ -480,33 +480,6 @@ EXPORT_SYMBOL(pcibios_bus_to_resource);
 #endif
 
 /*
- * This is the standard PCI-PCI bridge swizzling algorithm:
- *
- *   Dev: 0  1  2  3
- *    A   A  B  C  D
- *    B   B  C  D  A
- *    C   C  D  A  B
- *    D   D  A  B  C
- *        ^^^^^^^^^^ irq pin on bridge
- */
-u8 __devinit pci_std_swizzle(struct pci_dev *dev, u8 *pinp)
-{
-	int pin = *pinp - 1;
-
-	while (dev->bus->self) {
-		pin = (pin + PCI_SLOT(dev->devfn)) & 3;
-		/*
-		 * move up the chain of bridges,
-		 * swizzling as we go.
-		 */
-		dev = dev->bus->self;
-	}
-	*pinp = pin + 1;
-
-	return PCI_SLOT(dev->devfn);
-}
-
-/*
  * Swizzle the device pin each time we cross a bridge.
  * This might update pin and returns the slot number.
  */
@@ -643,15 +616,17 @@ char * __init pcibios_setup(char *str)
  * but we want to try to avoid allocating at 0x2900-0x2bff
  * which might be mirrored at 0x0100-0x03ff..
  */
-void pcibios_align_resource(void *data, struct resource *res,
-			    resource_size_t size, resource_size_t align)
+resource_size_t pcibios_align_resource(void *data, const struct resource *res,
+				resource_size_t size, resource_size_t align)
 {
 	resource_size_t start = res->start;
 
 	if (res->flags & IORESOURCE_IO && start & 0x300)
 		start = (start + 0x3ff) & ~0x3ff;
 
-	res->start = (start + align - 1) & ~(align - 1);
+	start = (start + align - 1) & ~(align - 1);
+
+	return start;
 }
 
 /**

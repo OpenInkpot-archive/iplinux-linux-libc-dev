@@ -7,7 +7,7 @@
 #include <linux/security.h>
 #include "internal.h"
 
-static struct dentry_operations proc_sys_dentry_operations;
+static const struct dentry_operations proc_sys_dentry_operations;
 static const struct file_operations proc_sys_file_operations;
 static const struct inode_operations proc_sys_inode_operations;
 static const struct file_operations proc_sys_dir_file_operations;
@@ -31,7 +31,6 @@ static struct inode *proc_sys_make_inode(struct super_block *sb,
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
 	inode->i_flags |= S_PRIVATE; /* tell selinux to ignore this inode */
 	inode->i_mode = table->mode;
-	inode->i_uid = inode->i_gid = 0;
 	if (!table->child) {
 		inode->i_mode |= S_IFREG;
 		inode->i_op = &proc_sys_inode_operations;
@@ -49,7 +48,7 @@ out:
 static struct ctl_table *find_in_table(struct ctl_table *p, struct qstr *name)
 {
 	int len;
-	for ( ; p->ctl_name || p->procname; p++) {
+	for ( ; p->procname; p++) {
 
 		if (!p->procname)
 			continue;
@@ -154,7 +153,7 @@ static ssize_t proc_sys_call_handler(struct file *filp, void __user *buf,
 
 	/* careful: calling conventions are nasty here */
 	res = count;
-	error = table->proc_handler(table, write, filp, buf, &res, ppos);
+	error = table->proc_handler(table, write, buf, &res, ppos);
 	if (!error)
 		error = res;
 out:
@@ -219,7 +218,7 @@ static int scan(struct ctl_table_header *head, ctl_table *table,
 		void *dirent, filldir_t filldir)
 {
 
-	for (; table->ctl_name || table->procname; table++, (*pos)++) {
+	for (; table->procname; table++, (*pos)++) {
 		int res;
 
 		/* Can't do anything without a proc name */
@@ -397,7 +396,7 @@ static int proc_sys_compare(struct dentry *dir, struct qstr *qstr,
 	return !sysctl_is_seen(PROC_I(dentry->d_inode)->sysctl);
 }
 
-static struct dentry_operations proc_sys_dentry_operations = {
+static const struct dentry_operations proc_sys_dentry_operations = {
 	.d_revalidate	= proc_sys_revalidate,
 	.d_delete	= proc_sys_delete,
 	.d_compare	= proc_sys_compare,

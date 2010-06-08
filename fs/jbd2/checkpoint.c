@@ -20,9 +20,10 @@
 #include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/jbd2.h>
-#include <linux/marker.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
+#include <linux/blkdev.h>
+#include <trace/events/jbd2.h>
 
 /*
  * Unlink a buffer from a transaction checkpoint list.
@@ -249,16 +250,14 @@ restart:
 	return ret;
 }
 
-#define NR_BATCH	64
-
 static void
-__flush_batch(journal_t *journal, struct buffer_head **bhs, int *batch_count)
+__flush_batch(journal_t *journal, int *batch_count)
 {
 	int i;
 
-	ll_rw_block(SWRITE, *batch_count, bhs);
+	ll_rw_block(SWRITE, *batch_count, journal->j_chkpt_bhs);
 	for (i = 0; i < *batch_count; i++) {
-		struct buffer_head *bh = bhs[i];
+		struct buffer_head *bh = journal->j_chkpt_bhs[i];
 		clear_buffer_jwrite(bh);
 		BUFFER_TRACE(bh, "brelse");
 		__brelse(bh);
@@ -277,8 +276,7 @@ __flush_batch(journal_t *journal, struct buffer_head **bhs, int *batch_count)
  * Called under jbd_lock_bh_state(jh2bh(jh)), and drops it
  */
 static int __process_buffer(journal_t *journal, struct journal_head *jh,
-			struct buffer_head **bhs, int *batch_count,
-			transaction_t *transaction)
+			    int *batch_count, transaction_t *transaction)
 {
 	struct buffer_head *bh = jh2bh(jh);
 	int ret = 0;
@@ -325,14 +323,14 @@ static int __process_buffer(journal_t *journal, struct journal_head *jh,
 		get_bh(bh);
 		J_ASSERT_BH(bh, !buffer_jwrite(bh));
 		set_buffer_jwrite(bh);
-		bhs[*batch_count] = bh;
+		journal->j_chkpt_bhs[*batch_count] = bh;
 		__buffer_relink_io(jh);
 		jbd_unlock_bh_state(bh);
 		transaction->t_chp_stats.cs_written++;
 		(*batch_count)++;
-		if (*batch_count == NR_BATCH) {
+		if (*batch_count == JBD2_NR_BATCH) {
 			spin_unlock(&journal->j_list_lock);
-			__flush_batch(journal, bhs, batch_count);
+			__flush_batch(journal, batch_count);
 			ret = 1;
 		}
 	}
@@ -361,8 +359,7 @@ int jbd2_log_do_checkpoint(journal_t *journal)
 	 * journal straight away.
 	 */
 	result = jbd2_cleanup_journal_tail(journal);
-	trace_mark(jbd2_checkpoint, "dev %s need_checkpoint %d",
-		   journal->j_devname, result);
+	trace_jbd2_checkpoint(journal, result);
 	jbd_debug(1, "cleanup_journal_tail returned %d\n", result);
 	if (result <= 0)
 		return result;
@@ -388,7 +385,6 @@ restart:
 	if (journal->j_checkpoint_transactions == transaction &&
 			transaction->t_tid == this_tid) {
 		int batch_count = 0;
-		struct buffer_head *bhs[NR_BATCH];
 		struct journal_head *jh;
 		int retry = 0, err;
 
@@ -402,7 +398,7 @@ restart:
 				retry = 1;
 				break;
 			}
-			retry = __process_buffer(journal, jh, bhs, &batch_count,
+			retry = __process_buffer(journal, jh, &batch_count,
 						 transaction);
 			if (retry < 0 && !result)
 				result = retry;
@@ -419,7 +415,7 @@ restart:
 				spin_unlock(&journal->j_list_lock);
 				retry = 1;
 			}
-			__flush_batch(journal, bhs, &batch_count);
+			__flush_batch(journal, &batch_count);
 		}
 
 		if (retry) {
@@ -511,6 +507,7 @@ int jbd2_cleanup_journal_tail(journal_t *journal)
 	if (blocknr < journal->j_tail)
 		freed = freed + journal->j_last - journal->j_first;
 
+	trace_jbd2_cleanup_journal_tail(journal, first_tid, blocknr, freed);
 	jbd_debug(1,
 		  "Cleaning journal tail from %d to %d (offset %lu), "
 		  "freeing %lu\n",
@@ -520,6 +517,20 @@ int jbd2_cleanup_journal_tail(journal_t *journal)
 	journal->j_tail_sequence = first_tid;
 	journal->j_tail = blocknr;
 	spin_unlock(&journal->j_state_lock);
+
+	/*
+	 * If there is an external journal, we need to make sure that
+	 * any data blocks that were recently written out --- perhaps
+	 * by jbd2_log_do_checkpoint() --- are flushed out before we
+	 * drop the transactions from the external journal.  It's
+	 * unlikely this will be necessary, especially with a
+	 * appropriately sized journal, but we need this to guarantee
+	 * correctness.  Fortunately jbd2_cleanup_journal_tail()
+	 * doesn't get called all that often.
+	 */
+	if ((journal->j_fs_dev != journal->j_dev) &&
+	    (journal->j_flags & JBD2_BARRIER))
+		blkdev_issue_flush(journal->j_fs_dev, NULL);
 	if (!(journal->j_flags & JBD2_ABORT))
 		jbd2_journal_update_superblock(journal, 1);
 	return 0;
@@ -648,6 +659,7 @@ out:
 
 int __jbd2_journal_remove_checkpoint(struct journal_head *jh)
 {
+	struct transaction_chp_stats_s *stats;
 	transaction_t *transaction;
 	journal_t *journal;
 	int ret = 0;
@@ -684,8 +696,15 @@ int __jbd2_journal_remove_checkpoint(struct journal_head *jh)
 
 	/* OK, that was the last buffer for the transaction: we can now
 	   safely remove this transaction from the log */
+	stats = &transaction->t_chp_stats;
+	if (stats->cs_chp_time)
+		stats->cs_chp_time = jbd2_time_diff(stats->cs_chp_time,
+						    jiffies);
+	trace_jbd2_checkpoint_stats(journal->j_fs_dev->bd_dev,
+				    transaction->t_tid, stats);
 
 	__jbd2_journal_drop_transaction(journal, transaction);
+	kfree(transaction);
 
 	/* Just in case anybody was waiting for more transactions to be
            checkpointed... */
@@ -760,5 +779,4 @@ void __jbd2_journal_drop_transaction(journal_t *journal, transaction_t *transact
 	J_ASSERT(journal->j_running_transaction != transaction);
 
 	jbd_debug(1, "Dropping transaction %d, all done\n", transaction->t_tid);
-	kfree(transaction);
 }

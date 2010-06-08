@@ -32,7 +32,7 @@
 #include <linux/libata.h>
 
 #define DRV_NAME "pata_sil680"
-#define DRV_VERSION "0.4.8"
+#define DRV_VERSION "0.4.9"
 
 #define SIL680_MMIO_BAR		5
 
@@ -195,7 +195,7 @@ static struct scsi_host_template sil680_sht = {
 };
 
 static struct ata_port_operations sil680_port_ops = {
-	.inherits	= &ata_bmdma_port_ops,
+	.inherits	= &ata_bmdma32_port_ops,
 	.cable_detect	= sil680_cable_detect,
 	.set_piomode	= sil680_set_piomode,
 	.set_dmamode	= sil680_set_dmamode,
@@ -212,13 +212,11 @@ static struct ata_port_operations sil680_port_ops = {
 
 static u8 sil680_init_chip(struct pci_dev *pdev, int *try_mmio)
 {
-	u32 class_rev	= 0;
 	u8 tmpbyte	= 0;
 
-        pci_read_config_dword(pdev, PCI_CLASS_REVISION, &class_rev);
-        class_rev &= 0xff;
         /* FIXME: double check */
-	pci_write_config_byte(pdev, PCI_CACHE_LINE_SIZE, (class_rev) ? 1 : 255);
+	pci_write_config_byte(pdev, PCI_CACHE_LINE_SIZE,
+			      pdev->revision ? 1 : 255);
 
 	pci_write_config_byte(pdev, 0x80, 0x00);
 	pci_write_config_byte(pdev, 0x84, 0x00);
@@ -282,15 +280,15 @@ static int __devinit sil680_init_one(struct pci_dev *pdev,
 {
 	static const struct ata_port_info info = {
 		.flags = ATA_FLAG_SLAVE_POSS,
-		.pio_mask = 0x1f,
-		.mwdma_mask = 0x07,
+		.pio_mask = ATA_PIO4,
+		.mwdma_mask = ATA_MWDMA2,
 		.udma_mask = ATA_UDMA6,
 		.port_ops = &sil680_port_ops
 	};
 	static const struct ata_port_info info_slow = {
 		.flags = ATA_FLAG_SLAVE_POSS,
-		.pio_mask = 0x1f,
-		.mwdma_mask = 0x07,
+		.pio_mask = ATA_PIO4,
+		.mwdma_mask = ATA_MWDMA2,
 		.udma_mask = ATA_UDMA5,
 		.port_ops = &sil680_port_ops
 	};
@@ -358,7 +356,7 @@ static int __devinit sil680_init_one(struct pci_dev *pdev,
 				 IRQF_SHARED, &sil680_sht);
 
 use_ioports:
-	return ata_pci_sff_init_one(pdev, ppi, &sil680_sht, NULL);
+	return ata_pci_sff_init_one(pdev, ppi, &sil680_sht, NULL, 0);
 }
 
 #ifdef CONFIG_PM

@@ -65,7 +65,7 @@ struct mif6ctl {
 	mifi_t	mif6c_mifi;		/* Index of MIF */
 	unsigned char mif6c_flags;	/* MIFF_ flags */
 	unsigned char vifc_threshold;	/* ttl limit */
-	u_short	 mif6c_pifi;		/* the index of the physical IF */
+	__u16	 mif6c_pifi;		/* the index of the physical IF */
 	unsigned int vifc_rate_limit;	/* Rate limiter values (NI) */
 };
 
@@ -75,8 +75,7 @@ struct mif6ctl {
  *	Cache manipulation structures for mrouted and PIMd
  */
 
-struct mf6cctl
-{
+struct mf6cctl {
 	struct sockaddr_in6 mf6cc_origin;		/* Origin of mcast	*/
 	struct sockaddr_in6 mf6cc_mcastgrp;		/* Group in question	*/
 	mifi_t	mf6cc_parent;			/* Where it arrived	*/
@@ -87,8 +86,7 @@ struct mf6cctl
  *	Group count retrieval for pim6sd
  */
 
-struct sioc_sg_req6
-{
+struct sioc_sg_req6 {
 	struct sockaddr_in6 src;
 	struct sockaddr_in6 grp;
 	unsigned long pktcnt;
@@ -100,8 +98,7 @@ struct sioc_sg_req6
  *	To get vif packet counts
  */
 
-struct sioc_mif_req6
-{
+struct sioc_mif_req6 {
 	mifi_t	mifi;		/* Which iface */
 	unsigned long icount;	/* In packets */
 	unsigned long ocount;	/* Out packets */
@@ -117,6 +114,7 @@ struct sioc_mif_req6
 
 #include <linux/pim.h>
 #include <linux/skbuff.h>	/* for struct sk_buff_head */
+#include <net/net_namespace.h>
 
 #ifdef CONFIG_IPV6_MROUTE
 static inline int ip6_mroute_opt(int opt)
@@ -133,7 +131,7 @@ static inline int ip6_mroute_opt(int opt)
 struct sock;
 
 #ifdef CONFIG_IPV6_MROUTE
-extern int ip6_mroute_setsockopt(struct sock *, int, char __user *, int);
+extern int ip6_mroute_setsockopt(struct sock *, int, char __user *, unsigned int);
 extern int ip6_mroute_getsockopt(struct sock *, int, char __user *, int __user *);
 extern int ip6_mr_input(struct sk_buff *skb);
 extern int ip6mr_ioctl(struct sock *sk, int cmd, void __user *arg);
@@ -142,7 +140,7 @@ extern void ip6_mr_cleanup(void);
 #else
 static inline
 int ip6_mroute_setsockopt(struct sock *sock,
-			  int optname, char __user *optval, int optlen)
+			  int optname, char __user *optval, unsigned int optlen)
 {
 	return -ENOPROTOOPT;
 }
@@ -171,8 +169,7 @@ static inline void ip6_mr_cleanup(void)
 }
 #endif
 
-struct mif_device
-{
+struct mif_device {
 	struct net_device 	*dev;			/* Device we are using */
 	unsigned long	bytes_in,bytes_out;
 	unsigned long	pkt_in,pkt_out;		/* Statistics 			*/
@@ -184,9 +181,11 @@ struct mif_device
 
 #define VIFF_STATIC 0x8000
 
-struct mfc6_cache
-{
+struct mfc6_cache {
 	struct mfc6_cache *next;		/* Next entry on cache line 	*/
+#ifdef CONFIG_NET_NS
+	struct net *mfc6_net;
+#endif
 	struct in6_addr mf6c_mcastgrp;			/* Group the entry belongs to 	*/
 	struct in6_addr mf6c_origin;			/* Source of packet 		*/
 	mifi_t mf6c_parent;			/* Source interface		*/
@@ -209,6 +208,18 @@ struct mfc6_cache
 	} mfc_un;
 };
 
+static inline
+struct net *mfc6_net(const struct mfc6_cache *mfc)
+{
+	return read_pnet(&mfc->mfc6_net);
+}
+
+static inline
+void mfc6_net_set(struct mfc6_cache *mfc, struct net *net)
+{
+	write_pnet(&mfc->mfc6_net, hold_net(net));
+}
+
 #define MFC_STATIC		1
 #define MFC_NOTIFY		2
 
@@ -229,13 +240,17 @@ struct mfc6_cache
 
 #ifdef __KERNEL__
 struct rtmsg;
-extern int ip6mr_get_route(struct sk_buff *skb, struct rtmsg *rtm, int nowait);
+extern int ip6mr_get_route(struct net *net, struct sk_buff *skb,
+			   struct rtmsg *rtm, int nowait);
 
 #ifdef CONFIG_IPV6_MROUTE
-extern struct sock *mroute6_socket;
+static inline struct sock *mroute6_socket(struct net *net)
+{
+	return net->ipv6.mroute6_sk;
+}
 extern int ip6mr_sk_done(struct sock *sk);
 #else
-#define mroute6_socket NULL
+static inline struct sock *mroute6_socket(struct net *net) { return NULL; }
 static inline int ip6mr_sk_done(struct sock *sk) { return 0; }
 #endif
 #endif

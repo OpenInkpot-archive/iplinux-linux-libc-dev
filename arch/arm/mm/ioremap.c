@@ -110,6 +110,12 @@ static int remap_area_pages(unsigned long start, unsigned long pfn,
 	return err;
 }
 
+int ioremap_page(unsigned long virt, unsigned long phys,
+		 const struct mem_type *mtype)
+{
+	return remap_area_pages(virt, __phys_to_pfn(phys), PAGE_SIZE, mtype);
+}
+EXPORT_SYMBOL(ioremap_page);
 
 void __check_kvm_seq(struct mm_struct *mm)
 {
@@ -133,12 +139,12 @@ void __check_kvm_seq(struct mm_struct *mm)
  * which requires the new ioremap'd region to be referenced, the CPU will
  * reference the _old_ region.
  *
- * Note that get_vm_area() allocates a guard 4K page, so we need to mask
- * the size back to 1MB aligned or we will overflow in the loop below.
+ * Note that get_vm_area_caller() allocates a guard 4K page, so we need to
+ * mask the size back to 1MB aligned or we will overflow in the loop below.
  */
 static void unmap_area_sections(unsigned long virt, unsigned long size)
 {
-	unsigned long addr = virt, end = virt + (size & ~SZ_1M);
+	unsigned long addr = virt, end = virt + (size & ~(SZ_1M - 1));
 	pgd_t *pgd;
 
 	flush_cache_vunmap(addr, end);
@@ -248,22 +254,8 @@ remap_area_supersections(unsigned long virt, unsigned long pfn,
 }
 #endif
 
-
-/*
- * Remap an arbitrary physical address space into the kernel virtual
- * address space. Needed when the kernel wants to access high addresses
- * directly.
- *
- * NOTE! We need to allow non-page-aligned mappings too: we will obviously
- * have to convert them into an offset in a page-aligned mapping, but the
- * caller shouldn't need to know that small detail.
- *
- * 'flags' are the extra L_PTE_ flags that you want to specify for this
- * mapping.  See <asm/pgtable.h> for more information.
- */
-void __iomem *
-__arm_ioremap_pfn(unsigned long pfn, unsigned long offset, size_t size,
-		  unsigned int mtype)
+void __iomem * __arm_ioremap_pfn_caller(unsigned long pfn,
+	unsigned long offset, size_t size, unsigned int mtype, void *caller)
 {
 	const struct mem_type *type;
 	int err;
@@ -285,7 +277,7 @@ __arm_ioremap_pfn(unsigned long pfn, unsigned long offset, size_t size,
 	 */
 	size = PAGE_ALIGN(offset + size);
 
- 	area = get_vm_area(size, VM_IOREMAP);
+	area = get_vm_area_caller(size, VM_IOREMAP, caller);
  	if (!area)
  		return NULL;
  	addr = (unsigned long)area->addr;
@@ -312,10 +304,9 @@ __arm_ioremap_pfn(unsigned long pfn, unsigned long offset, size_t size,
 	flush_cache_vmap(addr, addr + size);
 	return (void __iomem *) (offset + addr);
 }
-EXPORT_SYMBOL(__arm_ioremap_pfn);
 
-void __iomem *
-__arm_ioremap(unsigned long phys_addr, size_t size, unsigned int mtype)
+void __iomem *__arm_ioremap_caller(unsigned long phys_addr, size_t size,
+	unsigned int mtype, void *caller)
 {
 	unsigned long last_addr;
  	unsigned long offset = phys_addr & ~PAGE_MASK;
@@ -328,7 +319,33 @@ __arm_ioremap(unsigned long phys_addr, size_t size, unsigned int mtype)
 	if (!size || last_addr < phys_addr)
 		return NULL;
 
- 	return __arm_ioremap_pfn(pfn, offset, size, mtype);
+	return __arm_ioremap_pfn_caller(pfn, offset, size, mtype,
+			caller);
+}
+
+/*
+ * Remap an arbitrary physical address space into the kernel virtual
+ * address space. Needed when the kernel wants to access high addresses
+ * directly.
+ *
+ * NOTE! We need to allow non-page-aligned mappings too: we will obviously
+ * have to convert them into an offset in a page-aligned mapping, but the
+ * caller shouldn't need to know that small detail.
+ */
+void __iomem *
+__arm_ioremap_pfn(unsigned long pfn, unsigned long offset, size_t size,
+		  unsigned int mtype)
+{
+	return __arm_ioremap_pfn_caller(pfn, offset, size, mtype,
+			__builtin_return_address(0));
+}
+EXPORT_SYMBOL(__arm_ioremap_pfn);
+
+void __iomem *
+__arm_ioremap(unsigned long phys_addr, size_t size, unsigned int mtype)
+{
+	return __arm_ioremap_caller(phys_addr, size, mtype,
+			__builtin_return_address(0));
 }
 EXPORT_SYMBOL(__arm_ioremap);
 
@@ -337,10 +354,7 @@ void __iounmap(volatile void __iomem *io_addr)
 	void *addr = (void *)(PAGE_MASK & (unsigned long)io_addr);
 #ifndef CONFIG_SMP
 	struct vm_struct **p, *tmp;
-#endif
-	unsigned int section_mapping = 0;
 
-#ifndef CONFIG_SMP
 	/*
 	 * If this is a section based mapping we need to handle it
 	 * specially as the VM subsystem does not know how to handle
@@ -352,11 +366,8 @@ void __iounmap(volatile void __iomem *io_addr)
 	for (p = &vmlist ; (tmp = *p) ; p = &tmp->next) {
 		if ((tmp->flags & VM_IOREMAP) && (tmp->addr == addr)) {
 			if (tmp->flags & VM_ARM_SECTION_MAPPING) {
-				*p = tmp->next;
 				unmap_area_sections((unsigned long)tmp->addr,
 						    tmp->size);
-				kfree(tmp);
-				section_mapping = 1;
 			}
 			break;
 		}
@@ -364,7 +375,6 @@ void __iounmap(volatile void __iomem *io_addr)
 	write_unlock(&vmlist_lock);
 #endif
 
-	if (!section_mapping)
-		vunmap(addr);
+	vunmap(addr);
 }
 EXPORT_SYMBOL(__iounmap);

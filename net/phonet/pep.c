@@ -23,6 +23,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/socket.h>
 #include <net/sock.h>
 #include <net/tcp_states.h>
@@ -225,6 +226,7 @@ static int pipe_rcv_status(struct sock *sk, struct sk_buff *skb)
 {
 	struct pep_sock *pn = pep_sk(sk);
 	struct pnpipehdr *hdr = pnp_hdr(skb);
+	int wake = 0;
 
 	if (!pskb_may_pull(skb, sizeof(*hdr) + 4))
 		return -EINVAL;
@@ -241,16 +243,16 @@ static int pipe_rcv_status(struct sock *sk, struct sk_buff *skb)
 		case PN_LEGACY_FLOW_CONTROL:
 			switch (hdr->data[4]) {
 			case PEP_IND_BUSY:
-				pn->tx_credits = 0;
+				atomic_set(&pn->tx_credits, 0);
 				break;
 			case PEP_IND_READY:
-				pn->tx_credits = 1;
+				atomic_set(&pn->tx_credits, wake = 1);
 				break;
 			}
 			break;
 		case PN_ONE_CREDIT_FLOW_CONTROL:
 			if (hdr->data[4] == PEP_IND_READY)
-				pn->tx_credits = 1;
+				atomic_set(&pn->tx_credits, wake = 1);
 			break;
 		}
 		break;
@@ -258,10 +260,7 @@ static int pipe_rcv_status(struct sock *sk, struct sk_buff *skb)
 	case PN_PEP_IND_ID_MCFC_GRANT_CREDITS:
 		if (pn->tx_fc != PN_MULTI_CREDIT_FLOW_CONTROL)
 			break;
-		if (pn->tx_credits + hdr->data[4] > 0xff)
-			pn->tx_credits = 0xff;
-		else
-			pn->tx_credits += hdr->data[4];
+		atomic_add(wake = hdr->data[4], &pn->tx_credits);
 		break;
 
 	default:
@@ -269,7 +268,7 @@ static int pipe_rcv_status(struct sock *sk, struct sk_buff *skb)
 				(unsigned)hdr->data[1]);
 		return -EOPNOTSUPP;
 	}
-	if (pn->tx_credits)
+	if (wake)
 		sk->sk_write_space(sk);
 	return 0;
 }
@@ -343,17 +342,22 @@ static int pipe_do_rcv(struct sock *sk, struct sk_buff *skb)
 		}
 		/* fall through */
 	case PNS_PEP_DISABLE_REQ:
-		pn->tx_credits = 0;
+		atomic_set(&pn->tx_credits, 0);
 		pep_reply(sk, skb, PN_PIPE_NO_ERROR, NULL, 0, GFP_ATOMIC);
 		break;
 
 	case PNS_PEP_CTRL_REQ:
-		if (skb_queue_len(&pn->ctrlreq_queue) >= PNPIPE_CTRLREQ_MAX)
+		if (skb_queue_len(&pn->ctrlreq_queue) >= PNPIPE_CTRLREQ_MAX) {
+			atomic_inc(&sk->sk_drops);
 			break;
+		}
 		__skb_pull(skb, 4);
 		queue = &pn->ctrlreq_queue;
 		goto queue;
 
+	case PNS_PIPE_ALIGNED_DATA:
+		__skb_pull(skb, 1);
+		/* fall through */
 	case PNS_PIPE_DATA:
 		__skb_pull(skb, 3); /* Pipe data header */
 		if (!pn_flow_safe(pn->rx_fc)) {
@@ -364,6 +368,7 @@ static int pipe_do_rcv(struct sock *sk, struct sk_buff *skb)
 		}
 
 		if (pn->rx_credits == 0) {
+			atomic_inc(&sk->sk_drops);
 			err = -ENOBUFS;
 			break;
 		}
@@ -390,7 +395,7 @@ static int pipe_do_rcv(struct sock *sk, struct sk_buff *skb)
 		/* fall through */
 	case PNS_PIPE_ENABLED_IND:
 		if (!pn_flow_safe(pn->tx_fc)) {
-			pn->tx_credits = 1;
+			atomic_set(&pn->tx_credits, 1);
 			sk->sk_write_space(sk);
 		}
 		if (sk->sk_state == TCP_ESTABLISHED)
@@ -440,6 +445,7 @@ static int pep_connreq_rcv(struct sock *sk, struct sk_buff *skb)
 	struct sockaddr_pn dst;
 	u16 peer_type;
 	u8 pipe_handle, enabled, n_sb;
+	u8 aligned = 0;
 
 	if (!pskb_pull(skb, sizeof(*hdr) + 4))
 		return -EINVAL;
@@ -478,6 +484,9 @@ static int pep_connreq_rcv(struct sock *sk, struct sk_buff *skb)
 				return -EINVAL;
 			peer_type = (peer_type & 0xff00) | data[0];
 			break;
+		case PN_PIPE_SB_ALIGNED_DATA:
+			aligned = data[0] != 0;
+			break;
 		}
 		n_sb--;
 	}
@@ -504,10 +513,12 @@ static int pep_connreq_rcv(struct sock *sk, struct sk_buff *skb)
 	newpn->pn_sk.resource = pn->pn_sk.resource;
 	skb_queue_head_init(&newpn->ctrlreq_queue);
 	newpn->pipe_handle = pipe_handle;
+	atomic_set(&newpn->tx_credits, 0);
 	newpn->peer_type = peer_type;
-	newpn->rx_credits = newpn->tx_credits = 0;
+	newpn->rx_credits = 0;
 	newpn->rx_fc = newpn->tx_fc = PN_LEGACY_FLOW_CONTROL;
 	newpn->init_enable = enabled;
+	newpn->aligned = aligned;
 
 	BUG_ON(!skb_queue_empty(&newsk->sk_receive_queue));
 	skb_queue_head(&newsk->sk_receive_queue, skb);
@@ -554,7 +565,7 @@ static int pep_do_rcv(struct sock *sk, struct sk_buff *skb)
 {
 	struct pep_sock *pn = pep_sk(sk);
 	struct sock *sknode;
-	struct pnpipehdr *hdr = pnp_hdr(skb);
+	struct pnpipehdr *hdr;
 	struct sockaddr_pn dst;
 	int err = NET_RX_SUCCESS;
 	u8 pipe_handle;
@@ -712,8 +723,8 @@ static int pep_ioctl(struct sock *sk, int cmd, unsigned long arg)
 			return -EINVAL;
 
 		lock_sock(sk);
-		if (sock_flag(sk, SOCK_URGINLINE)
-		 && !skb_queue_empty(&pn->ctrlreq_queue))
+		if (sock_flag(sk, SOCK_URGINLINE) &&
+		    !skb_queue_empty(&pn->ctrlreq_queue))
 			answ = skb_peek(&pn->ctrlreq_queue)->len;
 		else if (!skb_queue_empty(&sk->sk_receive_queue))
 			answ = skb_peek(&sk->sk_receive_queue)->len;
@@ -738,7 +749,7 @@ static int pep_init(struct sock *sk)
 }
 
 static int pep_setsockopt(struct sock *sk, int level, int optname,
-				char __user *optval, int optlen)
+				char __user *optval, unsigned int optlen)
 {
 	struct pep_sock *pn = pep_sk(sk);
 	int val = 0, err = 0;
@@ -821,14 +832,22 @@ static int pipe_skb_send(struct sock *sk, struct sk_buff *skb)
 	struct pep_sock *pn = pep_sk(sk);
 	struct pnpipehdr *ph;
 
-	skb_push(skb, 3);
+	if (pn_flow_safe(pn->tx_fc) &&
+	    !atomic_add_unless(&pn->tx_credits, -1, 0)) {
+		kfree_skb(skb);
+		return -ENOBUFS;
+	}
+
+	skb_push(skb, 3 + pn->aligned);
 	skb_reset_transport_header(skb);
 	ph = pnp_hdr(skb);
 	ph->utid = 0;
-	ph->message_id = PNS_PIPE_DATA;
+	if (pn->aligned) {
+		ph->message_id = PNS_PIPE_ALIGNED_DATA;
+		ph->data[0] = 0; /* padding */
+	} else
+		ph->message_id = PNS_PIPE_DATA;
 	ph->pipe_handle = pn->pipe_handle;
-	if (pn_flow_safe(pn->tx_fc) && pn->tx_credits)
-		pn->tx_credits--;
 
 	return pn_skb_send(sk, skb, &pipe_srv);
 }
@@ -837,13 +856,25 @@ static int pep_sendmsg(struct kiocb *iocb, struct sock *sk,
 			struct msghdr *msg, size_t len)
 {
 	struct pep_sock *pn = pep_sk(sk);
-	struct sk_buff *skb = NULL;
+	struct sk_buff *skb;
 	long timeo;
 	int flags = msg->msg_flags;
 	int err, done;
 
-	if (msg->msg_flags & MSG_OOB || !(msg->msg_flags & MSG_EOR))
+	if ((msg->msg_flags & ~(MSG_DONTWAIT|MSG_EOR|MSG_NOSIGNAL|
+				MSG_CMSG_COMPAT)) ||
+			!(msg->msg_flags & MSG_EOR))
 		return -EOPNOTSUPP;
+
+	skb = sock_alloc_send_skb(sk, MAX_PNPIPE_HEADER + len,
+					flags & MSG_DONTWAIT, &err);
+	if (!skb)
+		return -ENOBUFS;
+
+	skb_reserve(skb, MAX_PHONET_HEADER + 3);
+	err = memcpy_fromiovec(skb_put(skb, len), msg->msg_iov, len);
+	if (err < 0)
+		goto outfree;
 
 	lock_sock(sk);
 	timeo = sock_sndtimeo(sk, flags & MSG_DONTWAIT);
@@ -866,7 +897,7 @@ disabled:
 	BUG_ON(sk->sk_state != TCP_ESTABLISHED);
 
 	/* Wait until flow control allows TX */
-	done = pn->tx_credits > 0;
+	done = atomic_read(&pn->tx_credits);
 	while (!done) {
 		DEFINE_WAIT(wait);
 
@@ -881,27 +912,12 @@ disabled:
 
 		prepare_to_wait(&sk->sk_socket->wait, &wait,
 				TASK_INTERRUPTIBLE);
-		done = sk_wait_event(sk, &timeo, pn->tx_credits > 0);
+		done = sk_wait_event(sk, &timeo, atomic_read(&pn->tx_credits));
 		finish_wait(&sk->sk_socket->wait, &wait);
 
 		if (sk->sk_state != TCP_ESTABLISHED)
 			goto disabled;
 	}
-
-	if (!skb) {
-		skb = sock_alloc_send_skb(sk, MAX_PNPIPE_HEADER + len,
-						flags & MSG_DONTWAIT, &err);
-		if (skb == NULL)
-			goto out;
-		skb_reserve(skb, MAX_PHONET_HEADER + 3);
-
-		if (sk->sk_state != TCP_ESTABLISHED || !pn->tx_credits)
-			goto disabled; /* sock_alloc_send_skb might sleep */
-	}
-
-	err = memcpy_fromiovec(skb_put(skb, len), msg->msg_iov, len);
-	if (err < 0)
-		goto out;
 
 	err = pipe_skb_send(sk, skb);
 	if (err >= 0)
@@ -909,6 +925,7 @@ disabled:
 	skb = NULL;
 out:
 	release_sock(sk);
+outfree:
 	kfree_skb(skb);
 	return err;
 }
@@ -917,13 +934,16 @@ int pep_writeable(struct sock *sk)
 {
 	struct pep_sock *pn = pep_sk(sk);
 
-	return (sk->sk_state == TCP_ESTABLISHED) ? pn->tx_credits : 0;
+	return atomic_read(&pn->tx_credits);
 }
 
 int pep_write(struct sock *sk, struct sk_buff *skb)
 {
 	struct sk_buff *rskb, *fs;
 	int flen = 0;
+
+	if (pep_sk(sk)->aligned)
+		return pipe_skb_send(sk, skb);
 
 	rskb = alloc_skb(MAX_PNPIPE_HEADER, GFP_ATOMIC);
 	if (!rskb) {
@@ -936,10 +956,10 @@ int pep_write(struct sock *sk, struct sk_buff *skb)
 	rskb->truesize += rskb->len;
 
 	/* Avoid nested fragments */
-	for (fs = skb_shinfo(skb)->frag_list; fs; fs = fs->next)
+	skb_walk_frags(skb, fs)
 		flen += fs->len;
 	skb->next = skb_shinfo(skb)->frag_list;
-	skb_shinfo(skb)->frag_list = NULL;
+	skb_frag_list_init(skb);
 	skb->len -= flen;
 	skb->data_len -= flen;
 	skb->truesize -= flen;
@@ -964,6 +984,10 @@ static int pep_recvmsg(struct kiocb *iocb, struct sock *sk,
 	struct sk_buff *skb;
 	int err;
 
+	if (flags & ~(MSG_OOB|MSG_PEEK|MSG_TRUNC|MSG_DONTWAIT|MSG_WAITALL|
+			MSG_NOSIGNAL|MSG_CMSG_COMPAT))
+		return -EOPNOTSUPP;
+
 	if (unlikely(1 << sk->sk_state & (TCPF_LISTEN | TCPF_CLOSE)))
 		return -ENOTCONN;
 
@@ -971,6 +995,8 @@ static int pep_recvmsg(struct kiocb *iocb, struct sock *sk,
 		/* Dequeue and acknowledge control request */
 		struct pep_sock *pn = pep_sk(sk);
 
+		if (flags & MSG_PEEK)
+			return -EOPNOTSUPP;
 		skb = skb_dequeue(&pn->ctrlreq_queue);
 		if (skb) {
 			pep_ctrlreq_error(sk, skb, PN_PIPE_NO_ERROR,

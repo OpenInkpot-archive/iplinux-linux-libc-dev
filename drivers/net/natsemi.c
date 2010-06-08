@@ -127,11 +127,11 @@ static int full_duplex[MAX_UNITS];
 #define NATSEMI_RX_LIMIT	2046	/* maximum supported by hardware */
 
 /* These identify the driver base version and may not be removed. */
-static char version[] __devinitdata =
+static const char version[] __devinitconst =
   KERN_INFO DRV_NAME " dp8381x driver, version "
       DRV_VERSION ", " DRV_RELDATE "\n"
-  KERN_INFO "  originally by Donald Becker <becker@scyld.com>\n"
-  KERN_INFO "  2.4.x kernel port by Jeff Garzik, Tjeerd Mulder\n";
+  "  originally by Donald Becker <becker@scyld.com>\n"
+  "  2.4.x kernel port by Jeff Garzik, Tjeerd Mulder\n";
 
 MODULE_AUTHOR("Donald Becker <becker@scyld.com>");
 MODULE_DESCRIPTION("National Semiconductor DP8381x series PCI Ethernet driver");
@@ -247,7 +247,7 @@ static struct {
 	{ "NatSemi DP8381[56]", 0, 24 },
 };
 
-static struct pci_device_id natsemi_pci_tbl[] __devinitdata = {
+static DEFINE_PCI_DEVICE_TABLE(natsemi_pci_tbl) = {
 	{ PCI_VENDOR_ID_NS, 0x0020, 0x12d9,     0x000c,     0, 0, 0 },
 	{ PCI_VENDOR_ID_NS, 0x0020, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 1 },
 	{ }	/* terminate list */
@@ -621,7 +621,7 @@ static void drain_ring(struct net_device *dev);
 static void free_ring(struct net_device *dev);
 static void reinit_ring(struct net_device *dev);
 static void init_registers(struct net_device *dev);
-static int start_tx(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t start_tx(struct sk_buff *skb, struct net_device *dev);
 static irqreturn_t intr_handler(int irq, void *dev_instance);
 static void netdev_error(struct net_device *dev, int intr_status);
 static int natsemi_poll(struct napi_struct *napi, int budget);
@@ -683,8 +683,8 @@ static ssize_t natsemi_set_dspcfg_workaround(struct device *dev,
         /* Find out the new setting */
         if (!strncmp("on", buf, count - 1) || !strncmp("1", buf, count - 1))
                 new_setting = 1;
-        else if (!strncmp("off", buf, count - 1)
-                 || !strncmp("0", buf, count - 1))
+        else if (!strncmp("off", buf, count - 1) ||
+                 !strncmp("0", buf, count - 1))
 		new_setting = 0;
 	else
                  return count;
@@ -757,8 +757,8 @@ static void __devinit natsemi_init_media (struct net_device *dev)
 	np->autoneg    = (tmp & BMCR_ANENABLE)? AUTONEG_ENABLE: AUTONEG_DISABLE;
 	np->advertising= mdio_read(dev, MII_ADVERTISE);
 
-	if ((np->advertising & ADVERTISE_ALL) != ADVERTISE_ALL
-	 && netif_msg_probe(np)) {
+	if ((np->advertising & ADVERTISE_ALL) != ADVERTISE_ALL &&
+	    netif_msg_probe(np)) {
 		printk(KERN_INFO "natsemi %s: Transceiver default autonegotiation %s "
 			"10%s %s duplex.\n",
 			pci_name(np->pci_dev),
@@ -779,6 +779,22 @@ static void __devinit natsemi_init_media (struct net_device *dev)
 
 }
 
+static const struct net_device_ops natsemi_netdev_ops = {
+	.ndo_open		= netdev_open,
+	.ndo_stop		= netdev_close,
+	.ndo_start_xmit		= start_tx,
+	.ndo_get_stats		= get_stats,
+	.ndo_set_multicast_list = set_rx_mode,
+	.ndo_change_mtu		= natsemi_change_mtu,
+	.ndo_do_ioctl		= netdev_ioctl,
+	.ndo_tx_timeout 	= ns_tx_timeout,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	.ndo_poll_controller	= natsemi_poll_controller,
+#endif
+};
+
 static int __devinit natsemi_probe1 (struct pci_dev *pdev,
 	const struct pci_device_id *ent)
 {
@@ -792,7 +808,6 @@ static int __devinit natsemi_probe1 (struct pci_dev *pdev,
 	const int pcibar = 1; /* PCI base address register */
 	int prev_eedata;
 	u32 tmp;
-	DECLARE_MAC_BUF(mac);
 
 /* when built into the kernel, we only print version if device is found */
 #ifndef MODULE
@@ -912,20 +927,9 @@ static int __devinit natsemi_probe1 (struct pci_dev *pdev,
 	if (find_cnt < MAX_UNITS  &&  full_duplex[find_cnt])
 		np->full_duplex = 1;
 
-	/* The chip-specific entries in the device structure. */
-	dev->open = &netdev_open;
-	dev->hard_start_xmit = &start_tx;
-	dev->stop = &netdev_close;
-	dev->get_stats = &get_stats;
-	dev->set_multicast_list = &set_rx_mode;
-	dev->change_mtu = &natsemi_change_mtu;
-	dev->do_ioctl = &netdev_ioctl;
-	dev->tx_timeout = &ns_tx_timeout;
+	dev->netdev_ops = &natsemi_netdev_ops;
 	dev->watchdog_timeo = TX_TIMEOUT;
 
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	dev->poll_controller = &natsemi_poll_controller;
-#endif
 	SET_ETHTOOL_OPS(dev, &ethtool_ops);
 
 	if (mtu)
@@ -948,10 +952,10 @@ static int __devinit natsemi_probe1 (struct pci_dev *pdev,
 
 	if (netif_msg_drv(np)) {
 		printk(KERN_INFO "natsemi %s: %s at %#08llx "
-		       "(%s), %s, IRQ %d",
+		       "(%s), %pM, IRQ %d",
 		       dev->name, natsemi_pci_info[chip_idx].name,
 		       (unsigned long long)iostart, pci_name(np->pci_dev),
-		       print_mac(mac, dev->dev_addr), irq);
+		       dev->dev_addr, irq);
 		if (dev->if_port == PORT_TP)
 			printk(", port TP.\n");
 		else if (np->ignore_phy)
@@ -1149,8 +1153,8 @@ static void init_phy_fixup(struct net_device *dev)
 	tmp = mdio_read(dev, MII_BMCR);
 	if (np->autoneg == AUTONEG_ENABLE) {
 		/* renegotiate if something changed */
-		if ((tmp & BMCR_ANENABLE) == 0
-		 || np->advertising != mdio_read(dev, MII_ADVERTISE))
+		if ((tmp & BMCR_ANENABLE) == 0 ||
+		    np->advertising != mdio_read(dev, MII_ADVERTISE))
 		{
 			/* turn on autonegotiation and force negotiation */
 			tmp |= (BMCR_ANENABLE | BMCR_ANRESTART);
@@ -1531,7 +1535,7 @@ static int netdev_open(struct net_device *dev)
 	/* Reset the chip, just in case. */
 	natsemi_reset(dev);
 
-	i = request_irq(dev->irq, &intr_handler, IRQF_SHARED, dev->name, dev);
+	i = request_irq(dev->irq, intr_handler, IRQF_SHARED, dev->name, dev);
 	if (i) return i;
 
 	if (netif_msg_ifup(np))
@@ -2075,7 +2079,7 @@ static void reinit_ring(struct net_device *dev)
 	reinit_rx(dev);
 }
 
-static int start_tx(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t start_tx(struct sk_buff *skb, struct net_device *dev)
 {
 	struct netdev_private *np = netdev_priv(dev);
 	void __iomem * ioaddr = ns_ioaddr(dev);
@@ -2121,7 +2125,7 @@ static int start_tx(struct sk_buff *skb, struct net_device *dev)
 		printk(KERN_DEBUG "%s: Transmit frame #%d queued in slot %d.\n",
 			dev->name, np->cur_tx, entry);
 	}
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static void netdev_tx_done(struct net_device *dev)
@@ -2160,8 +2164,8 @@ static void netdev_tx_done(struct net_device *dev)
 		dev_kfree_skb_irq(np->tx_skbuff[entry]);
 		np->tx_skbuff[entry] = NULL;
 	}
-	if (netif_queue_stopped(dev)
-		&& np->cur_tx - np->dirty_tx < TX_QUEUE_LEN - 4) {
+	if (netif_queue_stopped(dev) &&
+	    np->cur_tx - np->dirty_tx < TX_QUEUE_LEN - 4) {
 		/* The ring is no longer full, wake queue. */
 		netif_wake_queue(dev);
 	}
@@ -2194,10 +2198,10 @@ static irqreturn_t intr_handler(int irq, void *dev_instance)
 
 	prefetch(&np->rx_skbuff[np->cur_rx % RX_RING_SIZE]);
 
-	if (netif_rx_schedule_prep(dev, &np->napi)) {
+	if (napi_schedule_prep(&np->napi)) {
 		/* Disable interrupts and register for poll */
 		natsemi_irq_disable(dev);
-		__netif_rx_schedule(dev, &np->napi);
+		__napi_schedule(&np->napi);
 	} else
 		printk(KERN_WARNING
 	       	       "%s: Ignoring interrupt, status %#08x, mask %#08x.\n",
@@ -2249,7 +2253,7 @@ static int natsemi_poll(struct napi_struct *napi, int budget)
 		np->intr_status = readl(ioaddr + IntrStatus);
 	} while (np->intr_status);
 
-	netif_rx_complete(dev, napi);
+	napi_complete(napi);
 
 	/* Reenable interrupts providing nothing is trying to shut
 	 * the chip down. */
@@ -2339,8 +2343,8 @@ static void netdev_rx(struct net_device *dev, int *work_done, int work_to_do)
 			/* Omit CRC size. */
 			/* Check if the packet is long enough to accept
 			 * without copying to a minimally-sized skbuff. */
-			if (pkt_len < rx_copybreak
-			    && (skb = dev_alloc_skb(pkt_len + RX_OFFSET)) != NULL) {
+			if (pkt_len < rx_copybreak &&
+			    (skb = dev_alloc_skb(pkt_len + RX_OFFSET)) != NULL) {
 				/* 16 byte align the IP header */
 				skb_reserve(skb, RX_OFFSET);
 				pci_dma_sync_single_for_cpu(np->pci_dev,
@@ -2362,7 +2366,6 @@ static void netdev_rx(struct net_device *dev, int *work_done, int work_to_do)
 			}
 			skb->protocol = eth_type_trans(skb, dev);
 			netif_receive_skb(skb);
-			dev->last_rx = jiffies;
 			np->stats.rx_packets++;
 			np->stats.rx_bytes += pkt_len;
 		}
@@ -2387,8 +2390,8 @@ static void netdev_error(struct net_device *dev, int intr_status)
 	spin_lock(&np->lock);
 	if (intr_status & LinkChange) {
 		u16 lpa = mdio_read(dev, MII_LPA);
-		if (mdio_read(dev, MII_BMCR) & BMCR_ANENABLE
-		 && netif_msg_link(np)) {
+		if (mdio_read(dev, MII_BMCR) & BMCR_ANENABLE &&
+		    netif_msg_link(np)) {
 			printk(KERN_INFO
 				"%s: Autonegotiation advertising"
 				" %#04x  partner %#04x.\n", dev->name,
@@ -2485,16 +2488,16 @@ static void __set_rx_mode(struct net_device *dev)
 	if (dev->flags & IFF_PROMISC) { /* Set promiscuous. */
 		rx_mode = RxFilterEnable | AcceptBroadcast
 			| AcceptAllMulticast | AcceptAllPhys | AcceptMyPhys;
-	} else if ((dev->mc_count > multicast_filter_limit)
-	  || (dev->flags & IFF_ALLMULTI)) {
+	} else if ((netdev_mc_count(dev) > multicast_filter_limit) ||
+		   (dev->flags & IFF_ALLMULTI)) {
 		rx_mode = RxFilterEnable | AcceptBroadcast
 			| AcceptAllMulticast | AcceptMyPhys;
 	} else {
 		struct dev_mc_list *mclist;
 		int i;
+
 		memset(mc_filter, 0, sizeof(mc_filter));
-		for (i = 0, mclist = dev->mc_list; mclist && i < dev->mc_count;
-			 i++, mclist = mclist->next) {
+		netdev_for_each_mc_addr(mclist, dev) {
 			int b = (ether_crc(ETH_ALEN, mclist->dmi_addr) >> 23) & 0x1ff;
 			mc_filter[b/8] |= (1 << (b & 0x07));
 		}
@@ -3050,12 +3053,10 @@ static int netdev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 
 	switch(cmd) {
 	case SIOCGMIIPHY:		/* Get address of MII PHY in use. */
-	case SIOCDEVPRIVATE:		/* for binary compat, remove in 2.5 */
 		data->phy_id = np->phy_addr_external;
 		/* Fall Through */
 
 	case SIOCGMIIREG:		/* Read MII PHY register. */
-	case SIOCDEVPRIVATE+1:		/* for binary compat, remove in 2.5 */
 		/* The phy_id is not enough to uniquely identify
 		 * the intended target. Therefore the command is sent to
 		 * the given mii on the current port.
@@ -3074,9 +3075,6 @@ static int netdev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 		return 0;
 
 	case SIOCSMIIREG:		/* Write MII PHY register. */
-	case SIOCDEVPRIVATE+2:		/* for binary compat, remove in 2.5 */
-		if (!capable(CAP_NET_ADMIN))
-			return -EPERM;
 		if (dev->if_port == PORT_TP) {
 			if ((data->phy_id & 0x1f) == np->phy_addr_external) {
  				if ((data->reg_num & 0x1f) == MII_ADVERTISE)

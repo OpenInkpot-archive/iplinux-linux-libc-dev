@@ -8,6 +8,7 @@
  */
 #include <linux/module.h>
 #include <linux/sysdev.h>
+#include <linux/slab.h>
 #include <linux/ctype.h>
 
 #include "edac_core.h"
@@ -121,7 +122,7 @@ static ssize_t edac_pci_instance_store(struct kobject *kobj,
 }
 
 /* fs_ops table */
-static struct sysfs_ops pci_instance_ops = {
+static const struct sysfs_ops pci_instance_ops = {
 	.show = edac_pci_instance_show,
 	.store = edac_pci_instance_store
 };
@@ -261,7 +262,7 @@ static ssize_t edac_pci_dev_store(struct kobject *kobj,
 	return -EIO;
 }
 
-static struct sysfs_ops edac_pci_sysfs_ops = {
+static const struct sysfs_ops edac_pci_sysfs_ops = {
 	.show = edac_pci_dev_show,
 	.store = edac_pci_dev_store
 };
@@ -534,8 +535,6 @@ static void edac_pci_dev_parity_clear(struct pci_dev *dev)
 {
 	u8 header_type;
 
-	debugf0("%s()\n", __func__);
-
 	get_pci_parity_status(dev, 0);
 
 	/* read the device TYPE, looking for bridges */
@@ -569,7 +568,7 @@ static void edac_pci_dev_parity_test(struct pci_dev *dev)
 
 	local_irq_restore(flags);
 
-	debugf4("PCI STATUS= 0x%04x %s\n", status, dev->dev.bus_id);
+	debugf4("PCI STATUS= 0x%04x %s\n", status, dev_name(&dev->dev));
 
 	/* check the status reg for errors on boards NOT marked as broken
 	 * if broken, we cannot trust any of the status bits
@@ -600,13 +599,13 @@ static void edac_pci_dev_parity_test(struct pci_dev *dev)
 	}
 
 
-	debugf4("PCI HEADER TYPE= 0x%02x %s\n", header_type, dev->dev.bus_id);
+	debugf4("PCI HEADER TYPE= 0x%02x %s\n", header_type, dev_name(&dev->dev));
 
 	if ((header_type & 0x7F) == PCI_HEADER_TYPE_BRIDGE) {
 		/* On bridges, need to examine secondary status register  */
 		status = get_pci_parity_status(dev, 1);
 
-		debugf4("PCI SEC_STATUS= 0x%04x %s\n", status, dev->dev.bus_id);
+		debugf4("PCI SEC_STATUS= 0x%04x %s\n", status, dev_name(&dev->dev));
 
 		/* check the secondary status reg for errors,
 		 * on NOT broken boards

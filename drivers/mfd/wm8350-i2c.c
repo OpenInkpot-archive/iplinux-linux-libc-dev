@@ -1,8 +1,6 @@
 /*
  * wm8350-i2c.c  --  Generic I2C driver for Wolfson WM8350 PMIC
  *
- * This driver defines and configures the WM8350 for the Freescale i.MX32ADS.
- *
  * Copyright 2007, 2008 Wolfson Microelectronics PLC.
  *
  * Author: Liam Girdwood
@@ -21,6 +19,7 @@
 #include <linux/i2c.h>
 #include <linux/platform_device.h>
 #include <linux/mfd/wm8350/core.h>
+#include <linux/slab.h>
 
 static int wm8350_i2c_read_device(struct wm8350 *wm8350, char reg,
 				  int bytes, void *dest)
@@ -99,6 +98,8 @@ static int wm8350_i2c_remove(struct i2c_client *i2c)
 
 static const struct i2c_device_id wm8350_i2c_id[] = {
        { "wm8350", 0 },
+       { "wm8351", 0 },
+       { "wm8352", 0 },
        { }
 };
 MODULE_DEVICE_TABLE(i2c, wm8350_i2c_id);

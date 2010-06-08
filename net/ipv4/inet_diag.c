@@ -14,6 +14,7 @@
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/random.h>
+#include <linux/slab.h>
 #include <linux/cache.h>
 #include <linux/init.h>
 #include <linux/time.h>
@@ -116,10 +117,10 @@ static int inet_csk_diag_fill(struct sock *sk,
 	r->id.idiag_cookie[0] = (u32)(unsigned long)sk;
 	r->id.idiag_cookie[1] = (u32)(((unsigned long)sk >> 31) >> 1);
 
-	r->id.idiag_sport = inet->sport;
-	r->id.idiag_dport = inet->dport;
-	r->id.idiag_src[0] = inet->rcv_saddr;
-	r->id.idiag_dst[0] = inet->daddr;
+	r->id.idiag_sport = inet->inet_sport;
+	r->id.idiag_dport = inet->inet_dport;
+	r->id.idiag_src[0] = inet->inet_rcv_saddr;
+	r->id.idiag_dst[0] = inet->inet_daddr;
 
 #if defined(CONFIG_IPV6) || defined (CONFIG_IPV6_MODULE)
 	if (r->idiag_family == AF_INET6) {
@@ -156,10 +157,10 @@ static int inet_csk_diag_fill(struct sock *sk,
 	r->idiag_inode = sock_i_ino(sk);
 
 	if (minfo) {
-		minfo->idiag_rmem = atomic_read(&sk->sk_rmem_alloc);
+		minfo->idiag_rmem = sk_rmem_alloc_get(sk);
 		minfo->idiag_wmem = sk->sk_wmem_queued;
 		minfo->idiag_fmem = sk->sk_forward_alloc;
-		minfo->idiag_tmem = atomic_read(&sk->sk_wmem_alloc);
+		minfo->idiag_tmem = sk_wmem_alloc_get(sk);
 	}
 
 	handler->idiag_get_info(sk, r, info);
@@ -198,8 +199,6 @@ static int inet_twsk_diag_fill(struct inet_timewait_sock *tw,
 		tmo = 0;
 
 	r->idiag_family	      = tw->tw_family;
-	r->idiag_state	      = tw->tw_state;
-	r->idiag_timer	      = 0;
 	r->idiag_retrans      = 0;
 	r->id.idiag_if	      = tw->tw_bound_dev_if;
 	r->id.idiag_cookie[0] = (u32)(unsigned long)tw;
@@ -370,7 +369,7 @@ static int inet_diag_bc_run(const void *bc, int len,
 			yes = entry->sport >= op[1].no;
 			break;
 		case INET_DIAG_BC_S_LE:
-			yes = entry->dport <= op[1].no;
+			yes = entry->sport <= op[1].no;
 			break;
 		case INET_DIAG_BC_D_GE:
 			yes = entry->dport >= op[1].no;
@@ -506,11 +505,11 @@ static int inet_csk_diag_dump(struct sock *sk,
 		} else
 #endif
 		{
-			entry.saddr = &inet->rcv_saddr;
-			entry.daddr = &inet->daddr;
+			entry.saddr = &inet->inet_rcv_saddr;
+			entry.daddr = &inet->inet_daddr;
 		}
-		entry.sport = inet->num;
-		entry.dport = ntohs(inet->dport);
+		entry.sport = inet->inet_num;
+		entry.dport = ntohs(inet->inet_dport);
 		entry.userlocks = sk->sk_userlocks;
 
 		if (!inet_diag_bc_run(RTA_DATA(bc), RTA_PAYLOAD(bc), &entry))
@@ -586,7 +585,7 @@ static int inet_diag_fill_req(struct sk_buff *skb, struct sock *sk,
 	if (tmo < 0)
 		tmo = 0;
 
-	r->id.idiag_sport = inet->sport;
+	r->id.idiag_sport = inet->inet_sport;
 	r->id.idiag_dport = ireq->rmt_port;
 	r->id.idiag_src[0] = ireq->loc_addr;
 	r->id.idiag_dst[0] = ireq->rmt_addr;
@@ -641,7 +640,7 @@ static int inet_diag_dump_reqs(struct sk_buff *skb, struct sock *sk,
 
 	if (cb->nlh->nlmsg_len > 4 + NLMSG_SPACE(sizeof(*r))) {
 		bc = (struct rtattr *)(r + 1);
-		entry.sport = inet->num;
+		entry.sport = inet->inet_num;
 		entry.userlocks = sk->sk_userlocks;
 	}
 
@@ -718,13 +717,15 @@ static int inet_diag_dump(struct sk_buff *skb, struct netlink_callback *cb)
 		if (!(r->idiag_states & (TCPF_LISTEN | TCPF_SYN_RECV)))
 			goto skip_listen_ht;
 
-		inet_listen_lock(hashinfo);
 		for (i = s_i; i < INET_LHTABLE_SIZE; i++) {
 			struct sock *sk;
-			struct hlist_node *node;
+			struct hlist_nulls_node *node;
+			struct inet_listen_hashbucket *ilb;
 
 			num = 0;
-			sk_for_each(sk, node, &hashinfo->listening_hash[i]) {
+			ilb = &hashinfo->listening_hash[i];
+			spin_lock_bh(&ilb->lock);
+			sk_nulls_for_each(sk, node, &ilb->head) {
 				struct inet_sock *inet = inet_sk(sk);
 
 				if (num < s_num) {
@@ -732,7 +733,7 @@ static int inet_diag_dump(struct sk_buff *skb, struct netlink_callback *cb)
 					continue;
 				}
 
-				if (r->id.idiag_sport != inet->sport &&
+				if (r->id.idiag_sport != inet->inet_sport &&
 				    r->id.idiag_sport)
 					goto next_listen;
 
@@ -742,7 +743,7 @@ static int inet_diag_dump(struct sk_buff *skb, struct netlink_callback *cb)
 					goto syn_recv;
 
 				if (inet_csk_diag_dump(sk, skb, cb) < 0) {
-					inet_listen_unlock(hashinfo);
+					spin_unlock_bh(&ilb->lock);
 					goto done;
 				}
 
@@ -751,7 +752,7 @@ syn_recv:
 					goto next_listen;
 
 				if (inet_diag_dump_reqs(skb, sk, cb) < 0) {
-					inet_listen_unlock(hashinfo);
+					spin_unlock_bh(&ilb->lock);
 					goto done;
 				}
 
@@ -760,12 +761,12 @@ next_listen:
 				cb->args[4] = 0;
 				++num;
 			}
+			spin_unlock_bh(&ilb->lock);
 
 			s_num = 0;
 			cb->args[3] = 0;
 			cb->args[4] = 0;
 		}
-		inet_listen_unlock(hashinfo);
 skip_listen_ht:
 		cb->args[0] = 1;
 		s_i = num = s_num = 0;
@@ -774,36 +775,37 @@ skip_listen_ht:
 	if (!(r->idiag_states & ~(TCPF_LISTEN | TCPF_SYN_RECV)))
 		goto unlock;
 
-	for (i = s_i; i < hashinfo->ehash_size; i++) {
+	for (i = s_i; i <= hashinfo->ehash_mask; i++) {
 		struct inet_ehash_bucket *head = &hashinfo->ehash[i];
-		rwlock_t *lock = inet_ehash_lockp(hashinfo, i);
+		spinlock_t *lock = inet_ehash_lockp(hashinfo, i);
 		struct sock *sk;
-		struct hlist_node *node;
+		struct hlist_nulls_node *node;
 
 		num = 0;
 
-		if (hlist_empty(&head->chain) && hlist_empty(&head->twchain))
+		if (hlist_nulls_empty(&head->chain) &&
+			hlist_nulls_empty(&head->twchain))
 			continue;
 
 		if (i > s_i)
 			s_num = 0;
 
-		read_lock_bh(lock);
-		sk_for_each(sk, node, &head->chain) {
+		spin_lock_bh(lock);
+		sk_nulls_for_each(sk, node, &head->chain) {
 			struct inet_sock *inet = inet_sk(sk);
 
 			if (num < s_num)
 				goto next_normal;
 			if (!(r->idiag_states & (1 << sk->sk_state)))
 				goto next_normal;
-			if (r->id.idiag_sport != inet->sport &&
+			if (r->id.idiag_sport != inet->inet_sport &&
 			    r->id.idiag_sport)
 				goto next_normal;
-			if (r->id.idiag_dport != inet->dport &&
+			if (r->id.idiag_dport != inet->inet_dport &&
 			    r->id.idiag_dport)
 				goto next_normal;
 			if (inet_csk_diag_dump(sk, skb, cb) < 0) {
-				read_unlock_bh(lock);
+				spin_unlock_bh(lock);
 				goto done;
 			}
 next_normal:
@@ -825,14 +827,14 @@ next_normal:
 				    r->id.idiag_dport)
 					goto next_dying;
 				if (inet_twsk_diag_dump(tw, skb, cb) < 0) {
-					read_unlock_bh(lock);
+					spin_unlock_bh(lock);
 					goto done;
 				}
 next_dying:
 				++num;
 			}
 		}
-		read_unlock_bh(lock);
+		spin_unlock_bh(lock);
 	}
 
 done:

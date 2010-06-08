@@ -10,6 +10,8 @@
 #ifndef _ASM_IRQFLAGS_H
 #define _ASM_IRQFLAGS_H
 
+#include <asm/pil.h>
+
 #ifndef __ASSEMBLY__
 
 static inline unsigned long __raw_local_save_flags(void)
@@ -40,9 +42,9 @@ static inline void raw_local_irq_restore(unsigned long flags)
 static inline void raw_local_irq_disable(void)
 {
 	__asm__ __volatile__(
-		"wrpr	15, %%pil"
+		"wrpr	%0, %%pil"
 		: /* no outputs */
-		: /* no inputs */
+		: "i" (PIL_NORMAL_MAX)
 		: "memory"
 	);
 }
@@ -74,9 +76,26 @@ static inline int raw_irqs_disabled(void)
  */
 static inline unsigned long __raw_local_irq_save(void)
 {
-	unsigned long flags = __raw_local_save_flags();
+	unsigned long flags, tmp;
 
-	raw_local_irq_disable();
+	/* Disable interrupts to PIL_NORMAL_MAX unless we already
+	 * are using PIL_NMI, in which case PIL_NMI is retained.
+	 *
+	 * The only values we ever program into the %pil are 0,
+	 * PIL_NORMAL_MAX and PIL_NMI.
+	 *
+	 * Since PIL_NMI is the largest %pil value and all bits are
+	 * set in it (0xf), it doesn't matter what PIL_NORMAL_MAX
+	 * actually is.
+	 */
+	__asm__ __volatile__(
+		"rdpr	%%pil, %0\n\t"
+		"or	%0, %2, %1\n\t"
+		"wrpr	%1, 0x0, %%pil"
+		: "=r" (flags), "=r" (tmp)
+		: "i" (PIL_NORMAL_MAX)
+		: "memory"
+	);
 
 	return flags;
 }

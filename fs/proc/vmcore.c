@@ -12,6 +12,7 @@
 #include <linux/user.h>
 #include <linux/elf.h>
 #include <linux/elfcore.h>
+#include <linux/slab.h>
 #include <linux/highmem.h>
 #include <linux/bootmem.h>
 #include <linux/init.h>
@@ -47,8 +48,6 @@ static ssize_t read_from_oldmem(char *buf, size_t count,
 
 	offset = (unsigned long)(*ppos % PAGE_SIZE);
 	pfn = (unsigned long)(*ppos / PAGE_SIZE);
-	if (pfn > saved_max_pfn)
-		return -EINVAL;
 
 	do {
 		if (count > (PAGE_SIZE - offset))
@@ -168,12 +167,7 @@ static const struct file_operations proc_vmcore_operations = {
 
 static struct vmcore* __init get_new_element(void)
 {
-	struct vmcore *p;
-
-	p = kmalloc(sizeof(*p), GFP_KERNEL);
-	if (p)
-		memset(p, 0, sizeof(*p));
-	return p;
+	return kzalloc(sizeof(struct vmcore), GFP_KERNEL);
 }
 
 static u64 __init get_vmcore_size_elf64(char *elfptr)

@@ -53,7 +53,7 @@
 #include <linux/err.h>
 #include <linux/kdev_t.h>
 #include <linux/random.h>
-#include <linux/uwb/debug.h>
+
 #include "uwb-internal.h"
 
 
@@ -74,13 +74,16 @@
 unsigned long beacon_timeout_ms = 500;
 
 static
-ssize_t beacon_timeout_ms_show(struct class *class, char *buf)
+ssize_t beacon_timeout_ms_show(struct class *class,
+				struct class_attribute *attr,
+				char *buf)
 {
 	return scnprintf(buf, PAGE_SIZE, "%lu\n", beacon_timeout_ms);
 }
 
 static
 ssize_t beacon_timeout_ms_store(struct class *class,
+				struct class_attribute *attr,
 				const char *buf, size_t size)
 {
 	unsigned long bt;
@@ -118,7 +121,6 @@ static int __init uwb_subsys_init(void)
 	result = class_register(&uwb_rc_class);
 	if (result < 0)
 		goto error_uwb_rc_class_register;
-	uwbd_start();
 	uwb_dbg_init();
 	return 0;
 
@@ -132,7 +134,6 @@ module_init(uwb_subsys_init);
 static void __exit uwb_subsys_exit(void)
 {
 	uwb_dbg_exit();
-	uwbd_stop();
 	class_unregister(&uwb_rc_class);
 	uwb_est_destroy();
 	return;

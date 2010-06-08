@@ -39,7 +39,7 @@ static int __diag_ipl_functions(struct kvm_vcpu *vcpu)
 		vcpu->run->s390_reset_flags = 0;
 		break;
 	default:
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 	}
 
 	atomic_clear_mask(CPUSTAT_RUNNING, &vcpu->arch.sie_block->cpuflags);
@@ -47,7 +47,7 @@ static int __diag_ipl_functions(struct kvm_vcpu *vcpu)
 	vcpu->run->s390_reset_flags |= KVM_S390_RESET_IPL;
 	vcpu->run->s390_reset_flags |= KVM_S390_RESET_CPU_INIT;
 	vcpu->run->exit_reason = KVM_EXIT_S390_RESET;
-	VCPU_EVENT(vcpu, 3, "requesting userspace resets %lx",
+	VCPU_EVENT(vcpu, 3, "requesting userspace resets %llx",
 	  vcpu->run->s390_reset_flags);
 	return -EREMOTE;
 }
@@ -62,6 +62,6 @@ int kvm_s390_handle_diag(struct kvm_vcpu *vcpu)
 	case 0x308:
 		return __diag_ipl_functions(vcpu);
 	default:
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 	}
 }

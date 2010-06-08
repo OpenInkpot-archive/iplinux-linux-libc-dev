@@ -11,14 +11,9 @@
 #include <linux/blkdev.h>
 #include <linux/delay.h>
 #include <linux/device.h>
+#include <linux/gfp.h>
 #include <scsi/scsi_host.h>
 #include <acpi/acpi_bus.h>
-#include <acpi/acnames.h>
-#include <acpi/acnamesp.h>
-#include <acpi/acparser.h>
-#include <acpi/acexcep.h>
-#include <acpi/acmacros.h>
-#include <acpi/actypes.h>
 
 #include <linux/libata.h>
 #include <linux/ata.h>
@@ -167,7 +162,7 @@ static void pacpi_set_dmamode(struct ata_port *ap, struct ata_device *adev)
  *
  *	Called when the libata layer is about to issue a command. We wrap
  *	this interface so that we can load the correct ATA timings if
- *	neccessary.
+ *	necessary.
  */
 
 static unsigned int pacpi_qc_issue(struct ata_queued_cmd *qc)
@@ -252,9 +247,9 @@ static int pacpi_init_one (struct pci_dev *pdev, const struct pci_device_id *id)
 	static const struct ata_port_info info = {
 		.flags		= ATA_FLAG_SLAVE_POSS | ATA_FLAG_SRST,
 
-		.pio_mask	= 0x1f,
-		.mwdma_mask	= 0x07,
-		.udma_mask 	= 0x7f,
+		.pio_mask	= ATA_PIO4,
+		.mwdma_mask	= ATA_MWDMA2,
+		.udma_mask 	= ATA_UDMA6,
 
 		.port_ops	= &pacpi_ops,
 	};
@@ -265,7 +260,7 @@ static int pacpi_init_one (struct pci_dev *pdev, const struct pci_device_id *id)
 			return rc;
 		pcim_pin_device(pdev);
 	}
-	return ata_pci_sff_init_one(pdev, ppi, &pacpi_sht, NULL);
+	return ata_pci_sff_init_one(pdev, ppi, &pacpi_sht, NULL, 0);
 }
 
 static const struct pci_device_id pacpi_pci_tbl[] = {

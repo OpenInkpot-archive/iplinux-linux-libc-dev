@@ -56,7 +56,8 @@ ccw_device_path_notoper(struct ccw_device *cdev)
 	struct subchannel *sch;
 
 	sch = to_subchannel(cdev->dev.parent);
-	stsch (sch->schid, &sch->schib);
+	if (cio_update_schib(sch))
+		goto doverify;
 
 	CIO_MSG_EVENT(0, "%s(0.%x.%04x) - path(s) %02x are "
 		      "not operational \n", __func__,
@@ -64,6 +65,7 @@ ccw_device_path_notoper(struct ccw_device *cdev)
 		      sch->schib.pmcw.pnom);
 
 	sch->lpm &= ~sch->schib.pmcw.pnom;
+doverify:
 	cdev->private->flags.doverify = 1;
 }
 
@@ -333,9 +335,6 @@ ccw_device_do_sense(struct ccw_device *cdev, struct irb *irb)
 	sense_ccw->cda = (__u32) __pa(cdev->private->irb.ecw);
 	sense_ccw->count = SENSE_MAX_COUNT;
 	sense_ccw->flags = CCW_FLAG_SLI;
-
-	/* Reset internal retry indication. */
-	cdev->private->flags.intretry = 0;
 
 	rc = cio_start(sch, sense_ccw, 0xff);
 	if (rc == -ENODEV || rc == -EACCES)

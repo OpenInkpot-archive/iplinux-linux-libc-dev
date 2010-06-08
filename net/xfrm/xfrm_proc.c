@@ -15,7 +15,7 @@
 #include <net/snmp.h>
 #include <net/xfrm.h>
 
-static struct snmp_mib xfrm_mib_list[] = {
+static const struct snmp_mib xfrm_mib_list[] = {
 	SNMP_MIB_ITEM("XfrmInError", LINUX_MIB_XFRMINERROR),
 	SNMP_MIB_ITEM("XfrmInBufferError", LINUX_MIB_XFRMINBUFFERERROR),
 	SNMP_MIB_ITEM("XfrmInHdrError", LINUX_MIB_XFRMINHDRERROR),
@@ -41,57 +41,44 @@ static struct snmp_mib xfrm_mib_list[] = {
 	SNMP_MIB_ITEM("XfrmOutPolBlock", LINUX_MIB_XFRMOUTPOLBLOCK),
 	SNMP_MIB_ITEM("XfrmOutPolDead", LINUX_MIB_XFRMOUTPOLDEAD),
 	SNMP_MIB_ITEM("XfrmOutPolError", LINUX_MIB_XFRMOUTPOLERROR),
+	SNMP_MIB_ITEM("XfrmFwdHdrError", LINUX_MIB_XFRMFWDHDRERROR),
 	SNMP_MIB_SENTINEL
 };
 
-static unsigned long
-fold_field(void *mib[], int offt)
-{
-        unsigned long res = 0;
-        int i;
-
-        for_each_possible_cpu(i) {
-                res += *(((unsigned long *)per_cpu_ptr(mib[0], i)) + offt);
-                res += *(((unsigned long *)per_cpu_ptr(mib[1], i)) + offt);
-        }
-        return res;
-}
-
 static int xfrm_statistics_seq_show(struct seq_file *seq, void *v)
 {
+	struct net *net = seq->private;
 	int i;
 	for (i=0; xfrm_mib_list[i].name; i++)
 		seq_printf(seq, "%-24s\t%lu\n", xfrm_mib_list[i].name,
-			   fold_field((void **)xfrm_statistics,
-				      xfrm_mib_list[i].entry));
+			   snmp_fold_field((void __percpu **)
+					   net->mib.xfrm_statistics,
+					   xfrm_mib_list[i].entry));
 	return 0;
 }
 
 static int xfrm_statistics_seq_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, xfrm_statistics_seq_show, NULL);
+	return single_open_net(inode, file, xfrm_statistics_seq_show);
 }
 
-static struct file_operations xfrm_statistics_seq_fops = {
+static const struct file_operations xfrm_statistics_seq_fops = {
 	.owner	 = THIS_MODULE,
 	.open	 = xfrm_statistics_seq_open,
 	.read	 = seq_read,
 	.llseek	 = seq_lseek,
-	.release = single_release,
+	.release = single_release_net,
 };
 
-int __init xfrm_proc_init(void)
+int __net_init xfrm_proc_init(struct net *net)
 {
-	int rc = 0;
-
-	if (!proc_net_fops_create(&init_net, "xfrm_stat", S_IRUGO,
+	if (!proc_net_fops_create(net, "xfrm_stat", S_IRUGO,
 				  &xfrm_statistics_seq_fops))
-		goto stat_fail;
+		return -ENOMEM;
+	return 0;
+}
 
- out:
-	return rc;
-
- stat_fail:
-	rc = -ENOMEM;
-	goto out;
+void xfrm_proc_fini(struct net *net)
+{
+	proc_net_remove(net, "xfrm_stat");
 }

@@ -2,17 +2,20 @@
  *  arch/s390/hypfs/inode.c
  *    Hypervisor filesystem for Linux on s390.
  *
- *    Copyright (C) IBM Corp. 2006
+ *    Copyright IBM Corp. 2006, 2008
  *    Author(s): Michael Holzheu <holzheu@de.ibm.com>
  */
+
+#define KMSG_COMPONENT "hypfs"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/namei.h>
 #include <linux/vfs.h>
+#include <linux/slab.h>
 #include <linux/pagemap.h>
-#include <linux/gfp.h>
 #include <linux/time.h>
 #include <linux/parser.h>
 #include <linux/sysfs.h>
@@ -38,7 +41,7 @@ struct hypfs_sb_info {
 
 static const struct file_operations hypfs_file_ops;
 static struct file_system_type hypfs_type;
-static struct super_operations hypfs_s_ops;
+static const struct super_operations hypfs_s_ops;
 
 /* start of list of all dentries, which have to be deleted on update */
 static struct dentry *hypfs_last_dentry;
@@ -103,7 +106,6 @@ static struct inode *hypfs_make_inode(struct super_block *sb, int mode)
 		ret->i_mode = mode;
 		ret->i_uid = hypfs_info->uid;
 		ret->i_gid = hypfs_info->gid;
-		ret->i_blocks = 0;
 		ret->i_atime = ret->i_mtime = ret->i_ctime = CURRENT_TIME;
 		if (mode & S_IFDIR)
 			ret->i_nlink = 2;
@@ -200,7 +202,7 @@ static ssize_t hypfs_aio_write(struct kiocb *iocb, const struct iovec *iov,
 	else
 		rc = hypfs_diag_create_files(sb, sb->s_root);
 	if (rc) {
-		printk(KERN_ERR "hypfs: Update failed\n");
+		pr_err("Updating the hypfs tree failed\n");
 		hypfs_delete_tree(sb->s_root);
 		goto out;
 	}
@@ -252,8 +254,7 @@ static int hypfs_parse_options(char *options, struct super_block *sb)
 			break;
 		case opt_err:
 		default:
-			printk(KERN_ERR "hypfs: Unrecognized mount option "
-			       "\"%s\" or missing value\n", str);
+			pr_err("%s is not a valid mount option\n", str);
 			return -EINVAL;
 		}
 	}
@@ -280,53 +281,37 @@ static int hypfs_fill_super(struct super_block *sb, void *data, int silent)
 	if (!sbi)
 		return -ENOMEM;
 	mutex_init(&sbi->lock);
-	sbi->uid = current->uid;
-	sbi->gid = current->gid;
+	sbi->uid = current_uid();
+	sbi->gid = current_gid();
 	sb->s_fs_info = sbi;
 	sb->s_blocksize = PAGE_CACHE_SIZE;
 	sb->s_blocksize_bits = PAGE_CACHE_SHIFT;
 	sb->s_magic = HYPFS_MAGIC;
 	sb->s_op = &hypfs_s_ops;
-	if (hypfs_parse_options(data, sb)) {
-		rc = -EINVAL;
-		goto err_alloc;
-	}
+	if (hypfs_parse_options(data, sb))
+		return -EINVAL;
 	root_inode = hypfs_make_inode(sb, S_IFDIR | 0755);
-	if (!root_inode) {
-		rc = -ENOMEM;
-		goto err_alloc;
-	}
+	if (!root_inode)
+		return -ENOMEM;
 	root_inode->i_op = &simple_dir_inode_operations;
 	root_inode->i_fop = &simple_dir_operations;
-	root_dentry = d_alloc_root(root_inode);
+	sb->s_root = root_dentry = d_alloc_root(root_inode);
 	if (!root_dentry) {
 		iput(root_inode);
-		rc = -ENOMEM;
-		goto err_alloc;
+		return -ENOMEM;
 	}
 	if (MACHINE_IS_VM)
 		rc = hypfs_vm_create_files(sb, root_dentry);
 	else
 		rc = hypfs_diag_create_files(sb, root_dentry);
 	if (rc)
-		goto err_tree;
+		return rc;
 	sbi->update_file = hypfs_create_update_file(sb, root_dentry);
-	if (IS_ERR(sbi->update_file)) {
-		rc = PTR_ERR(sbi->update_file);
-		goto err_tree;
-	}
+	if (IS_ERR(sbi->update_file))
+		return PTR_ERR(sbi->update_file);
 	hypfs_update_update(sb);
-	sb->s_root = root_dentry;
-	printk(KERN_INFO "hypfs: Hypervisor filesystem mounted\n");
+	pr_info("Hypervisor filesystem mounted\n");
 	return 0;
-
-err_tree:
-	hypfs_delete_tree(root_dentry);
-	d_genocide(root_dentry);
-	dput(root_dentry);
-err_alloc:
-	kfree(sbi);
-	return rc;
 }
 
 static int hypfs_get_super(struct file_system_type *fst, int flags,
@@ -339,12 +324,12 @@ static void hypfs_kill_super(struct super_block *sb)
 {
 	struct hypfs_sb_info *sb_info = sb->s_fs_info;
 
-	if (sb->s_root) {
+	if (sb->s_root)
 		hypfs_delete_tree(sb->s_root);
+	if (sb_info->update_file)
 		hypfs_remove(sb_info->update_file);
-		kfree(sb->s_fs_info);
-		sb->s_fs_info = NULL;
-	}
+	kfree(sb->s_fs_info);
+	sb->s_fs_info = NULL;
 	kill_litter_super(sb);
 }
 
@@ -354,11 +339,7 @@ static struct dentry *hypfs_create_file(struct super_block *sb,
 {
 	struct dentry *dentry;
 	struct inode *inode;
-	struct qstr qname;
 
-	qname.name = name;
-	qname.len = strlen(name);
-	qname.hash = full_name_hash(name, qname.len);
 	mutex_lock(&parent->d_inode->i_mutex);
 	dentry = lookup_one_len(name, parent, strlen(name));
 	if (IS_ERR(dentry)) {
@@ -425,7 +406,7 @@ struct dentry *hypfs_create_u64(struct super_block *sb, struct dentry *dir,
 	char tmp[TMP_SIZE];
 	struct dentry *dentry;
 
-	snprintf(tmp, TMP_SIZE, "%lld\n", (unsigned long long int)value);
+	snprintf(tmp, TMP_SIZE, "%llu\n", (unsigned long long int)value);
 	buffer = kstrdup(tmp, GFP_KERNEL);
 	if (!buffer)
 		return ERR_PTR(-ENOMEM);
@@ -475,7 +456,7 @@ static struct file_system_type hypfs_type = {
 	.kill_sb	= hypfs_kill_super
 };
 
-static struct super_operations hypfs_s_ops = {
+static const struct super_operations hypfs_s_ops = {
 	.statfs		= simple_statfs,
 	.drop_inode	= hypfs_drop_inode,
 	.show_options	= hypfs_show_options,
@@ -499,7 +480,7 @@ static int __init hypfs_init(void)
 	}
 	s390_kobj = kobject_create_and_add("s390", hypervisor_kobj);
 	if (!s390_kobj) {
-		rc = -ENOMEM;;
+		rc = -ENOMEM;
 		goto fail_sysfs;
 	}
 	rc = register_filesystem(&hypfs_type);
@@ -513,7 +494,7 @@ fail_sysfs:
 	if (!MACHINE_IS_VM)
 		hypfs_diag_exit();
 fail_diag:
-	printk(KERN_ERR "hypfs: Initialization failed with rc = %i.\n", rc);
+	pr_err("Initialization of hypfs failed with rc=%i\n", rc);
 	return rc;
 }
 

@@ -23,6 +23,7 @@
 #ifndef _ASM_X86_MTRR_H
 #define _ASM_X86_MTRR_H
 
+#include <linux/types.h>
 #include <linux/ioctl.h>
 #include <linux/errno.h>
 
@@ -56,6 +57,31 @@ struct mtrr_gentry {
     unsigned int type;     /*  Type of region   */
 };
 #endif /* !__i386__ */
+
+struct mtrr_var_range {
+	__u32 base_lo;
+	__u32 base_hi;
+	__u32 mask_lo;
+	__u32 mask_hi;
+};
+
+/* In the Intel processor's MTRR interface, the MTRR type is always held in
+   an 8 bit field: */
+typedef __u8 mtrr_type;
+
+#define MTRR_NUM_FIXED_RANGES 88
+#define MTRR_MAX_VAR_RANGES 256
+
+struct mtrr_state_type {
+	struct mtrr_var_range var_ranges[MTRR_MAX_VAR_RANGES];
+	mtrr_type fixed_ranges[MTRR_NUM_FIXED_RANGES];
+	unsigned char enabled;
+	unsigned char have_fixed;
+	mtrr_type def_type;
+};
+
+#define MTRRphysBase_MSR(reg) (0x200 + 2 * (reg))
+#define MTRRphysMask_MSR(reg) (0x200 + 2 * (reg) + 1)
 
 /*  These are the various ioctls  */
 #define MTRRIOC_ADD_ENTRY        _IOW(MTRR_IOCTL_BASE,  0, struct mtrr_sentry)
@@ -95,6 +121,9 @@ extern int mtrr_del_page(int reg, unsigned long base, unsigned long size);
 extern void mtrr_centaur_report_mcr(int mcr, u32 lo, u32 hi);
 extern void mtrr_ap_init(void);
 extern void mtrr_bp_init(void);
+extern void set_mtrr_aps_delayed_init(void);
+extern void mtrr_aps_init(void);
+extern void mtrr_bp_restore(void);
 extern int mtrr_trim_uncached_memory(unsigned long end_pfn);
 extern int amd_special_default_mtrr(void);
 #  else
@@ -135,6 +164,9 @@ static inline void mtrr_centaur_report_mcr(int mcr, u32 lo, u32 hi)
 
 #define mtrr_ap_init() do {} while (0)
 #define mtrr_bp_init() do {} while (0)
+#define set_mtrr_aps_delayed_init() do {} while (0)
+#define mtrr_aps_init() do {} while (0)
+#define mtrr_bp_restore() do {} while (0)
 #  endif
 
 #ifdef CONFIG_COMPAT

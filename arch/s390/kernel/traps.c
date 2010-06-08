@@ -18,7 +18,7 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/errno.h>
-#include <linux/ptrace.h>
+#include <linux/tracehook.h>
 #include <linux/timer.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
@@ -61,9 +61,11 @@ extern pgm_check_handler_t do_asce_exception;
 #define stack_pointer ({ void **sp; asm("la %0,0(15)" : "=&d" (sp)); sp; })
 
 #ifndef CONFIG_64BIT
+#define LONG "%08lx "
 #define FOURLONG "%08lx %08lx %08lx %08lx\n"
 static int kstack_depth_to_print = 12;
 #else /* CONFIG_64BIT */
+#define LONG "%016lx "
 #define FOURLONG "%016lx %016lx %016lx %016lx\n"
 static int kstack_depth_to_print = 20;
 #endif /* CONFIG_64BIT */
@@ -155,7 +157,7 @@ void show_stack(struct task_struct *task, unsigned long *sp)
 			break;
 		if (i && ((i * sizeof (long) % 32) == 0))
 			printk("\n       ");
-		printk("%p ", (void *)*stack++);
+		printk(LONG, *stack++);
 	}
 	printk("\n");
 	show_trace(task, sp);
@@ -380,7 +382,7 @@ void __kprobes do_single_step(struct pt_regs *regs)
 					SIGTRAP) == NOTIFY_STOP){
 		return;
 	}
-	if ((current->ptrace & PT_PTRACED) != 0)
+	if (tracehook_consider_fatal_signal(current, SIGTRAP))
 		force_sig(SIGTRAP, current);
 }
 
@@ -481,7 +483,7 @@ static void illegal_op(struct pt_regs * regs, long interruption_code)
 		if (get_user(*((__u16 *) opcode), (__u16 __user *) location))
 			return;
 		if (*((__u16 *) opcode) == S390_BREAKPOINT_U16) {
-			if (current->ptrace & PT_PTRACED)
+			if (tracehook_consider_fatal_signal(current, SIGTRAP))
 				force_sig(SIGTRAP, current);
 			else
 				signal = SIGILL;

@@ -20,24 +20,12 @@
 
 #include <linux/exportfs.h>
 
-#ifdef CONFIG_XFS_DMAPI
-# define vfs_insertdmapi(vfs)	vfs_insertops(vfsp, &xfs_dmops)
-# define vfs_initdmapi()	dmapi_init()
-# define vfs_exitdmapi()	dmapi_uninit()
-#else
-# define vfs_insertdmapi(vfs)	do { } while (0)
-# define vfs_initdmapi()	do { } while (0)
-# define vfs_exitdmapi()	do { } while (0)
-#endif
-
 #ifdef CONFIG_XFS_QUOTA
-# define vfs_insertquota(vfs)	vfs_insertops(vfsp, &xfs_qmops)
 extern void xfs_qm_init(void);
 extern void xfs_qm_exit(void);
 # define vfs_initquota()	xfs_qm_init()
 # define vfs_exitquota()	xfs_qm_exit()
 #else
-# define vfs_insertquota(vfs)	do { } while (0)
 # define vfs_initquota()	do { } while (0)
 # define vfs_exitquota()	do { } while (0)
 #endif
@@ -68,12 +56,6 @@ extern void xfs_qm_exit(void);
 # define XFS_BIGFS_STRING
 #endif
 
-#ifdef CONFIG_XFS_TRACE
-# define XFS_TRACE_STRING	"tracing, "
-#else
-# define XFS_TRACE_STRING
-#endif
-
 #ifdef CONFIG_XFS_DMAPI
 # define XFS_DMAPI_STRING	"dmapi support, "
 #else
@@ -90,7 +72,6 @@ extern void xfs_qm_exit(void);
 				XFS_SECURITY_STRING \
 				XFS_REALTIME_STRING \
 				XFS_BIGFS_STRING \
-				XFS_TRACE_STRING \
 				XFS_DMAPI_STRING \
 				XFS_DBG_STRING /* DBG must be last */
 
@@ -101,13 +82,11 @@ struct block_device;
 
 extern __uint64_t xfs_max_file_offset(unsigned int);
 
-extern void xfs_flush_inode(struct xfs_inode *);
-extern void xfs_flush_device(struct xfs_inode *);
-
 extern void xfs_blkdev_issue_flush(struct xfs_buftarg *);
 
 extern const struct export_operations xfs_export_operations;
 extern struct xattr_handler *xfs_xattr_handlers[];
+extern const struct quotactl_ops xfs_quotactl_operations;
 
 #define XFS_M(sb)		((struct xfs_mount *)((sb)->s_fs_info))
 

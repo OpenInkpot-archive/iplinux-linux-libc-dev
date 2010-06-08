@@ -18,6 +18,7 @@
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/bootmem.h>
+#include <linux/gfp.h>
 
 #include <asm/setup.h>
 #include <asm/uaccess.h>
@@ -30,6 +31,7 @@
 #ifdef CONFIG_ATARI
 #include <asm/atari_stram.h>
 #endif
+#include <asm/sections.h>
 
 #undef DEBUG
 
@@ -301,14 +303,12 @@ void __init paging_init(void)
 	}
 }
 
-extern char __init_begin, __init_end;
-
 void free_initmem(void)
 {
 	unsigned long addr;
 
-	addr = (unsigned long)&__init_begin;
-	for (; addr < (unsigned long)&__init_end; addr += PAGE_SIZE) {
+	addr = (unsigned long)__init_begin;
+	for (; addr < (unsigned long)__init_end; addr += PAGE_SIZE) {
 		virt_to_page(addr)->flags &= ~(1 << PG_reserved);
 		init_page_count(virt_to_page(addr));
 		free_page(addr);

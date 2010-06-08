@@ -46,11 +46,6 @@
 
 #include "hci_uart.h"
 
-#ifndef CONFIG_BT_HCIUART_DEBUG
-#undef  BT_DBG
-#define BT_DBG( A... )
-#endif
-
 #define VERSION "2.2"
 
 static int reset = 0;
@@ -219,7 +214,7 @@ static int hci_uart_send_frame(struct sk_buff *skb)
 	struct hci_uart *hu;
 
 	if (!hdev) {
-		BT_ERR("Frame for uknown device (hdev=NULL)");
+		BT_ERR("Frame for unknown device (hdev=NULL)");
 		return -ENODEV;
 	}
 
@@ -282,8 +277,8 @@ static int hci_uart_tty_open(struct tty_struct *tty)
 	/* FIXME: why is this needed. Note don't use ldisc_ref here as the
 	   open path is before the ldisc is referencable */
 
-	if (tty->ldisc.ops->flush_buffer)
-		tty->ldisc.ops->flush_buffer(tty);
+	if (tty->ldisc->ops->flush_buffer)
+		tty->ldisc->ops->flush_buffer(tty);
 	tty_driver_flush_buffer(tty);
 
 	return 0;
@@ -388,7 +383,7 @@ static int hci_uart_register_dev(struct hci_uart *hu)
 
 	hu->hdev = hdev;
 
-	hdev->type = HCI_UART;
+	hdev->bus = HCI_UART;
 	hdev->driver_data = hu;
 
 	hdev->open  = hci_uart_open;
@@ -399,8 +394,8 @@ static int hci_uart_register_dev(struct hci_uart *hu)
 
 	hdev->owner = THIS_MODULE;
 
-	if (reset)
-		set_bit(HCI_QUIRK_RESET_ON_INIT, &hdev->quirks);
+	if (!reset)
+		set_bit(HCI_QUIRK_NO_RESET, &hdev->quirks);
 
 	if (hci_register_dev(hdev) < 0) {
 		BT_ERR("Can't register HCI device");
@@ -468,7 +463,6 @@ static int hci_uart_tty_ioctl(struct tty_struct *tty, struct file * file,
 				clear_bit(HCI_UART_PROTO_SET, &hu->flags);
 				return err;
 			}
-			tty->low_latency = 1;
 		} else
 			return -EBUSY;
 		break;

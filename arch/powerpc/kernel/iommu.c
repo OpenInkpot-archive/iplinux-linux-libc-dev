@@ -30,7 +30,7 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/dma-mapping.h>
-#include <linux/bitops.h>
+#include <linux/bitmap.h>
 #include <linux/iommu-helper.h>
 #include <linux/crash_dump.h>
 #include <asm/io.h>
@@ -42,12 +42,7 @@
 
 #define DBG(...)
 
-#ifdef CONFIG_IOMMU_VMERGE
-static int novmerge = 0;
-#else
-static int novmerge = 1;
-#endif
-
+static int novmerge;
 static int protect4gb = 1;
 
 static void __iommu_free(struct iommu_table *, dma_addr_t, unsigned int);
@@ -239,19 +234,19 @@ static void __iommu_free(struct iommu_table *tbl, dma_addr_t dma_addr,
 		if (printk_ratelimit()) {
 			printk(KERN_INFO "iommu_free: invalid entry\n");
 			printk(KERN_INFO "\tentry     = 0x%lx\n", entry); 
-			printk(KERN_INFO "\tdma_addr  = 0x%lx\n", (u64)dma_addr);
-			printk(KERN_INFO "\tTable     = 0x%lx\n", (u64)tbl);
-			printk(KERN_INFO "\tbus#      = 0x%lx\n", (u64)tbl->it_busno);
-			printk(KERN_INFO "\tsize      = 0x%lx\n", (u64)tbl->it_size);
-			printk(KERN_INFO "\tstartOff  = 0x%lx\n", (u64)tbl->it_offset);
-			printk(KERN_INFO "\tindex     = 0x%lx\n", (u64)tbl->it_index);
+			printk(KERN_INFO "\tdma_addr  = 0x%llx\n", (u64)dma_addr);
+			printk(KERN_INFO "\tTable     = 0x%llx\n", (u64)tbl);
+			printk(KERN_INFO "\tbus#      = 0x%llx\n", (u64)tbl->it_busno);
+			printk(KERN_INFO "\tsize      = 0x%llx\n", (u64)tbl->it_size);
+			printk(KERN_INFO "\tstartOff  = 0x%llx\n", (u64)tbl->it_offset);
+			printk(KERN_INFO "\tindex     = 0x%llx\n", (u64)tbl->it_index);
 			WARN_ON(1);
 		}
 		return;
 	}
 
 	ppc_md.tce_free(tbl, entry, npages);
-	iommu_area_free(tbl->it_map, free_entry, npages);
+	bitmap_clear(tbl->it_map, free_entry, npages);
 }
 
 static void iommu_free(struct iommu_table *tbl, dma_addr_t dma_addr,

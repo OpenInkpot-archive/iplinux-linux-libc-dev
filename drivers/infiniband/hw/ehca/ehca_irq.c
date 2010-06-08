@@ -41,6 +41,8 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <linux/slab.h>
+
 #include "ehca_classes.h"
 #include "ehca_irq.h"
 #include "ehca_iverbs.h"
@@ -99,7 +101,7 @@ static void print_error_data(struct ehca_shca *shca, void *data,
 			return;
 
 		ehca_err(&shca->ib_device,
-			 "QP 0x%x (resource=%lx) has errors.",
+			 "QP 0x%x (resource=%llx) has errors.",
 			 qp->ib_qp.qp_num, resource);
 		break;
 	}
@@ -108,21 +110,21 @@ static void print_error_data(struct ehca_shca *shca, void *data,
 		struct ehca_cq *cq = (struct ehca_cq *)data;
 
 		ehca_err(&shca->ib_device,
-			 "CQ 0x%x (resource=%lx) has errors.",
+			 "CQ 0x%x (resource=%llx) has errors.",
 			 cq->cq_number, resource);
 		break;
 	}
 	default:
 		ehca_err(&shca->ib_device,
-			 "Unknown error type: %lx on %s.",
+			 "Unknown error type: %llx on %s.",
 			 type, shca->ib_device.name);
 		break;
 	}
 
-	ehca_err(&shca->ib_device, "Error data is available: %lx.", resource);
+	ehca_err(&shca->ib_device, "Error data is available: %llx.", resource);
 	ehca_err(&shca->ib_device, "EHCA ----- error data begin "
 		 "---------------------------------------------------");
-	ehca_dmp(rblock, length, "resource=%lx", resource);
+	ehca_dmp(rblock, length, "resource=%llx", resource);
 	ehca_err(&shca->ib_device, "EHCA ----- error data end "
 		 "----------------------------------------------------");
 
@@ -152,7 +154,7 @@ int ehca_error_data(struct ehca_shca *shca, void *data,
 
 	if (ret == H_R_STATE)
 		ehca_err(&shca->ib_device,
-			 "No error data is available: %lx.", resource);
+			 "No error data is available: %llx.", resource);
 	else if (ret == H_SUCCESS) {
 		int length;
 
@@ -164,7 +166,7 @@ int ehca_error_data(struct ehca_shca *shca, void *data,
 		print_error_data(shca, data, rblock, length);
 	} else
 		ehca_err(&shca->ib_device,
-			 "Error data could not be fetched: %lx", resource);
+			 "Error data could not be fetched: %llx", resource);
 
 	ehca_free_fw_ctrlblock(rblock);
 
@@ -479,13 +481,13 @@ void ehca_tasklet_neq(unsigned long data)
 	struct ehca_eqe *eqe;
 	u64 ret;
 
-	eqe = (struct ehca_eqe *)ehca_poll_eq(shca, &shca->neq);
+	eqe = ehca_poll_eq(shca, &shca->neq);
 
 	while (eqe) {
 		if (!EHCA_BMASK_GET(NEQE_COMPLETION_EVENT, eqe->entry))
 			parse_ec(shca, eqe->entry);
 
-		eqe = (struct ehca_eqe *)ehca_poll_eq(shca, &shca->neq);
+		eqe = ehca_poll_eq(shca, &shca->neq);
 	}
 
 	ret = hipz_h_reset_event(shca->ipz_hca_handle,
@@ -514,7 +516,7 @@ static inline void process_eqe(struct ehca_shca *shca, struct ehca_eqe *eqe)
 	struct ehca_cq *cq;
 
 	eqe_value = eqe->entry;
-	ehca_dbg(&shca->ib_device, "eqe_value=%lx", eqe_value);
+	ehca_dbg(&shca->ib_device, "eqe_value=%llx", eqe_value);
 	if (EHCA_BMASK_GET(EQE_COMPLETION_EVENT, eqe_value)) {
 		ehca_dbg(&shca->ib_device, "Got completion event");
 		token = EHCA_BMASK_GET(EQE_CQ_TOKEN, eqe_value);
@@ -548,11 +550,10 @@ void ehca_process_eq(struct ehca_shca *shca, int is_irq)
 	struct ehca_eq *eq = &shca->eq;
 	struct ehca_eqe_cache_entry *eqe_cache = eq->eqe_cache;
 	u64 eqe_value, ret;
-	unsigned long flags;
 	int eqe_cnt, i;
 	int eq_empty = 0;
 
-	spin_lock_irqsave(&eq->irq_spinlock, flags);
+	spin_lock(&eq->irq_spinlock);
 	if (is_irq) {
 		const int max_query_cnt = 100;
 		int query_cnt = 0;
@@ -572,8 +573,7 @@ void ehca_process_eq(struct ehca_shca *shca, int is_irq)
 	eqe_cnt = 0;
 	do {
 		u32 token;
-		eqe_cache[eqe_cnt].eqe =
-			(struct ehca_eqe *)ehca_poll_eq(shca, eq);
+		eqe_cache[eqe_cnt].eqe = ehca_poll_eq(shca, eq);
 		if (!eqe_cache[eqe_cnt].eqe)
 			break;
 		eqe_value = eqe_cache[eqe_cnt].eqe->entry;
@@ -603,7 +603,7 @@ void ehca_process_eq(struct ehca_shca *shca, int is_irq)
 		ret = hipz_h_eoi(eq->ist);
 		if (ret != H_SUCCESS)
 			ehca_err(&shca->ib_device,
-				 "bad return code EOI -rc = %ld\n", ret);
+				 "bad return code EOI -rc = %lld\n", ret);
 		ehca_dbg(&shca->ib_device, "deadman found %x eqe", eqe_cnt);
 	}
 	if (unlikely(eqe_cnt == EHCA_EQE_CACHE_SIZE))
@@ -637,14 +637,14 @@ void ehca_process_eq(struct ehca_shca *shca, int is_irq)
 		goto unlock_irq_spinlock;
 	do {
 		struct ehca_eqe *eqe;
-		eqe = (struct ehca_eqe *)ehca_poll_eq(shca, &shca->eq);
+		eqe = ehca_poll_eq(shca, &shca->eq);
 		if (!eqe)
 			break;
 		process_eqe(shca, eqe);
 	} while (1);
 
 unlock_irq_spinlock:
-	spin_unlock_irqrestore(&eq->irq_spinlock, flags);
+	spin_unlock(&eq->irq_spinlock);
 }
 
 void ehca_tasklet_eq(unsigned long data)
@@ -659,12 +659,12 @@ static inline int find_next_online_cpu(struct ehca_comp_pool *pool)
 
 	WARN_ON_ONCE(!in_interrupt());
 	if (ehca_debug_level >= 3)
-		ehca_dmp(&cpu_online_map, sizeof(cpumask_t), "");
+		ehca_dmp(cpu_online_mask, cpumask_size(), "");
 
 	spin_lock_irqsave(&pool->last_cpu_lock, flags);
-	cpu = next_cpu_nr(pool->last_cpu, cpu_online_map);
+	cpu = cpumask_next(pool->last_cpu, cpu_online_mask);
 	if (cpu >= nr_cpu_ids)
-		cpu = first_cpu(cpu_online_map);
+		cpu = cpumask_first(cpu_online_mask);
 	pool->last_cpu = cpu;
 	spin_unlock_irqrestore(&pool->last_cpu_lock, flags);
 
@@ -827,8 +827,7 @@ static void __cpuinit take_over_work(struct ehca_comp_pool *pool, int cpu)
 		cq = list_entry(cct->cq_list.next, struct ehca_cq, entry);
 
 		list_del(&cq->entry);
-		__queue_comp_task(cq, per_cpu_ptr(pool->cpu_comp_tasks,
-						  smp_processor_id()));
+		__queue_comp_task(cq, this_cpu_ptr(pool->cpu_comp_tasks));
 	}
 
 	spin_unlock_irqrestore(&cct->task_lock, flags_cct);
@@ -855,7 +854,7 @@ static int __cpuinit comp_pool_callback(struct notifier_block *nfb,
 	case CPU_UP_CANCELED_FROZEN:
 		ehca_gen_dbg("CPU: %x (CPU_CANCELED)", cpu);
 		cct = per_cpu_ptr(pool->cpu_comp_tasks, cpu);
-		kthread_bind(cct->task, any_online_cpu(cpu_online_map));
+		kthread_bind(cct->task, cpumask_any(cpu_online_mask));
 		destroy_comp_task(pool, cpu);
 		break;
 	case CPU_ONLINE:
@@ -902,7 +901,7 @@ int ehca_create_comp_pool(void)
 		return -ENOMEM;
 
 	spin_lock_init(&pool->last_cpu_lock);
-	pool->last_cpu = any_online_cpu(cpu_online_map);
+	pool->last_cpu = cpumask_any(cpu_online_mask);
 
 	pool->cpu_comp_tasks = alloc_percpu(struct ehca_cpu_comp_task);
 	if (pool->cpu_comp_tasks == NULL) {
@@ -934,10 +933,9 @@ void ehca_destroy_comp_pool(void)
 
 	unregister_hotcpu_notifier(&comp_pool_callback_nb);
 
-	for (i = 0; i < NR_CPUS; i++) {
-		if (cpu_online(i))
-			destroy_comp_task(pool, i);
-	}
+	for_each_online_cpu(i)
+		destroy_comp_task(pool, i);
+
 	free_percpu(pool->cpu_comp_tasks);
 	kfree(pool);
 }

@@ -173,7 +173,7 @@ static int sis630_transaction_wait(struct i2c_adapter *adap, int size)
 	} while (!(temp & 0x0e) && (timeout++ < MAX_TIMEOUT));
 
 	/* If the SMBus is still busy, we give up */
-	if (timeout >= MAX_TIMEOUT) {
+	if (timeout > MAX_TIMEOUT) {
 		dev_dbg(&adap->dev, "SMBus Timeout!\n");
 		result = -ETIMEDOUT;
 	}
@@ -389,7 +389,7 @@ static u32 sis630_func(struct i2c_adapter *adapter)
 		I2C_FUNC_SMBUS_BLOCK_DATA;
 }
 
-static int sis630_setup(struct pci_dev *sis630_dev)
+static int __devinit sis630_setup(struct pci_dev *sis630_dev)
 {
 	unsigned char b;
 	struct pci_dev *dummy = NULL;
@@ -464,12 +464,11 @@ static const struct i2c_algorithm smbus_algorithm = {
 
 static struct i2c_adapter sis630_adapter = {
 	.owner		= THIS_MODULE,
-	.id		= I2C_HW_SMBUS_SIS630,
 	.class		= I2C_CLASS_HWMON | I2C_CLASS_SPD,
 	.algo		= &smbus_algorithm,
 };
 
-static struct pci_device_id sis630_ids[] __devinitdata = {
+static const struct pci_device_id sis630_ids[] __devinitconst = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_SI, PCI_DEVICE_ID_SI_503) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_SI, PCI_DEVICE_ID_SI_LPC) },
 	{ 0, }
@@ -487,8 +486,8 @@ static int __devinit sis630_probe(struct pci_dev *dev, const struct pci_device_i
 	/* set up the sysfs linkage to our parent device */
 	sis630_adapter.dev.parent = &dev->dev;
 
-	sprintf(sis630_adapter.name, "SMBus SIS630 adapter at %04x",
-		acpi_base + SMB_STS);
+	snprintf(sis630_adapter.name, sizeof(sis630_adapter.name),
+		 "SMBus SIS630 adapter at %04x", acpi_base + SMB_STS);
 
 	return i2c_add_adapter(&sis630_adapter);
 }

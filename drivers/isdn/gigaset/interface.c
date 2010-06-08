@@ -13,7 +13,6 @@
 
 #include "gigaset.h"
 #include <linux/gigaset_dev.h>
-#include <linux/tty.h>
 #include <linux/tty_flip.h>
 
 /*** our ioctls ***/
@@ -45,8 +44,6 @@ static int if_lock(struct cardstate *cs, int *arg)
 		cs->waiting = 0;
 		return -ENOMEM;
 	}
-
-	gig_dbg(DEBUG_CMD, "scheduling IF_LOCK");
 	gigaset_schedule_event(cs);
 
 	wait_event(cs->waitqueue, !cs->waiting);
@@ -81,8 +78,6 @@ static int if_version(struct cardstate *cs, unsigned arg[4])
 			cs->waiting = 0;
 			return -ENOMEM;
 		}
-
-		gig_dbg(DEBUG_CMD, "scheduling IF_VER");
 		gigaset_schedule_event(cs);
 
 		wait_event(cs->waitqueue, !cs->waiting);
@@ -107,7 +102,7 @@ static int if_config(struct cardstate *cs, int *arg)
 		return -EBUSY;
 
 	if (!cs->connected) {
-		err("not connected!");
+		pr_err("%s: not connected\n", __func__);
 		return -ENODEV;
 	}
 
@@ -143,9 +138,6 @@ static const struct tty_operations if_ops = {
 	.set_termios =		if_set_termios,
 	.throttle =		if_throttle,
 	.unthrottle =		if_unthrottle,
-#if 0
-	.break_ctl =		serial_break,
-#endif
 	.tiocmget =		if_tiocmget,
 	.tiocmset =		if_tiocmset,
 };
@@ -165,7 +157,7 @@ static int if_open(struct tty_struct *tty, struct file *filp)
 		return -ENODEV;
 
 	if (mutex_lock_interruptible(&cs->mutex))
-		return -ERESTARTSYS; // FIXME -EINTR?
+		return -ERESTARTSYS;
 	tty->driver_data = cs;
 
 	++cs->open_count;
@@ -174,7 +166,7 @@ static int if_open(struct tty_struct *tty, struct file *filp)
 		spin_lock_irqsave(&cs->lock, flags);
 		cs->tty = tty;
 		spin_unlock_irqrestore(&cs->lock, flags);
-		tty->low_latency = 1; //FIXME test
+		tty->low_latency = 1;
 	}
 
 	mutex_unlock(&cs->mutex);
@@ -188,7 +180,7 @@ static void if_close(struct tty_struct *tty, struct file *filp)
 
 	cs = (struct cardstate *) tty->driver_data;
 	if (!cs) {
-		err("cs==NULL in %s", __func__);
+		pr_err("%s: no cardstate\n", __func__);
 		return;
 	}
 
@@ -196,7 +188,9 @@ static void if_close(struct tty_struct *tty, struct file *filp)
 
 	mutex_lock(&cs->mutex);
 
-	if (!cs->open_count)
+	if (!cs->connected)
+		gig_dbg(DEBUG_IF, "not connected");	/* nothing to do */
+	else if (!cs->open_count)
 		dev_warn(cs->dev, "%s: device not opened\n", __func__);
 	else {
 		if (!--cs->open_count) {
@@ -222,16 +216,19 @@ static int if_ioctl(struct tty_struct *tty, struct file *file,
 
 	cs = (struct cardstate *) tty->driver_data;
 	if (!cs) {
-		err("cs==NULL in %s", __func__);
+		pr_err("%s: no cardstate\n", __func__);
 		return -ENODEV;
 	}
 
 	gig_dbg(DEBUG_IF, "%u: %s(0x%x)", cs->minor_index, __func__, cmd);
 
 	if (mutex_lock_interruptible(&cs->mutex))
-		return -ERESTARTSYS; // FIXME -EINTR?
+		return -ERESTARTSYS;
 
-	if (!cs->open_count)
+	if (!cs->connected) {
+		gig_dbg(DEBUG_IF, "not connected");
+		retval = -ENODEV;
+	} else if (!cs->open_count)
 		dev_warn(cs->dev, "%s: device not opened\n", __func__);
 	else {
 		retval = 0;
@@ -251,13 +248,6 @@ static int if_ioctl(struct tty_struct *tty, struct file *file,
 				retval = put_user(int_arg, (int __user *) arg);
 			break;
 		case GIGASET_BRKCHARS:
-			//FIXME test if MS_LOCKED
-			if (!cs->connected) {
-				gig_dbg(DEBUG_ANY,
-				    "can't communicate with unplugged device");
-				retval = -ENODEV;
-				break;
-			}
 			retval = copy_from_user(&buf,
 					(const unsigned char __user *) arg, 6)
 				? -EFAULT : 0;
@@ -279,7 +269,7 @@ static int if_ioctl(struct tty_struct *tty, struct file *file,
 					? -EFAULT : 0;
 			break;
 		default:
-			gig_dbg(DEBUG_ANY, "%s: arg not supported - 0x%04x",
+			gig_dbg(DEBUG_IF, "%s: arg not supported - 0x%04x",
 				__func__, cmd);
 			retval = -ENOIOCTLCMD;
 		}
@@ -297,16 +287,15 @@ static int if_tiocmget(struct tty_struct *tty, struct file *file)
 
 	cs = (struct cardstate *) tty->driver_data;
 	if (!cs) {
-		err("cs==NULL in %s", __func__);
+		pr_err("%s: no cardstate\n", __func__);
 		return -ENODEV;
 	}
 
 	gig_dbg(DEBUG_IF, "%u: %s()", cs->minor_index, __func__);
 
 	if (mutex_lock_interruptible(&cs->mutex))
-		return -ERESTARTSYS; // FIXME -EINTR?
+		return -ERESTARTSYS;
 
-	// FIXME read from device?
 	retval = cs->control_state & (TIOCM_RTS|TIOCM_DTR);
 
 	mutex_unlock(&cs->mutex);
@@ -323,7 +312,7 @@ static int if_tiocmset(struct tty_struct *tty, struct file *file,
 
 	cs = (struct cardstate *) tty->driver_data;
 	if (!cs) {
-		err("cs==NULL in %s", __func__);
+		pr_err("%s: no cardstate\n", __func__);
 		return -ENODEV;
 	}
 
@@ -331,10 +320,10 @@ static int if_tiocmset(struct tty_struct *tty, struct file *file,
 		cs->minor_index, __func__, set, clear);
 
 	if (mutex_lock_interruptible(&cs->mutex))
-		return -ERESTARTSYS; // FIXME -EINTR?
+		return -ERESTARTSYS;
 
 	if (!cs->connected) {
-		gig_dbg(DEBUG_ANY, "can't communicate with unplugged device");
+		gig_dbg(DEBUG_IF, "not connected");
 		retval = -ENODEV;
 	} else {
 		mc = (cs->control_state | set) & ~clear & (TIOCM_RTS|TIOCM_DTR);
@@ -354,23 +343,23 @@ static int if_write(struct tty_struct *tty, const unsigned char *buf, int count)
 
 	cs = (struct cardstate *) tty->driver_data;
 	if (!cs) {
-		err("cs==NULL in %s", __func__);
+		pr_err("%s: no cardstate\n", __func__);
 		return -ENODEV;
 	}
 
 	gig_dbg(DEBUG_IF, "%u: %s()", cs->minor_index, __func__);
 
 	if (mutex_lock_interruptible(&cs->mutex))
-		return -ERESTARTSYS; // FIXME -EINTR?
+		return -ERESTARTSYS;
 
-	if (!cs->open_count)
+	if (!cs->connected) {
+		gig_dbg(DEBUG_IF, "not connected");
+		retval = -ENODEV;
+	} else if (!cs->open_count)
 		dev_warn(cs->dev, "%s: device not opened\n", __func__);
 	else if (cs->mstate != MS_LOCKED) {
 		dev_warn(cs->dev, "can't write to unlocked device\n");
 		retval = -EBUSY;
-	} else if (!cs->connected) {
-		gig_dbg(DEBUG_ANY, "can't write to unplugged device");
-		retval = -EBUSY; //FIXME
 	} else {
 		retval = cs->ops->write_cmd(cs, buf, count,
 					    &cs->if_wake_tasklet);
@@ -388,23 +377,23 @@ static int if_write_room(struct tty_struct *tty)
 
 	cs = (struct cardstate *) tty->driver_data;
 	if (!cs) {
-		err("cs==NULL in %s", __func__);
+		pr_err("%s: no cardstate\n", __func__);
 		return -ENODEV;
 	}
 
 	gig_dbg(DEBUG_IF, "%u: %s()", cs->minor_index, __func__);
 
 	if (mutex_lock_interruptible(&cs->mutex))
-		return -ERESTARTSYS; // FIXME -EINTR?
+		return -ERESTARTSYS;
 
-	if (!cs->open_count)
+	if (!cs->connected) {
+		gig_dbg(DEBUG_IF, "not connected");
+		retval = -ENODEV;
+	} else if (!cs->open_count)
 		dev_warn(cs->dev, "%s: device not opened\n", __func__);
 	else if (cs->mstate != MS_LOCKED) {
 		dev_warn(cs->dev, "can't write to unlocked device\n");
 		retval = -EBUSY;
-	} else if (!cs->connected) {
-		gig_dbg(DEBUG_ANY, "can't write to unplugged device");
-		retval = -EBUSY; //FIXME
 	} else
 		retval = cs->ops->write_room(cs);
 
@@ -416,28 +405,25 @@ static int if_write_room(struct tty_struct *tty)
 static int if_chars_in_buffer(struct tty_struct *tty)
 {
 	struct cardstate *cs;
-	int retval = -ENODEV;
+	int retval = 0;
 
 	cs = (struct cardstate *) tty->driver_data;
 	if (!cs) {
-		err("cs==NULL in %s", __func__);
-		return -ENODEV;
+		pr_err("%s: no cardstate\n", __func__);
+		return 0;
 	}
 
 	gig_dbg(DEBUG_IF, "%u: %s()", cs->minor_index, __func__);
 
-	if (mutex_lock_interruptible(&cs->mutex))
-		return -ERESTARTSYS; // FIXME -EINTR?
+	mutex_lock(&cs->mutex);
 
-	if (!cs->open_count)
+	if (!cs->connected)
+		gig_dbg(DEBUG_IF, "not connected");
+	else if (!cs->open_count)
 		dev_warn(cs->dev, "%s: device not opened\n", __func__);
-	else if (cs->mstate != MS_LOCKED) {
+	else if (cs->mstate != MS_LOCKED)
 		dev_warn(cs->dev, "can't write to unlocked device\n");
-		retval = -EBUSY;
-	} else if (!cs->connected) {
-		gig_dbg(DEBUG_ANY, "can't write to unplugged device");
-		retval = -EBUSY; //FIXME
-	} else
+	else
 		retval = cs->ops->chars_in_buffer(cs);
 
 	mutex_unlock(&cs->mutex);
@@ -451,7 +437,7 @@ static void if_throttle(struct tty_struct *tty)
 
 	cs = (struct cardstate *) tty->driver_data;
 	if (!cs) {
-		err("cs==NULL in %s", __func__);
+		pr_err("%s: no cardstate\n", __func__);
 		return;
 	}
 
@@ -459,11 +445,12 @@ static void if_throttle(struct tty_struct *tty)
 
 	mutex_lock(&cs->mutex);
 
-	if (!cs->open_count)
+	if (!cs->connected)
+		gig_dbg(DEBUG_IF, "not connected");	/* nothing to do */
+	else if (!cs->open_count)
 		dev_warn(cs->dev, "%s: device not opened\n", __func__);
-	else {
-		//FIXME
-	}
+	else
+		gig_dbg(DEBUG_IF, "%s: not implemented\n", __func__);
 
 	mutex_unlock(&cs->mutex);
 }
@@ -474,7 +461,7 @@ static void if_unthrottle(struct tty_struct *tty)
 
 	cs = (struct cardstate *) tty->driver_data;
 	if (!cs) {
-		err("cs==NULL in %s", __func__);
+		pr_err("%s: no cardstate\n", __func__);
 		return;
 	}
 
@@ -482,11 +469,12 @@ static void if_unthrottle(struct tty_struct *tty)
 
 	mutex_lock(&cs->mutex);
 
-	if (!cs->open_count)
+	if (!cs->connected)
+		gig_dbg(DEBUG_IF, "not connected");	/* nothing to do */
+	else if (!cs->open_count)
 		dev_warn(cs->dev, "%s: device not opened\n", __func__);
-	else {
-		//FIXME
-	}
+	else
+		gig_dbg(DEBUG_IF, "%s: not implemented\n", __func__);
 
 	mutex_unlock(&cs->mutex);
 }
@@ -501,7 +489,7 @@ static void if_set_termios(struct tty_struct *tty, struct ktermios *old)
 
 	cs = (struct cardstate *) tty->driver_data;
 	if (!cs) {
-		err("cs==NULL in %s", __func__);
+		pr_err("%s: no cardstate\n", __func__);
 		return;
 	}
 
@@ -509,20 +497,19 @@ static void if_set_termios(struct tty_struct *tty, struct ktermios *old)
 
 	mutex_lock(&cs->mutex);
 
+	if (!cs->connected) {
+		gig_dbg(DEBUG_IF, "not connected");
+		goto out;
+	}
+
 	if (!cs->open_count) {
 		dev_warn(cs->dev, "%s: device not opened\n", __func__);
 		goto out;
 	}
 
-	if (!cs->connected) {
-		gig_dbg(DEBUG_ANY, "can't communicate with unplugged device");
-		goto out;
-	}
-
-	// stolen from mct_u232.c
 	iflag = tty->termios->c_iflag;
 	cflag = tty->termios->c_cflag;
-	old_cflag = old ? old->c_cflag : cflag; //FIXME?
+	old_cflag = old ? old->c_cflag : cflag;
 	gig_dbg(DEBUG_IF, "%u: iflag %x cflag %x old %x",
 		cs->minor_index, iflag, cflag, old_cflag);
 
@@ -565,29 +552,6 @@ static void if_set_termios(struct tty_struct *tty, struct ktermios *old)
 
 	cs->ops->set_line_ctrl(cs, cflag);
 
-#if 0
-	//FIXME this hangs M101 [ts 2005-03-09]
-	//FIXME do we need this?
-	/*
-	 * Set flow control: well, I do not really now how to handle DTR/RTS.
-	 * Just do what we have seen with SniffUSB on Win98.
-	 */
-	/* Drop DTR/RTS if no flow control otherwise assert */
-	gig_dbg(DEBUG_IF, "%u: control_state %x",
-		cs->minor_index, control_state);
-	new_state = control_state;
-	if ((iflag & IXOFF) || (iflag & IXON) || (cflag & CRTSCTS))
-		new_state |= TIOCM_DTR | TIOCM_RTS;
-	else
-		new_state &= ~(TIOCM_DTR | TIOCM_RTS);
-	if (new_state != control_state) {
-		gig_dbg(DEBUG_IF, "%u: new_state %x",
-			cs->minor_index, new_state);
-		gigaset_set_modem_ctrl(cs, control_state, new_state);
-		control_state = new_state;
-	}
-#endif
-
 	/* save off the modified port settings */
 	cs->control_state = control_state;
 
@@ -615,7 +579,7 @@ void gigaset_if_init(struct cardstate *cs)
 	if (!drv->have_tty)
 		return;
 
-	tasklet_init(&cs->if_wake_tasklet, &if_wake, (unsigned long) cs);
+	tasklet_init(&cs->if_wake_tasklet, if_wake, (unsigned long) cs);
 
 	mutex_lock(&cs->mutex);
 	cs->tty_dev = tty_register_device(drv->tty, cs->minor_index, NULL);
@@ -623,8 +587,7 @@ void gigaset_if_init(struct cardstate *cs)
 	if (!IS_ERR(cs->tty_dev))
 		dev_set_drvdata(cs->tty_dev, cs);
 	else {
-		dev_warn(cs->dev,
-			 "could not register device to the tty subsystem\n");
+		pr_warning("could not register device to the tty subsystem\n");
 		cs->tty_dev = NULL;
 	}
 	mutex_unlock(&cs->mutex);
@@ -644,6 +607,15 @@ void gigaset_if_free(struct cardstate *cs)
 	tty_unregister_device(drv->tty, cs->minor_index);
 }
 
+/**
+ * gigaset_if_receive() - pass a received block of data to the tty device
+ * @cs:		device descriptor structure.
+ * @buffer:	received data.
+ * @len:	number of bytes received.
+ *
+ * Called by asyncdata/isocdata if a block of data received from the
+ * device must be sent to userspace through the ttyG* device.
+ */
 void gigaset_if_receive(struct cardstate *cs,
 			unsigned char *buffer, size_t len)
 {
@@ -651,10 +623,10 @@ void gigaset_if_receive(struct cardstate *cs,
 	struct tty_struct *tty;
 
 	spin_lock_irqsave(&cs->lock, flags);
-	if ((tty = cs->tty) == NULL)
-		gig_dbg(DEBUG_ANY, "receive on closed device");
+	tty = cs->tty;
+	if (tty == NULL)
+		gig_dbg(DEBUG_IF, "receive on closed device");
 	else {
-		tty_buffer_request_room(tty, len);
 		tty_insert_flip_string(tty, buffer, len);
 		tty_flip_buffer_push(tty);
 	}
@@ -678,9 +650,9 @@ void gigaset_if_initdriver(struct gigaset_driver *drv, const char *procname,
 
 	drv->have_tty = 0;
 
-	if ((drv->tty = alloc_tty_driver(minors)) == NULL)
+	drv->tty = tty = alloc_tty_driver(minors);
+	if (tty == NULL)
 		goto enomem;
-	tty = drv->tty;
 
 	tty->magic =		TTY_DRIVER_MAGIC,
 	tty->major =		GIG_MAJOR,
@@ -695,13 +667,13 @@ void gigaset_if_initdriver(struct gigaset_driver *drv, const char *procname,
 
 	tty->owner =		THIS_MODULE;
 
-	tty->init_termios          = tty_std_termios; //FIXME
-	tty->init_termios.c_cflag  = B9600 | CS8 | CREAD | HUPCL | CLOCAL; //FIXME
+	tty->init_termios          = tty_std_termios;
+	tty->init_termios.c_cflag  = B9600 | CS8 | CREAD | HUPCL | CLOCAL;
 	tty_set_operations(tty, &if_ops);
 
 	ret = tty_register_driver(tty);
 	if (ret < 0) {
-		warn("failed to register tty driver (error %d)", ret);
+		pr_err("error %d registering tty driver\n", ret);
 		goto error;
 	}
 	gig_dbg(DEBUG_IF, "tty driver initialized");
@@ -709,7 +681,7 @@ void gigaset_if_initdriver(struct gigaset_driver *drv, const char *procname,
 	return;
 
 enomem:
-	warn("could not allocate tty structures");
+	pr_err("out of memory\n");
 error:
 	if (drv->tty)
 		put_tty_driver(drv->tty);

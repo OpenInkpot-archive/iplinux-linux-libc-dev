@@ -40,10 +40,17 @@ typedef enum {
 	BMAPI_IGNSTATE = (1 << 4),	/* ignore unwritten state on read */
 	BMAPI_DIRECT = (1 << 5),	/* direct instead of buffered write */
 	BMAPI_MMAP = (1 << 6),		/* allocate for mmap write */
-	BMAPI_SYNC = (1 << 7),		/* sync write to flush delalloc space */
-	BMAPI_TRYLOCK = (1 << 8),	/* non-blocking request */
+	BMAPI_TRYLOCK = (1 << 7),	/* non-blocking request */
 } bmapi_flags_t;
 
+#define BMAPI_FLAGS \
+	{ BMAPI_READ,		"READ" }, \
+	{ BMAPI_WRITE,		"WRITE" }, \
+	{ BMAPI_ALLOCATE,	"ALLOCATE" }, \
+	{ BMAPI_IGNSTATE,	"IGNSTATE" }, \
+	{ BMAPI_DIRECT,		"DIRECT" }, \
+	{ BMAPI_MMAP,		"MMAP" }, \
+	{ BMAPI_TRYLOCK,	"TRYLOCK" }
 
 /*
  * xfs_iomap_t:  File system I/O map
@@ -63,7 +70,7 @@ typedef enum {
  */
 
 typedef struct xfs_iomap {
-	xfs_daddr_t		iomap_bn;	/* first 512b blk of mapping */
+	xfs_daddr_t		iomap_bn;	/* first 512B blk of mapping */
 	xfs_buftarg_t		*iomap_target;
 	xfs_off_t		iomap_offset;	/* offset of mapping, bytes */
 	xfs_off_t		iomap_bsize;	/* size of mapping, bytes */

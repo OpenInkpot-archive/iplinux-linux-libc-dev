@@ -2,7 +2,7 @@
  * arch/sh/kernel/signal_64.c
  *
  * Copyright (C) 2000, 2001  Paolo Alberelli
- * Copyright (C) 2003  Paul Mundt
+ * Copyright (C) 2003 - 2008  Paul Mundt
  * Copyright (C) 2004  Richard Curnow
  *
  * This file is subject to the terms and conditions of the GNU General Public
@@ -43,9 +43,36 @@
 
 #define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
 
-static void
+static int
 handle_signal(unsigned long sig, siginfo_t *info, struct k_sigaction *ka,
 		sigset_t *oldset, struct pt_regs * regs);
+
+static inline void
+handle_syscall_restart(struct pt_regs *regs, struct sigaction *sa)
+{
+	/* If we're not from a syscall, bail out */
+	if (regs->syscall_nr < 0)
+		return;
+
+	/* check for system call restart.. */
+	switch (regs->regs[REG_RET]) {
+		case -ERESTART_RESTARTBLOCK:
+		case -ERESTARTNOHAND:
+		no_system_call_restart:
+			regs->regs[REG_RET] = -EINTR;
+			break;
+
+		case -ERESTARTSYS:
+			if (!(sa->sa_flags & SA_RESTART))
+				goto no_system_call_restart;
+		/* fallthrough */
+		case -ERESTARTNOINTR:
+			/* Decode syscall # */
+			regs->regs[REG_RET] = regs->syscall_nr;
+			regs->pc -= 4;
+			break;
+	}
+}
 
 /*
  * Note that 'init' is a special process: it doesn't get signals it doesn't
@@ -74,27 +101,28 @@ static int do_signal(struct pt_regs *regs, sigset_t *oldset)
 	if (try_to_freeze())
 		goto no_signal;
 
-	if (test_thread_flag(TIF_RESTORE_SIGMASK))
+	if (current_thread_info()->status & TS_RESTORE_SIGMASK)
 		oldset = &current->saved_sigmask;
 	else if (!oldset)
 		oldset = &current->blocked;
 
 	signr = get_signal_to_deliver(&info, &ka, regs, 0);
-
 	if (signr > 0) {
+		handle_syscall_restart(regs, &ka.sa);
+
 		/* Whee!  Actually deliver the signal.  */
-		handle_signal(signr, &info, &ka, oldset, regs);
+		if (handle_signal(signr, &info, &ka, oldset, regs) == 0) {
+			/*
+			 * If a signal was successfully delivered, the
+			 * saved sigmask is in its frame, and we can
+			 * clear the TS_RESTORE_SIGMASK flag.
+			 */
+			current_thread_info()->status &= ~TS_RESTORE_SIGMASK;
 
-		/*
-		 * If a signal was successfully delivered, the saved sigmask
-		 * is in its frame, and we can clear the TIF_RESTORE_SIGMASK
-		 * flag.
-		 */
-		if (test_thread_flag(TIF_RESTORE_SIGMASK))
-			clear_thread_flag(TIF_RESTORE_SIGMASK);
-
-		tracehook_signal_handler(signr, &info, &ka, regs, 0);
-		return 1;
+			tracehook_signal_handler(signr, &info, &ka, regs,
+					test_thread_flag(TIF_SINGLESTEP));
+			return 1;
+		}
 	}
 
 no_signal:
@@ -118,8 +146,8 @@ no_signal:
 	}
 
 	/* No signal to deliver -- put the saved sigmask back */
-	if (test_thread_flag(TIF_RESTORE_SIGMASK)) {
-		clear_thread_flag(TIF_RESTORE_SIGMASK);
+	if (current_thread_info()->status & TS_RESTORE_SIGMASK) {
+		current_thread_info()->status &= ~TS_RESTORE_SIGMASK;
 		sigprocmask(SIG_SETMASK, &current->saved_sigmask, NULL);
 	}
 
@@ -129,7 +157,6 @@ no_signal:
 /*
  * Atomically swap in the new signal mask, and wait for a signal.
  */
-
 asmlinkage int
 sys_sigsuspend(old_sigset_t mask,
 	       unsigned long r3, unsigned long r4, unsigned long r5,
@@ -149,6 +176,7 @@ sys_sigsuspend(old_sigset_t mask,
 	while (1) {
 		current->state = TASK_INTERRUPTIBLE;
 		schedule();
+		set_restore_sigmask();
 		regs->pc += 4;    /* because sys_sigreturn decrements the pc */
 		if (do_signal(regs, &saveset)) {
 			/* pc now points at signal handler. Need to decrement
@@ -235,20 +263,16 @@ sys_sigaltstack(const stack_t __user *uss, stack_t __user *uoss,
 	return do_sigaltstack(uss, uoss, REF_REG_SP);
 }
 
-
 /*
  * Do a signal return; undo the signal stack.
  */
-
-struct sigframe
-{
+struct sigframe {
 	struct sigcontext sc;
 	unsigned long extramask[_NSIG_WORDS-1];
 	long long retcode[2];
 };
 
-struct rt_sigframe
-{
+struct rt_sigframe {
 	struct siginfo __user *pinfo;
 	void *puc;
 	struct siginfo info;
@@ -273,7 +297,7 @@ restore_sigcontext_fpu(struct pt_regs *regs, struct sigcontext __user *sc)
 		regs->sr |= SR_FD;
 	}
 
-	err |= __copy_from_user(&current->thread.fpu.hard, &sc->sc_fpregs[0],
+	err |= __copy_from_user(&current->thread.xstate->hardfpu, &sc->sc_fpregs[0],
 				(sizeof(long long) * 32) + (sizeof(int) * 1));
 
 	return err;
@@ -292,13 +316,13 @@ setup_sigcontext_fpu(struct pt_regs *regs, struct sigcontext __user *sc)
 
 	if (current == last_task_used_math) {
 		enable_fpu();
-		save_fpu(current, regs);
+		save_fpu(current);
 		disable_fpu();
 		last_task_used_math = NULL;
 		regs->sr |= SR_FD;
 	}
 
-	err |= __copy_to_user(&sc->sc_fpregs[0], &current->thread.fpu.hard,
+	err |= __copy_to_user(&sc->sc_fpregs[0], &current->thread.xstate->hardfpu,
 			      (sizeof(long long) * 32) + (sizeof(int) * 1));
 	clear_used_math();
 
@@ -450,7 +474,6 @@ badframe:
 /*
  * Set up a signal frame.
  */
-
 static int
 setup_sigcontext(struct sigcontext __user *sc, struct pt_regs *regs,
 		 unsigned long mask)
@@ -504,8 +527,8 @@ get_sigframe(struct k_sigaction *ka, unsigned long sp, size_t frame_size)
 void sa_default_restorer(void);		/* See comments below */
 void sa_default_rt_restorer(void);	/* See comments below */
 
-static void setup_frame(int sig, struct k_sigaction *ka,
-			sigset_t *set, struct pt_regs *regs)
+static int setup_frame(int sig, struct k_sigaction *ka,
+		       sigset_t *set, struct pt_regs *regs)
 {
 	struct sigframe __user *frame;
 	int err = 0;
@@ -539,13 +562,11 @@ static void setup_frame(int sig, struct k_sigaction *ka,
 	/* Set up to return from userspace.  If provided, use a stub
 	   already in userspace.  */
 	if (ka->sa.sa_flags & SA_RESTORER) {
-		DEREF_REG_PR = (unsigned long) ka->sa.sa_restorer | 0x1;
-
 		/*
 		 * On SH5 all edited pointers are subject to NEFF
 		 */
-		DEREF_REG_PR = (DEREF_REG_PR & NEFF_SIGN) ?
-			(DEREF_REG_PR | NEFF_MASK) : DEREF_REG_PR;
+		DEREF_REG_PR = neff_sign_extend((unsigned long)
+			ka->sa.sa_restorer | 0x1);
 	} else {
 		/*
 		 * Different approach on SH5.
@@ -558,9 +579,8 @@ static void setup_frame(int sig, struct k_sigaction *ka,
 		 * . being code, linker turns ShMedia bit on, always
 		 *   dereference index -1.
 		 */
-		DEREF_REG_PR = (unsigned long) frame->retcode | 0x01;
-		DEREF_REG_PR = (DEREF_REG_PR & NEFF_SIGN) ?
-			(DEREF_REG_PR | NEFF_MASK) : DEREF_REG_PR;
+		DEREF_REG_PR = neff_sign_extend((unsigned long)
+			frame->retcode | 0x01);
 
 		if (__copy_to_user(frame->retcode,
 			(void *)((unsigned long)sa_default_restorer & (~1)), 16) != 0)
@@ -574,9 +594,7 @@ static void setup_frame(int sig, struct k_sigaction *ka,
 	 * Set up registers for signal handler.
 	 * All edited pointers are subject to NEFF.
 	 */
-	regs->regs[REG_SP] = (unsigned long) frame;
-	regs->regs[REG_SP] = (regs->regs[REG_SP] & NEFF_SIGN) ?
-		 (regs->regs[REG_SP] | NEFF_MASK) : regs->regs[REG_SP];
+	regs->regs[REG_SP] = neff_sign_extend((unsigned long)frame);
 	regs->regs[REG_ARG1] = signal; /* Arg for signal handler */
 
         /* FIXME:
@@ -591,28 +609,25 @@ static void setup_frame(int sig, struct k_sigaction *ka,
 	regs->regs[REG_ARG2] = (unsigned long long)(unsigned long)(signed long)&frame->sc;
 	regs->regs[REG_ARG3] = (unsigned long long)(unsigned long)(signed long)&frame->sc;
 
-	regs->pc = (unsigned long) ka->sa.sa_handler;
-	regs->pc = (regs->pc & NEFF_SIGN) ? (regs->pc | NEFF_MASK) : regs->pc;
+	regs->pc = neff_sign_extend((unsigned long)ka->sa.sa_handler);
 
 	set_fs(USER_DS);
 
-#if DEBUG_SIG
 	/* Broken %016Lx */
-	printk("SIG deliver (#%d,%s:%d): sp=%p pc=%08Lx%08Lx link=%08Lx%08Lx\n",
-		signal,
-		current->comm, current->pid, frame,
-		regs->pc >> 32, regs->pc & 0xffffffff,
-		DEREF_REG_PR >> 32, DEREF_REG_PR & 0xffffffff);
-#endif
+	pr_debug("SIG deliver (#%d,%s:%d): sp=%p pc=%08Lx%08Lx link=%08Lx%08Lx\n",
+		 signal, current->comm, current->pid, frame,
+		 regs->pc >> 32, regs->pc & 0xffffffff,
+		 DEREF_REG_PR >> 32, DEREF_REG_PR & 0xffffffff);
 
-	return;
+	return 0;
 
 give_sigsegv:
 	force_sigsegv(sig, current);
+	return -EFAULT;
 }
 
-static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
-			   sigset_t *set, struct pt_regs *regs)
+static int setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
+			  sigset_t *set, struct pt_regs *regs)
 {
 	struct rt_sigframe __user *frame;
 	int err = 0;
@@ -656,13 +671,11 @@ static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	/* Set up to return from userspace.  If provided, use a stub
 	   already in userspace.  */
 	if (ka->sa.sa_flags & SA_RESTORER) {
-		DEREF_REG_PR = (unsigned long) ka->sa.sa_restorer | 0x1;
-
 		/*
 		 * On SH5 all edited pointers are subject to NEFF
 		 */
-		DEREF_REG_PR = (DEREF_REG_PR & NEFF_SIGN) ?
-			(DEREF_REG_PR | NEFF_MASK) : DEREF_REG_PR;
+		DEREF_REG_PR = neff_sign_extend((unsigned long)
+			ka->sa.sa_restorer | 0x1);
 	} else {
 		/*
 		 * Different approach on SH5.
@@ -675,15 +688,14 @@ static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 		 * . being code, linker turns ShMedia bit on, always
 		 *   dereference index -1.
 		 */
-
-		DEREF_REG_PR = (unsigned long) frame->retcode | 0x01;
-		DEREF_REG_PR = (DEREF_REG_PR & NEFF_SIGN) ?
-			(DEREF_REG_PR | NEFF_MASK) : DEREF_REG_PR;
+		DEREF_REG_PR = neff_sign_extend((unsigned long)
+			frame->retcode | 0x01);
 
 		if (__copy_to_user(frame->retcode,
 			(void *)((unsigned long)sa_default_rt_restorer & (~1)), 16) != 0)
 			goto give_sigsegv;
 
+		/* Cohere the trampoline with the I-cache. */
 		flush_icache_range(DEREF_REG_PR-1, DEREF_REG_PR-1+15);
 	}
 
@@ -691,73 +703,54 @@ static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	 * Set up registers for signal handler.
 	 * All edited pointers are subject to NEFF.
 	 */
-	regs->regs[REG_SP] = (unsigned long) frame;
-	regs->regs[REG_SP] = (regs->regs[REG_SP] & NEFF_SIGN) ?
-		 (regs->regs[REG_SP] | NEFF_MASK) : regs->regs[REG_SP];
+	regs->regs[REG_SP] = neff_sign_extend((unsigned long)frame);
 	regs->regs[REG_ARG1] = signal; /* Arg for signal handler */
 	regs->regs[REG_ARG2] = (unsigned long long)(unsigned long)(signed long)&frame->info;
 	regs->regs[REG_ARG3] = (unsigned long long)(unsigned long)(signed long)&frame->uc.uc_mcontext;
-	regs->pc = (unsigned long) ka->sa.sa_handler;
-	regs->pc = (regs->pc & NEFF_SIGN) ? (regs->pc | NEFF_MASK) : regs->pc;
+	regs->pc = neff_sign_extend((unsigned long)ka->sa.sa_handler);
 
 	set_fs(USER_DS);
 
-#if DEBUG_SIG
-	/* Broken %016Lx */
-	printk("SIG deliver (#%d,%s:%d): sp=%p pc=%08Lx%08Lx link=%08Lx%08Lx\n",
-		signal,
-		current->comm, current->pid, frame,
-		regs->pc >> 32, regs->pc & 0xffffffff,
-		DEREF_REG_PR >> 32, DEREF_REG_PR & 0xffffffff);
-#endif
+	pr_debug("SIG deliver (#%d,%s:%d): sp=%p pc=%08Lx%08Lx link=%08Lx%08Lx\n",
+		 signal, current->comm, current->pid, frame,
+		 regs->pc >> 32, regs->pc & 0xffffffff,
+		 DEREF_REG_PR >> 32, DEREF_REG_PR & 0xffffffff);
 
-	return;
+	return 0;
 
 give_sigsegv:
 	force_sigsegv(sig, current);
+	return -EFAULT;
 }
 
 /*
  * OK, we're invoking a handler
  */
-
-static void
+static int
 handle_signal(unsigned long sig, siginfo_t *info, struct k_sigaction *ka,
 		sigset_t *oldset, struct pt_regs * regs)
 {
-	/* Are we from a system call? */
-	if (regs->syscall_nr >= 0) {
-		/* If so, check system call restarting.. */
-		switch (regs->regs[REG_RET]) {
-			case -ERESTART_RESTARTBLOCK:
-			case -ERESTARTNOHAND:
-			no_system_call_restart:
-				regs->regs[REG_RET] = -EINTR;
-				break;
-
-			case -ERESTARTSYS:
-				if (!(ka->sa.sa_flags & SA_RESTART))
-					goto no_system_call_restart;
-			/* fallthrough */
-			case -ERESTARTNOINTR:
-				/* Decode syscall # */
-				regs->regs[REG_RET] = regs->syscall_nr;
-				regs->pc -= 4;
-		}
-	}
+	int ret;
 
 	/* Set up the stack frame */
 	if (ka->sa.sa_flags & SA_SIGINFO)
-		setup_rt_frame(sig, ka, info, oldset, regs);
+		ret = setup_rt_frame(sig, ka, info, oldset, regs);
 	else
-		setup_frame(sig, ka, oldset, regs);
+		ret = setup_frame(sig, ka, oldset, regs);
 
-	spin_lock_irq(&current->sighand->siglock);
-	sigorsets(&current->blocked,&current->blocked,&ka->sa.sa_mask);
-	if (!(ka->sa.sa_flags & SA_NODEFER))
-		sigaddset(&current->blocked,sig);
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
+	if (ka->sa.sa_flags & SA_ONESHOT)
+		ka->sa.sa_handler = SIG_DFL;
+
+	if (ret == 0) {
+		spin_lock_irq(&current->sighand->siglock);
+		sigorsets(&current->blocked,&current->blocked,&ka->sa.sa_mask);
+		if (!(ka->sa.sa_flags & SA_NODEFER))
+			sigaddset(&current->blocked,sig);
+		recalc_sigpending();
+		spin_unlock_irq(&current->sighand->siglock);
+	}
+
+	return ret;
 }
 
 asmlinkage void do_notify_resume(struct pt_regs *regs, unsigned long thread_info_flags)
@@ -768,5 +761,7 @@ asmlinkage void do_notify_resume(struct pt_regs *regs, unsigned long thread_info
 	if (thread_info_flags & _TIF_NOTIFY_RESUME) {
 		clear_thread_flag(TIF_NOTIFY_RESUME);
 		tracehook_notify_resume(regs);
+		if (current->replacement_session_keyring)
+			key_replace_session_keyring();
 	}
 }

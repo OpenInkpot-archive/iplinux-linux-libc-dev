@@ -73,7 +73,6 @@ Revision History:
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/compiler.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
@@ -113,7 +112,7 @@ MODULE_PARM_DESC(coalesce, "Enable or Disable interrupt coalescing, 1: Enable, 0
 module_param_array(dynamic_ipg, bool, NULL, 0);
 MODULE_PARM_DESC(dynamic_ipg, "Enable or Disable dynamic IPG, 1: Enable, 0: Disable");
 
-static struct pci_device_id amd8111e_pci_tbl[] = {
+static DEFINE_PCI_DEVICE_TABLE(amd8111e_pci_tbl) = {
 
 	{ PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD8111E_7462,
 	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0UL },
@@ -809,7 +808,6 @@ static int amd8111e_rx_poll(struct napi_struct *napi, int budget)
 			lp->coal_conf.rx_packets++;
 			lp->coal_conf.rx_bytes += pkt_len;
 			num_rx_pkt++;
-			dev->last_rx = jiffies;
 
 		err_next_pkt:
 			lp->rx_ring[rx_index].buff_phy_addr
@@ -832,7 +830,7 @@ static int amd8111e_rx_poll(struct napi_struct *napi, int budget)
 	if (rx_pkt_limit > 0) {
 		/* Receive descriptor is empty now */
 		spin_lock_irqsave(&lp->lock, flags);
-		__netif_rx_complete(dev, napi);
+		__napi_complete(napi);
 		writel(VAL0|RINTEN0, mmio + INTEN0);
 		writel(VAL2 | RDMD0, mmio + CMD0);
 		spin_unlock_irqrestore(&lp->lock, flags);
@@ -1171,14 +1169,13 @@ static irqreturn_t amd8111e_interrupt(int irq, void *dev_id)
 
 	/* Check if Receive Interrupt has occurred. */
 	if (intr0 & RINT0) {
-		if (netif_rx_schedule_prep(dev, &lp->napi)) {
+		if (napi_schedule_prep(&lp->napi)) {
 			/* Disable receive interupts */
 			writel(RINTEN0, mmio + INTEN0);
 			/* Schedule a polling routine */
-			__netif_rx_schedule(dev, &lp->napi);
+			__napi_schedule(&lp->napi);
 		} else if (intren0 & RINTEN0) {
-			printk("************Driver bug! \
-				interrupt while in poll\n");
+			printk("************Driver bug! interrupt while in poll\n");
 			/* Fix by disable receive interrupts */
 			writel(RINTEN0, mmio + INTEN0);
 		}
@@ -1301,7 +1298,8 @@ static int amd8111e_tx_queue_avail(struct amd8111e_priv* lp )
 This function will queue the transmit packets to the descriptors and will trigger the send operation. It also initializes the transmit descriptors with buffer physical address, byte count, ownership to hardware etc.
 */
 
-static int amd8111e_start_xmit(struct sk_buff *skb, struct net_device * dev)
+static netdev_tx_t amd8111e_start_xmit(struct sk_buff *skb,
+				       struct net_device * dev)
 {
 	struct amd8111e_priv *lp = netdev_priv(dev);
 	int tx_index;
@@ -1347,7 +1345,7 @@ static int amd8111e_start_xmit(struct sk_buff *skb, struct net_device * dev)
 		netif_stop_queue(dev);
 	}
 	spin_unlock_irqrestore(&lp->lock, flags);
-	return 0;
+	return NETDEV_TX_OK;
 }
 /*
 This function returns all the memory mapped registers of the device.
@@ -1378,28 +1376,28 @@ list to the device.
 */
 static void amd8111e_set_multicast_list(struct net_device *dev)
 {
-	struct dev_mc_list* mc_ptr;
+	struct dev_mc_list *mc_ptr;
 	struct amd8111e_priv *lp = netdev_priv(dev);
 	u32 mc_filter[2] ;
-	int i,bit_num;
+	int bit_num;
+
 	if(dev->flags & IFF_PROMISC){
 		writel( VAL2 | PROM, lp->mmio + CMD2);
 		return;
 	}
 	else
 		writel( PROM, lp->mmio + CMD2);
-	if(dev->flags & IFF_ALLMULTI || dev->mc_count > MAX_FILTER_SIZE){
+	if (dev->flags & IFF_ALLMULTI ||
+	    netdev_mc_count(dev) > MAX_FILTER_SIZE) {
 		/* get all multicast packet */
 		mc_filter[1] = mc_filter[0] = 0xffffffff;
-		lp->mc_list = dev->mc_list;
 		lp->options |= OPTION_MULTICAST_ENABLE;
 		amd8111e_writeq(*(u64*)mc_filter,lp->mmio + LADRF);
 		return;
 	}
-	if( dev->mc_count == 0 ){
+	if (netdev_mc_empty(dev)) {
 		/* get only own packets */
 		mc_filter[1] = mc_filter[0] = 0;
-		lp->mc_list = NULL;
 		lp->options &= ~OPTION_MULTICAST_ENABLE;
 		amd8111e_writeq(*(u64*)mc_filter,lp->mmio + LADRF);
 		/* disable promiscous mode */
@@ -1408,10 +1406,8 @@ static void amd8111e_set_multicast_list(struct net_device *dev)
 	}
 	/* load all the multicast addresses in the logic filter */
 	lp->options |= OPTION_MULTICAST_ENABLE;
-	lp->mc_list = dev->mc_list;
 	mc_filter[1] = mc_filter[0] = 0;
-	for (i = 0, mc_ptr = dev->mc_list; mc_ptr && i < dev->mc_count;
-		     i++, mc_ptr = mc_ptr->next) {
+	netdev_for_each_mc_addr(mc_ptr, dev) {
 		bit_num = (ether_crc_le(ETH_ALEN, mc_ptr->dmi_addr) >> 26) & 0x3f;
 		mc_filter[bit_num >> 5] |= 1 << (bit_num & 31);
 	}
@@ -1524,9 +1520,6 @@ static int amd8111e_ioctl(struct net_device * dev , struct ifreq *ifr, int cmd)
 	int err;
 	u32 mii_regval;
 
-	if (!capable(CAP_NET_ADMIN))
-		return -EPERM;
-
 	switch(cmd) {
 	case SIOCGMIIPHY:
 		data->phy_id = lp->ext_phy_addr;
@@ -1636,8 +1629,13 @@ static int amd8111e_enable_link_change(struct amd8111e_priv* lp)
 	readl(lp->mmio + CMD7);
 	return 0;
 }
-/* This function is called when a packet transmission fails to complete within a  resonable period, on the assumption that an interrupts have been failed or the  interface is locked up. This function will reinitialize the hardware */
 
+/*
+ * This function is called when a packet transmission fails to complete
+ * within a reasonable period, on the assumption that an interrupt have
+ * failed or the interface is locked up. This function will reinitialize
+ * the hardware.
+ */
 static void amd8111e_tx_timeout(struct net_device *dev)
 {
 	struct amd8111e_priv* lp = netdev_priv(dev);
@@ -1814,6 +1812,25 @@ static void __devinit amd8111e_probe_ext_phy(struct net_device* dev)
 	lp->ext_phy_addr = 1;
 }
 
+static const struct net_device_ops amd8111e_netdev_ops = {
+	.ndo_open		= amd8111e_open,
+	.ndo_stop		= amd8111e_close,
+	.ndo_start_xmit		= amd8111e_start_xmit,
+	.ndo_tx_timeout		= amd8111e_tx_timeout,
+	.ndo_get_stats		= amd8111e_get_stats,
+	.ndo_set_multicast_list = amd8111e_set_multicast_list,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address	= amd8111e_set_mac_address,
+	.ndo_do_ioctl		= amd8111e_ioctl,
+	.ndo_change_mtu		= amd8111e_change_mtu,
+#if AMD8111E_VLAN_TAG_USED
+	.ndo_vlan_rx_register	= amd8111e_vlan_rx_register,
+#endif
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	.ndo_poll_controller	 = amd8111e_poll,
+#endif
+};
+
 static int __devinit amd8111e_probe_one(struct pci_dev *pdev,
 				  const struct pci_device_id *ent)
 {
@@ -1821,7 +1838,6 @@ static int __devinit amd8111e_probe_one(struct pci_dev *pdev,
 	unsigned long reg_addr,reg_len;
 	struct amd8111e_priv* lp;
 	struct net_device* dev;
-	DECLARE_MAC_BUF(mac);
 
 	err = pci_enable_device(pdev);
 	if(err){
@@ -1854,7 +1870,7 @@ static int __devinit amd8111e_probe_one(struct pci_dev *pdev,
 	}
 
 	/* Initialize DMA */
-	if (pci_set_dma_mask(pdev, DMA_32BIT_MASK) < 0) {
+	if (pci_set_dma_mask(pdev, DMA_BIT_MASK(32)) < 0) {
 		printk(KERN_ERR "amd8111e: DMA not supported,"
 			"exiting.\n");
 		goto err_free_reg;
@@ -1874,7 +1890,6 @@ static int __devinit amd8111e_probe_one(struct pci_dev *pdev,
 
 #if AMD8111E_VLAN_TAG_USED
 	dev->features |= NETIF_F_HW_VLAN_TX | NETIF_F_HW_VLAN_RX ;
-	dev->vlan_rx_register =amd8111e_vlan_rx_register;
 #endif
 
 	lp = netdev_priv(dev);
@@ -1903,27 +1918,16 @@ static int __devinit amd8111e_probe_one(struct pci_dev *pdev,
 	if(dynamic_ipg[card_idx++])
 		lp->options |= OPTION_DYN_IPG_ENABLE;
 
+
 	/* Initialize driver entry points */
-	dev->open = amd8111e_open;
-	dev->hard_start_xmit = amd8111e_start_xmit;
-	dev->stop = amd8111e_close;
-	dev->get_stats = amd8111e_get_stats;
-	dev->set_multicast_list = amd8111e_set_multicast_list;
-	dev->set_mac_address = amd8111e_set_mac_address;
-	dev->do_ioctl = amd8111e_ioctl;
-	dev->change_mtu = amd8111e_change_mtu;
+	dev->netdev_ops = &amd8111e_netdev_ops;
 	SET_ETHTOOL_OPS(dev, &ops);
 	dev->irq =pdev->irq;
-	dev->tx_timeout = amd8111e_tx_timeout;
 	dev->watchdog_timeo = AMD8111E_TX_TIMEOUT;
 	netif_napi_add(dev, &lp->napi, amd8111e_rx_poll, 32);
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	dev->poll_controller = amd8111e_poll;
-#endif
 
 #if AMD8111E_VLAN_TAG_USED
 	dev->features |= NETIF_F_HW_VLAN_TX | NETIF_F_HW_VLAN_RX;
-	dev->vlan_rx_register =amd8111e_vlan_rx_register;
 #endif
 	/* Probe the external PHY */
 	amd8111e_probe_ext_phy(dev);
@@ -1963,8 +1967,8 @@ static int __devinit amd8111e_probe_one(struct pci_dev *pdev,
     	chip_version = (readl(lp->mmio + CHIPID) & 0xf0000000)>>28;
 	printk(KERN_INFO "%s: AMD-8111e Driver Version: %s\n",
 	       dev->name,MODULE_VERS);
-	printk(KERN_INFO "%s: [ Rev %x ] PCI 10/100BaseT Ethernet %s\n",
-	       dev->name, chip_version, print_mac(mac, dev->dev_addr));
+	printk(KERN_INFO "%s: [ Rev %x ] PCI 10/100BaseT Ethernet %pM\n",
+	       dev->name, chip_version, dev->dev_addr);
 	if (lp->ext_phy_id)
 		printk(KERN_INFO "%s: Found MII PHY ID 0x%08x at address 0x%02x\n",
 		       dev->name, lp->ext_phy_id, lp->ext_phy_addr);

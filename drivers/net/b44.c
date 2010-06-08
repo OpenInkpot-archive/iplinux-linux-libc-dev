@@ -10,6 +10,8 @@
  * Distribute under GPL.
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -25,6 +27,7 @@
 #include <linux/init.h>
 #include <linux/dma-mapping.h>
 #include <linux/ssb/ssb.h>
+#include <linux/slab.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -34,7 +37,6 @@
 #include "b44.h"
 
 #define DRV_MODULE_NAME		"b44"
-#define PFX DRV_MODULE_NAME	": "
 #define DRV_MODULE_VERSION	"2.0"
 
 #define B44_DEF_MSG_ENABLE	  \
@@ -73,8 +75,8 @@
 	  (BP)->tx_cons - (BP)->tx_prod - TX_RING_GAP(BP))
 #define NEXT_TX(N)		(((N) + 1) & (B44_TX_RING_SIZE - 1))
 
-#define RX_PKT_OFFSET		30
-#define RX_PKT_BUF_SZ		(1536 + RX_PKT_OFFSET + 64)
+#define RX_PKT_OFFSET		(RX_HEADER_LEN + 2)
+#define RX_PKT_BUF_SZ		(1536 + RX_PKT_OFFSET)
 
 /* minimum number of free TX descriptors required to wake up TX process */
 #define B44_TX_WAKEUP_THRESH		(B44_TX_RING_SIZE / 4)
@@ -102,7 +104,7 @@ MODULE_PARM_DESC(b44_debug, "B44 bitmapped debugging message enable value");
 
 
 #ifdef CONFIG_B44_PCI
-static const struct pci_device_id b44_pci_tbl[] = {
+static DEFINE_PCI_DEVICE_TABLE(b44_pci_tbl) = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_BROADCOM, PCI_DEVICE_ID_BCM4401) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_BROADCOM, PCI_DEVICE_ID_BCM4401B0) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_BROADCOM, PCI_DEVICE_ID_BCM4401B1) },
@@ -189,11 +191,10 @@ static int b44_wait_bit(struct b44 *bp, unsigned long reg,
 		udelay(10);
 	}
 	if (i == timeout) {
-		printk(KERN_ERR PFX "%s: BUG!  Timeout waiting for bit %08x of register "
-		       "%lx to %s.\n",
-		       bp->dev->name,
-		       bit, reg,
-		       (clear ? "clear" : "set"));
+		if (net_ratelimit())
+			netdev_err(bp->dev, "BUG!  Timeout waiting for bit %08x of register %lx to %s\n",
+				   bit, reg, clear ? "clear" : "set");
+
 		return -ENODEV;
 	}
 	return 0;
@@ -333,13 +334,12 @@ static int b44_phy_reset(struct b44 *bp)
 	err = b44_readphy(bp, MII_BMCR, &val);
 	if (!err) {
 		if (val & BMCR_RESET) {
-			printk(KERN_ERR PFX "%s: PHY Reset would not complete.\n",
-			       bp->dev->name);
+			netdev_err(bp->dev, "PHY Reset would not complete\n");
 			err = -ENODEV;
 		}
 	}
 
-	return 0;
+	return err;
 }
 
 static void __b44_set_flow_ctrl(struct b44 *bp, u32 pause_flags)
@@ -413,7 +413,7 @@ static void b44_wap54g10_workaround(struct b44 *bp)
 	}
 	return;
 error:
-	printk(KERN_WARNING PFX "PHY: cannot reset MII transceiver isolate bit.\n");
+	pr_warning("PHY: cannot reset MII transceiver isolate bit\n");
 }
 #else
 static inline void b44_wap54g10_workaround(struct b44 *bp)
@@ -506,18 +506,15 @@ static void b44_stats_update(struct b44 *bp)
 static void b44_link_report(struct b44 *bp)
 {
 	if (!netif_carrier_ok(bp->dev)) {
-		printk(KERN_INFO PFX "%s: Link is down.\n", bp->dev->name);
+		netdev_info(bp->dev, "Link is down\n");
 	} else {
-		printk(KERN_INFO PFX "%s: Link is up at %d Mbps, %s duplex.\n",
-		       bp->dev->name,
-		       (bp->flags & B44_FLAG_100_BASE_T) ? 100 : 10,
-		       (bp->flags & B44_FLAG_FULL_DUPLEX) ? "full" : "half");
+		netdev_info(bp->dev, "Link is up at %d Mbps, %s duplex\n",
+			    (bp->flags & B44_FLAG_100_BASE_T) ? 100 : 10,
+			    (bp->flags & B44_FLAG_FULL_DUPLEX) ? "full" : "half");
 
-		printk(KERN_INFO PFX "%s: Flow control is %s for TX and "
-		       "%s for RX.\n",
-		       bp->dev->name,
-		       (bp->flags & B44_FLAG_TX_PAUSE) ? "on" : "off",
-		       (bp->flags & B44_FLAG_RX_PAUSE) ? "on" : "off");
+		netdev_info(bp->dev, "Flow control is %s for TX and %s for RX\n",
+			    (bp->flags & B44_FLAG_TX_PAUSE) ? "on" : "off",
+			    (bp->flags & B44_FLAG_RX_PAUSE) ? "on" : "off");
 	}
 }
 
@@ -576,11 +573,9 @@ static void b44_check_phy(struct b44 *bp)
 		}
 
 		if (bmsr & BMSR_RFAULT)
-			printk(KERN_WARNING PFX "%s: Remote fault detected in PHY\n",
-			       bp->dev->name);
+			netdev_warn(bp->dev, "Remote fault detected in PHY\n");
 		if (bmsr & BMSR_JCD)
-			printk(KERN_WARNING PFX "%s: Jabber detected in PHY\n",
-			       bp->dev->name);
+			netdev_warn(bp->dev, "Jabber detected in PHY\n");
 	}
 }
 
@@ -660,7 +655,7 @@ static int b44_alloc_rx_skb(struct b44 *bp, int src_idx, u32 dest_idx_unmasked)
 	/* Hardware bug work-around, the chip is unable to do PCI DMA
 	   to/from anything above 1GB :-( */
 	if (ssb_dma_mapping_error(bp->sdev, mapping) ||
-		mapping + RX_PKT_BUF_SZ > DMA_30BIT_MASK) {
+		mapping + RX_PKT_BUF_SZ > DMA_BIT_MASK(30)) {
 		/* Sigh... */
 		if (!ssb_dma_mapping_error(bp->sdev, mapping))
 			ssb_dma_unmap_single(bp->sdev, mapping,
@@ -673,16 +668,16 @@ static int b44_alloc_rx_skb(struct b44 *bp, int src_idx, u32 dest_idx_unmasked)
 					     RX_PKT_BUF_SZ,
 					     DMA_FROM_DEVICE);
 		if (ssb_dma_mapping_error(bp->sdev, mapping) ||
-			mapping + RX_PKT_BUF_SZ > DMA_30BIT_MASK) {
+			mapping + RX_PKT_BUF_SZ > DMA_BIT_MASK(30)) {
 			if (!ssb_dma_mapping_error(bp->sdev, mapping))
 				ssb_dma_unmap_single(bp->sdev, mapping, RX_PKT_BUF_SZ,DMA_FROM_DEVICE);
 			dev_kfree_skb_any(skb);
 			return -ENOMEM;
 		}
+		bp->force_copybreak = 1;
 	}
 
 	rh = (struct rx_header *) skb->data;
-	skb_reserve(skb, RX_PKT_OFFSET);
 
 	rh->len = 0;
 	rh->flags = 0;
@@ -693,17 +688,17 @@ static int b44_alloc_rx_skb(struct b44 *bp, int src_idx, u32 dest_idx_unmasked)
 	if (src_map != NULL)
 		src_map->skb = NULL;
 
-	ctrl  = (DESC_CTRL_LEN & (RX_PKT_BUF_SZ - RX_PKT_OFFSET));
+	ctrl = (DESC_CTRL_LEN & RX_PKT_BUF_SZ);
 	if (dest_idx == (B44_RX_RING_SIZE - 1))
 		ctrl |= DESC_CTRL_EOT;
 
 	dp = &bp->rx_ring[dest_idx];
 	dp->ctrl = cpu_to_le32(ctrl);
-	dp->addr = cpu_to_le32((u32) mapping + RX_PKT_OFFSET + bp->dma_offset);
+	dp->addr = cpu_to_le32((u32) mapping + bp->dma_offset);
 
 	if (bp->flags & B44_FLAG_RX_RING_HACK)
 		b44_sync_dma_desc_for_device(bp->sdev, bp->rx_ring_dma,
-			                    dest_idx * sizeof(dp),
+			                    dest_idx * sizeof(*dp),
 			                    DMA_BIDIRECTIONAL);
 
 	return RX_PKT_BUF_SZ;
@@ -731,7 +726,7 @@ static void b44_recycle_rx(struct b44 *bp, int src_idx, u32 dest_idx_unmasked)
 
 	if (bp->flags & B44_FLAG_RX_RING_HACK)
 		b44_sync_dma_desc_for_cpu(bp->sdev, bp->rx_ring_dma,
-			                 src_idx * sizeof(src_desc),
+			                 src_idx * sizeof(*src_desc),
 			                 DMA_BIDIRECTIONAL);
 
 	ctrl = src_desc->ctrl;
@@ -747,10 +742,10 @@ static void b44_recycle_rx(struct b44 *bp, int src_idx, u32 dest_idx_unmasked)
 
 	if (bp->flags & B44_FLAG_RX_RING_HACK)
 		b44_sync_dma_desc_for_device(bp->sdev, bp->rx_ring_dma,
-					     dest_idx * sizeof(dest_desc),
+					     dest_idx * sizeof(*dest_desc),
 					     DMA_BIDIRECTIONAL);
 
-	ssb_dma_sync_single_for_device(bp->sdev, le32_to_cpu(src_desc->addr),
+	ssb_dma_sync_single_for_device(bp->sdev, dest_map->mapping,
 				       RX_PKT_BUF_SZ,
 				       DMA_FROM_DEVICE);
 }
@@ -782,7 +777,7 @@ static int b44_rx(struct b44 *bp, int budget)
 		drop_it:
 			b44_recycle_rx(bp, cons, bp->rx_prod);
 		drop_it_no_recycle:
-			bp->stats.rx_dropped++;
+			bp->dev->stats.rx_dropped++;
 			goto next_pkt;
 		}
 
@@ -801,7 +796,7 @@ static int b44_rx(struct b44 *bp, int budget)
 		/* Omit CRC. */
 		len -= 4;
 
-		if (len > RX_COPY_THRESHOLD) {
+		if (!bp->force_copybreak && len > RX_COPY_THRESHOLD) {
 			int skb_size;
 			skb_size = b44_alloc_rx_skb(bp, cons, bp->rx_prod);
 			if (skb_size < 0)
@@ -809,13 +804,13 @@ static int b44_rx(struct b44 *bp, int budget)
 			ssb_dma_unmap_single(bp->sdev, map,
 					     skb_size, DMA_FROM_DEVICE);
 			/* Leave out rx_header */
-                	skb_put(skb, len + RX_PKT_OFFSET);
-            	        skb_pull(skb, RX_PKT_OFFSET);
+			skb_put(skb, len + RX_PKT_OFFSET);
+			skb_pull(skb, RX_PKT_OFFSET);
 		} else {
 			struct sk_buff *copy_skb;
 
 			b44_recycle_rx(bp, cons, bp->rx_prod);
-			copy_skb = dev_alloc_skb(len + 2);
+			copy_skb = netdev_alloc_skb(bp->dev, len + 2);
 			if (copy_skb == NULL)
 				goto drop_it_no_recycle;
 
@@ -829,7 +824,6 @@ static int b44_rx(struct b44 *bp, int budget)
 		skb->ip_summed = CHECKSUM_NONE;
 		skb->protocol = eth_type_trans(skb, bp->dev);
 		netif_receive_skb(skb);
-		bp->dev->last_rx = jiffies;
 		received++;
 		budget--;
 	next_pkt:
@@ -847,25 +841,23 @@ static int b44_rx(struct b44 *bp, int budget)
 static int b44_poll(struct napi_struct *napi, int budget)
 {
 	struct b44 *bp = container_of(napi, struct b44, napi);
-	struct net_device *netdev = bp->dev;
 	int work_done;
+	unsigned long flags;
 
-	spin_lock_irq(&bp->lock);
+	spin_lock_irqsave(&bp->lock, flags);
 
 	if (bp->istat & (ISTAT_TX | ISTAT_TO)) {
 		/* spin_lock(&bp->tx_lock); */
 		b44_tx(bp);
 		/* spin_unlock(&bp->tx_lock); */
 	}
-	spin_unlock_irq(&bp->lock);
+	spin_unlock_irqrestore(&bp->lock, flags);
 
 	work_done = 0;
 	if (bp->istat & ISTAT_RX)
 		work_done += b44_rx(bp, budget);
 
 	if (bp->istat & ISTAT_ERRORS) {
-		unsigned long flags;
-
 		spin_lock_irqsave(&bp->lock, flags);
 		b44_halt(bp);
 		b44_init_rings(bp);
@@ -876,7 +868,7 @@ static int b44_poll(struct napi_struct *napi, int budget)
 	}
 
 	if (work_done < budget) {
-		netif_rx_complete(netdev, napi);
+		napi_complete(napi);
 		b44_enable_ints(bp);
 	}
 
@@ -904,20 +896,17 @@ static irqreturn_t b44_interrupt(int irq, void *dev_id)
 		handled = 1;
 
 		if (unlikely(!netif_running(dev))) {
-			printk(KERN_INFO "%s: late interrupt.\n", dev->name);
+			netdev_info(dev, "late interrupt\n");
 			goto irq_ack;
 		}
 
-		if (netif_rx_schedule_prep(dev, &bp->napi)) {
+		if (napi_schedule_prep(&bp->napi)) {
 			/* NOTE: These writes are posted by the readback of
 			 *       the ISTAT register below.
 			 */
 			bp->istat = istat;
 			__b44_disable_ints(bp);
-			__netif_rx_schedule(dev, &bp->napi);
-		} else {
-			printk(KERN_ERR PFX "%s: Error, poll already scheduled\n",
-			       dev->name);
+			__napi_schedule(&bp->napi);
 		}
 
 irq_ack:
@@ -932,8 +921,7 @@ static void b44_tx_timeout(struct net_device *dev)
 {
 	struct b44 *bp = netdev_priv(dev);
 
-	printk(KERN_ERR PFX "%s: transmit timed out, resetting\n",
-	       dev->name);
+	netdev_err(dev, "transmit timed out, resetting\n");
 
 	spin_lock_irq(&bp->lock);
 
@@ -948,26 +936,26 @@ static void b44_tx_timeout(struct net_device *dev)
 	netif_wake_queue(dev);
 }
 
-static int b44_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t b44_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct b44 *bp = netdev_priv(dev);
 	int rc = NETDEV_TX_OK;
 	dma_addr_t mapping;
 	u32 len, entry, ctrl;
+	unsigned long flags;
 
 	len = skb->len;
-	spin_lock_irq(&bp->lock);
+	spin_lock_irqsave(&bp->lock, flags);
 
 	/* This is a hard error, log it. */
 	if (unlikely(TX_BUFFS_AVAIL(bp) < 1)) {
 		netif_stop_queue(dev);
-		printk(KERN_ERR PFX "%s: BUG! Tx Ring full when queue awake!\n",
-		       dev->name);
+		netdev_err(dev, "BUG! Tx Ring full when queue awake!\n");
 		goto err_out;
 	}
 
 	mapping = ssb_dma_map_single(bp->sdev, skb->data, len, DMA_TO_DEVICE);
-	if (ssb_dma_mapping_error(bp->sdev, mapping) || mapping + len > DMA_30BIT_MASK) {
+	if (ssb_dma_mapping_error(bp->sdev, mapping) || mapping + len > DMA_BIT_MASK(30)) {
 		struct sk_buff *bounce_skb;
 
 		/* Chip can't handle DMA to/from >1GB, use bounce buffer */
@@ -975,13 +963,13 @@ static int b44_start_xmit(struct sk_buff *skb, struct net_device *dev)
 			ssb_dma_unmap_single(bp->sdev, mapping, len,
 					     DMA_TO_DEVICE);
 
-		bounce_skb = __dev_alloc_skb(len, GFP_ATOMIC | GFP_DMA);
+		bounce_skb = __netdev_alloc_skb(dev, len, GFP_ATOMIC | GFP_DMA);
 		if (!bounce_skb)
 			goto err_out;
 
 		mapping = ssb_dma_map_single(bp->sdev, bounce_skb->data,
 					     len, DMA_TO_DEVICE);
-		if (ssb_dma_mapping_error(bp->sdev, mapping) || mapping + len > DMA_30BIT_MASK) {
+		if (ssb_dma_mapping_error(bp->sdev, mapping) || mapping + len > DMA_BIT_MASK(30)) {
 			if (!ssb_dma_mapping_error(bp->sdev, mapping))
 				ssb_dma_unmap_single(bp->sdev, mapping,
 						     len, DMA_TO_DEVICE);
@@ -1029,7 +1017,7 @@ static int b44_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	dev->trans_start = jiffies;
 
 out_unlock:
-	spin_unlock_irq(&bp->lock);
+	spin_unlock_irqrestore(&bp->lock, flags);
 
 	return rc;
 
@@ -1206,7 +1194,7 @@ static int b44_alloc_consistent(struct b44 *bp, gfp_t gfp)
 						 DMA_BIDIRECTIONAL);
 
 		if (ssb_dma_mapping_error(bp->sdev, rx_ring_dma) ||
-			rx_ring_dma + size > DMA_30BIT_MASK) {
+			rx_ring_dma + size > DMA_BIT_MASK(30)) {
 			kfree(rx_ring);
 			goto out_err;
 		}
@@ -1233,7 +1221,7 @@ static int b44_alloc_consistent(struct b44 *bp, gfp_t gfp)
 			                    DMA_TO_DEVICE);
 
 		if (ssb_dma_mapping_error(bp->sdev, tx_ring_dma) ||
-			tx_ring_dma + size > DMA_30BIT_MASK) {
+			tx_ring_dma + size > DMA_BIT_MASK(30)) {
 			kfree(tx_ring);
 			goto out_err;
 		}
@@ -1266,8 +1254,14 @@ static void b44_clear_stats(struct b44 *bp)
 static void b44_chip_reset(struct b44 *bp, int reset_kind)
 {
 	struct ssb_device *sdev = bp->sdev;
+	bool was_enabled;
 
-	if (ssb_device_is_enabled(bp->sdev)) {
+	was_enabled = ssb_device_is_enabled(bp->sdev);
+
+	ssb_device_enable(bp->sdev, 0);
+	ssb_pcicore_dev_irqvecs_enable(&sdev->bus->pcicore, sdev);
+
+	if (was_enabled) {
 		bw32(bp, B44_RCV_LAZY, 0);
 		bw32(bp, B44_ENET_CTRL, ENET_CTRL_DISABLE);
 		b44_wait_bit(bp, B44_ENET_CTRL, ENET_CTRL_DISABLE, 200, 1);
@@ -1279,10 +1273,8 @@ static void b44_chip_reset(struct b44 *bp, int reset_kind)
 		}
 		bw32(bp, B44_DMARX_CTRL, 0);
 		bp->rx_prod = bp->rx_cons = 0;
-	} else
-		ssb_pcicore_dev_irqvecs_enable(&sdev->bus->pcicore, sdev);
+	}
 
-	ssb_device_enable(bp->sdev, 0);
 	b44_clear_stats(bp);
 
 	/*
@@ -1295,13 +1287,17 @@ static void b44_chip_reset(struct b44 *bp, int reset_kind)
 	switch (sdev->bus->bustype) {
 	case SSB_BUSTYPE_SSB:
 		bw32(bp, B44_MDIO_CTRL, (MDIO_CTRL_PREAMBLE |
-		     (((ssb_clockspeed(sdev->bus) + (B44_MDC_RATIO / 2)) / B44_MDC_RATIO)
+		     (DIV_ROUND_CLOSEST(ssb_clockspeed(sdev->bus),
+					B44_MDC_RATIO)
 		     & MDIO_CTRL_MAXF_MASK)));
 		break;
 	case SSB_BUSTYPE_PCI:
-	case SSB_BUSTYPE_PCMCIA:
 		bw32(bp, B44_MDIO_CTRL, (MDIO_CTRL_PREAMBLE |
 		     (0x0d & MDIO_CTRL_MAXF_MASK)));
+		break;
+	case SSB_BUSTYPE_PCMCIA:
+	case SSB_BUSTYPE_SDIO:
+		WARN_ON(1); /* A device with this bus does not exist. */
 		break;
 	}
 
@@ -1330,7 +1326,7 @@ static void b44_halt(struct b44 *bp)
 	/* reset PHY */
 	b44_phy_reset(bp);
 	/* power down PHY */
-	printk(KERN_INFO PFX "%s: powering down PHY\n", bp->dev->name);
+	netdev_info(bp->dev, "powering down PHY\n");
 	bw32(bp, B44_MAC_CTRL, MAC_CTRL_PHY_PDOWN);
 	/* now reset the chip, but without enabling the MAC&PHY
 	 * part of it. This has to be done _after_ we shut down the PHY */
@@ -1502,8 +1498,7 @@ static int b44_magic_pattern(u8 *macaddr, u8 *ppattern, u8 *pmask, int offset)
 		for (k = 0; k< ethaddr_bytes; k++) {
 			ppattern[offset + magicsync +
 				(j * ETH_ALEN) + k] = macaddr[k];
-			len++;
-			set_bit(len, (unsigned long *) pmask);
+			set_bit(len++, (unsigned long *) pmask);
 		}
 	}
 	return len - 1;
@@ -1522,7 +1517,7 @@ static void b44_setup_pseudo_magicp(struct b44 *bp)
 
 	pwol_pattern = kzalloc(B44_PATTERN_SIZE, GFP_KERNEL);
 	if (!pwol_pattern) {
-		printk(KERN_ERR PFX "Memory not available for WOL\n");
+		pr_err("Memory not available for WOL\n");
 		return;
 	}
 
@@ -1645,7 +1640,7 @@ static int b44_close(struct net_device *dev)
 static struct net_device_stats *b44_get_stats(struct net_device *dev)
 {
 	struct b44 *bp = netdev_priv(dev);
-	struct net_device_stats *nstat = &bp->stats;
+	struct net_device_stats *nstat = &dev->stats;
 	struct b44_hw_stats *hwstat = &bp->hw_stats;
 
 	/* Convert HW stats into netdevice stats. */
@@ -1689,10 +1684,12 @@ static int __b44_load_mcast(struct b44 *bp, struct net_device *dev)
 	struct dev_mc_list *mclist;
 	int i, num_ents;
 
-	num_ents = min_t(int, dev->mc_count, B44_MCAST_TABLE_SIZE);
-	mclist = dev->mc_list;
-	for (i = 0; mclist && i < num_ents; i++, mclist = mclist->next) {
-		__b44_cam_write(bp, mclist->dmi_addr, i + 1);
+	num_ents = min_t(int, netdev_mc_count(dev), B44_MCAST_TABLE_SIZE);
+	i = 0;
+	netdev_for_each_mc_addr(mclist, dev) {
+		if (i == num_ents)
+			break;
+		__b44_cam_write(bp, mclist->dmi_addr, i++ + 1);
 	}
 	return i+1;
 }
@@ -1714,7 +1711,7 @@ static void __b44_set_rx_mode(struct net_device *dev)
 		__b44_set_mac_addr(bp);
 
 		if ((dev->flags & IFF_ALLMULTI) ||
-		    (dev->mc_count > B44_MCAST_TABLE_SIZE))
+		    (netdev_mc_count(dev) > B44_MCAST_TABLE_SIZE))
 			val |= RXCONFIG_ALLMULTI;
 		else
 			i = __b44_load_mcast(bp, dev);
@@ -1754,15 +1751,18 @@ static void b44_get_drvinfo (struct net_device *dev, struct ethtool_drvinfo *inf
 	struct b44 *bp = netdev_priv(dev);
 	struct ssb_bus *bus = bp->sdev->bus;
 
-	strncpy(info->driver, DRV_MODULE_NAME, sizeof(info->driver));
-	strncpy(info->version, DRV_MODULE_VERSION, sizeof(info->driver));
+	strlcpy(info->driver, DRV_MODULE_NAME, sizeof(info->driver));
+	strlcpy(info->version, DRV_MODULE_VERSION, sizeof(info->version));
 	switch (bus->bustype) {
 	case SSB_BUSTYPE_PCI:
-		strncpy(info->bus_info, pci_name(bus->host_pci), sizeof(info->bus_info));
+		strlcpy(info->bus_info, pci_name(bus->host_pci), sizeof(info->bus_info));
+		break;
+	case SSB_BUSTYPE_SSB:
+		strlcpy(info->bus_info, "SSB", sizeof(info->bus_info));
 		break;
 	case SSB_BUSTYPE_PCMCIA:
-	case SSB_BUSTYPE_SSB:
-		strncpy(info->bus_info, "SSB", sizeof(info->bus_info));
+	case SSB_BUSTYPE_SDIO:
+		WARN_ON(1); /* A device with this bus does not exist. */
 		break;
 	}
 }
@@ -2092,7 +2092,7 @@ static int __devinit b44_get_invariants(struct b44 *bp)
 	memcpy(bp->dev->dev_addr, addr, 6);
 
 	if (!is_valid_ether_addr(&bp->dev->dev_addr[0])){
-		printk(KERN_ERR PFX "Invalid MAC address found in EEPROM\n");
+		pr_err("Invalid MAC address found in EEPROM\n");
 		return -EINVAL;
 	}
 
@@ -2110,6 +2110,22 @@ static int __devinit b44_get_invariants(struct b44 *bp)
 	return err;
 }
 
+static const struct net_device_ops b44_netdev_ops = {
+	.ndo_open		= b44_open,
+	.ndo_stop		= b44_close,
+	.ndo_start_xmit		= b44_start_xmit,
+	.ndo_get_stats		= b44_get_stats,
+	.ndo_set_multicast_list = b44_set_rx_mode,
+	.ndo_set_mac_address	= b44_set_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_do_ioctl		= b44_ioctl,
+	.ndo_tx_timeout		= b44_tx_timeout,
+	.ndo_change_mtu		= b44_change_mtu,
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	.ndo_poll_controller	= b44_poll_controller,
+#endif
+};
+
 static int __devinit b44_init_one(struct ssb_device *sdev,
 				  const struct ssb_device_id *ent)
 {
@@ -2117,17 +2133,16 @@ static int __devinit b44_init_one(struct ssb_device *sdev,
 	struct net_device *dev;
 	struct b44 *bp;
 	int err;
-	DECLARE_MAC_BUF(mac);
 
 	instance++;
 
 	if (b44_version_printed++ == 0)
-		printk(KERN_INFO "%s", version);
+		pr_info("%s", version);
 
 
 	dev = alloc_etherdev(sizeof(*bp));
 	if (!dev) {
-		dev_err(sdev->dev, "Etherdev alloc failed, aborting.\n");
+		dev_err(sdev->dev, "Etherdev alloc failed, aborting\n");
 		err = -ENOMEM;
 		goto out;
 	}
@@ -2140,6 +2155,7 @@ static int __devinit b44_init_one(struct ssb_device *sdev,
 	bp = netdev_priv(dev);
 	bp->sdev = sdev;
 	bp->dev = dev;
+	bp->force_copybreak = 0;
 
 	bp->msg_enable = netif_msg_init(b44_debug, B44_DEF_MSG_ENABLE);
 
@@ -2148,20 +2164,9 @@ static int __devinit b44_init_one(struct ssb_device *sdev,
 	bp->rx_pending = B44_DEF_RX_RING_PENDING;
 	bp->tx_pending = B44_DEF_TX_RING_PENDING;
 
-	dev->open = b44_open;
-	dev->stop = b44_close;
-	dev->hard_start_xmit = b44_start_xmit;
-	dev->get_stats = b44_get_stats;
-	dev->set_multicast_list = b44_set_rx_mode;
-	dev->set_mac_address = b44_set_mac_addr;
-	dev->do_ioctl = b44_ioctl;
-	dev->tx_timeout = b44_tx_timeout;
+	dev->netdev_ops = &b44_netdev_ops;
 	netif_napi_add(dev, &bp->napi, b44_poll, 64);
 	dev->watchdog_timeo = B44_TX_TIMEOUT;
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	dev->poll_controller = b44_poll_controller;
-#endif
-	dev->change_mtu = b44_change_mtu;
 	dev->irq = sdev->irq;
 	SET_ETHTOOL_OPS(dev, &b44_ethtool_ops);
 
@@ -2173,16 +2178,16 @@ static int __devinit b44_init_one(struct ssb_device *sdev,
 			"Failed to powerup the bus\n");
 		goto err_out_free_dev;
 	}
-	err = ssb_dma_set_mask(sdev, DMA_30BIT_MASK);
+	err = ssb_dma_set_mask(sdev, DMA_BIT_MASK(30));
 	if (err) {
 		dev_err(sdev->dev,
-			"Required 30BIT DMA mask unsupported by the system.\n");
+			"Required 30BIT DMA mask unsupported by the system\n");
 		goto err_out_powerdown;
 	}
 	err = b44_get_invariants(bp);
 	if (err) {
 		dev_err(sdev->dev,
-			"Problem fetching invariants of chip, aborting.\n");
+			"Problem fetching invariants of chip, aborting\n");
 		goto err_out_powerdown;
 	}
 
@@ -2202,7 +2207,7 @@ static int __devinit b44_init_one(struct ssb_device *sdev,
 
 	err = register_netdev(dev);
 	if (err) {
-		dev_err(sdev->dev, "Cannot register net device, aborting.\n");
+		dev_err(sdev->dev, "Cannot register net device, aborting\n");
 		goto err_out_powerdown;
 	}
 
@@ -2213,8 +2218,12 @@ static int __devinit b44_init_one(struct ssb_device *sdev,
 	 */
 	b44_chip_reset(bp, B44_CHIP_RESET_FULL);
 
-	printk(KERN_INFO "%s: Broadcom 44xx/47xx 10/100BaseT Ethernet %s\n",
-	       dev->name, print_mac(mac, dev->dev_addr));
+	/* do a phy reset to test if there is an active phy */
+	if (b44_phy_reset(bp) < 0)
+		bp->phy_addr = B44_PHY_ADDR_NO_PHY;
+
+	netdev_info(dev, "Broadcom 44xx/47xx 10/100BaseT Ethernet %pM\n",
+		    dev->dev_addr);
 
 	return 0;
 
@@ -2233,6 +2242,7 @@ static void __devexit b44_remove_one(struct ssb_device *sdev)
 	struct net_device *dev = ssb_get_drvdata(sdev);
 
 	unregister_netdev(dev);
+	ssb_device_disable(sdev, 0);
 	ssb_bus_may_powerdown(sdev->bus);
 	free_netdev(dev);
 	ssb_pcihost_set_power_state(sdev, PCI_D3hot);
@@ -2286,7 +2296,7 @@ static int b44_resume(struct ssb_device *sdev)
 
 	rc = request_irq(dev->irq, b44_interrupt, IRQF_SHARED, dev->name, dev);
 	if (rc) {
-		printk(KERN_ERR PFX "%s: request_irq failed\n", dev->name);
+		netdev_err(dev, "request_irq failed\n");
 		return rc;
 	}
 

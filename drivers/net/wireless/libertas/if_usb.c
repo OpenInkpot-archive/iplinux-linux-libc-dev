@@ -5,6 +5,7 @@
 #include <linux/moduleparam.h>
 #include <linux/firmware.h>
 #include <linux/netdevice.h>
+#include <linux/slab.h>
 #include <linux/usb.h>
 
 #ifdef CONFIG_OLPC
@@ -27,6 +28,8 @@
 
 static char *lbs_fw_name = "usb8388.bin";
 module_param_named(fw_name, lbs_fw_name, charp, 0644);
+
+MODULE_FIRMWARE("usb8388.bin");
 
 static struct usb_device_id if_usb_table[] = {
 	/* Enter the device signature inside */
@@ -59,13 +62,11 @@ static int if_usb_reset_device(struct if_usb_card *cardp);
 static ssize_t if_usb_firmware_set(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
-	struct lbs_private *priv = to_net_dev(dev)->priv;
+	struct lbs_private *priv = to_net_dev(dev)->ml_priv;
 	struct if_usb_card *cardp = priv->card;
-	char fwname[FIRMWARE_NAME_MAX];
 	int ret;
 
-	sscanf(buf, "%29s", fwname); /* FIRMWARE_NAME_MAX - 1 = 29 */
-	ret = if_usb_prog_firmware(cardp, fwname, BOOT_CMD_UPDATE_FW);
+	ret = if_usb_prog_firmware(cardp, buf, BOOT_CMD_UPDATE_FW);
 	if (ret == 0)
 		return count;
 
@@ -86,13 +87,11 @@ static DEVICE_ATTR(lbs_flash_fw, 0200, NULL, if_usb_firmware_set);
 static ssize_t if_usb_boot2_set(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
-	struct lbs_private *priv = to_net_dev(dev)->priv;
+	struct lbs_private *priv = to_net_dev(dev)->ml_priv;
 	struct if_usb_card *cardp = priv->card;
-	char fwname[FIRMWARE_NAME_MAX];
 	int ret;
 
-	sscanf(buf, "%29s", fwname); /* FIRMWARE_NAME_MAX - 1 = 29 */
-	ret = if_usb_prog_firmware(cardp, fwname, BOOT_CMD_UPDATE_BOOT2);
+	ret = if_usb_prog_firmware(cardp, buf, BOOT_CMD_UPDATE_BOOT2);
 	if (ret == 0)
 		return count;
 
@@ -178,19 +177,21 @@ static void if_usb_setup_firmware(struct lbs_private *priv)
 
 	priv->wol_gpio = 2; /* Wake via GPIO2... */
 	priv->wol_gap = 20; /* ... after 20ms    */
-	lbs_host_sleep_cfg(priv, EHS_WAKE_ON_UNICAST_DATA);
+	lbs_host_sleep_cfg(priv, EHS_WAKE_ON_UNICAST_DATA,
+			(struct wol_config *) NULL);
 
 	wake_method.hdr.size = cpu_to_le16(sizeof(wake_method));
 	wake_method.action = cpu_to_le16(CMD_ACT_GET);
 	if (lbs_cmd_with_response(priv, CMD_802_11_FW_WAKE_METHOD, &wake_method)) {
 		lbs_pr_info("Firmware does not seem to support PS mode\n");
+		priv->fwcapinfo &= ~FW_CAPINFO_PS;
 	} else {
 		if (le16_to_cpu(wake_method.method) == CMD_WAKE_METHOD_COMMAND_INT) {
 			lbs_deb_usb("Firmware seems to support PS with wake-via-command\n");
-			priv->ps_supported = 1;
 		} else {
 			/* The versions which boot up this way don't seem to
 			   work even if we set it to the command interrupt */
+			priv->fwcapinfo &= ~FW_CAPINFO_PS;
 			lbs_pr_info("Firmware doesn't wake via command interrupt; disabling PS mode\n");
 		}
 	}
@@ -302,6 +303,9 @@ static int if_usb_probe(struct usb_interface *intf,
 	cardp->priv->fw_ready = 1;
 
 	priv->hw_host_to_card = if_usb_host_to_card;
+	priv->enter_deep_sleep = NULL;
+	priv->exit_deep_sleep = NULL;
+	priv->reset_deep_sleep_wakeup = NULL;
 #ifdef CONFIG_OLPC
 	if (machine_is_olpc())
 		priv->reset_card = if_usb_reset_olpc_card;
@@ -510,7 +514,7 @@ static int __if_usb_submit_rx_urb(struct if_usb_card *cardp,
 	/* Fill the receive configuration URB and initialise the Rx call back */
 	usb_fill_bulk_urb(cardp->rx_urb, cardp->udev,
 			  usb_rcvbulkpipe(cardp->udev, cardp->ep_in),
-			  (void *) (skb->tail + (size_t) IPFIELD_ALIGN_OFFSET),
+			  skb->data + IPFIELD_ALIGN_OFFSET,
 			  MRVDRV_ETH_RX_PACKET_BUFFER_SIZE, callbackfn,
 			  cardp);
 
@@ -685,8 +689,7 @@ static inline void process_cmdrequest(int recvlength, uint8_t *recvbuff,
 		return;
 	}
 
-	if (!in_interrupt())
-		BUG();
+	BUG_ON(!in_interrupt());
 
 	spin_lock(&priv->driver_lock);
 

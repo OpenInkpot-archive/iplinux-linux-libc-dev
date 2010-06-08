@@ -25,12 +25,15 @@
 #include <linux/mm_types.h>
 #include <linux/hrtimer.h>
 #include <linux/kvm_host.h>
+#include <linux/spinlock.h>
 
 #include "iodev.h"
 #include "ioapic.h"
 #include "lapic.h"
 
 #define PIC_NUM_PINS 16
+#define SELECT_PIC(irq) \
+	((irq) < 8 ? KVM_IRQCHIP_PIC_MASTER : KVM_IRQCHIP_PIC_SLAVE)
 
 struct kvm;
 struct kvm_vcpu;
@@ -59,15 +62,20 @@ struct kvm_kpic_state {
 };
 
 struct kvm_pic {
+	raw_spinlock_t lock;
+	unsigned pending_acks;
+	struct kvm *kvm;
 	struct kvm_kpic_state pics[2]; /* 0 is master pic, 1 is slave pic */
 	irq_request_func *irq_request;
 	void *irq_request_opaque;
 	int output;		/* intr from master PIC */
 	struct kvm_io_device dev;
 	void (*ack_notifier)(void *opaque, int irq);
+	unsigned long irq_states[16];
 };
 
 struct kvm_pic *kvm_create_pic(struct kvm *kvm);
+void kvm_destroy_pic(struct kvm *kvm);
 int kvm_pic_read_irq(struct kvm *kvm);
 void kvm_pic_update_irq(struct kvm_pic *s);
 void kvm_pic_clear_isr_ack(struct kvm *kvm);
@@ -79,14 +87,18 @@ static inline struct kvm_pic *pic_irqchip(struct kvm *kvm)
 
 static inline int irqchip_in_kernel(struct kvm *kvm)
 {
-	return pic_irqchip(kvm) != NULL;
+	int ret;
+
+	ret = (pic_irqchip(kvm) != NULL);
+	smp_rmb();
+	return ret;
 }
 
 void kvm_pic_reset(struct kvm_kpic_state *s);
 
-void kvm_timer_intr_post(struct kvm_vcpu *vcpu, int vec);
 void kvm_inject_pending_timer_irqs(struct kvm_vcpu *vcpu);
 void kvm_inject_apic_timer_irqs(struct kvm_vcpu *vcpu);
+void kvm_apic_nmi_wd_deliver(struct kvm_vcpu *vcpu);
 void __kvm_migrate_apic_timer(struct kvm_vcpu *vcpu);
 void __kvm_migrate_pit_timer(struct kvm_vcpu *vcpu);
 void __kvm_migrate_timers(struct kvm_vcpu *vcpu);

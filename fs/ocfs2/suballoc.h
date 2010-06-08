@@ -56,6 +56,7 @@ struct ocfs2_alloc_context {
 				 is the same as ~0 - unlimited */
 };
 
+void ocfs2_init_steal_slots(struct ocfs2_super *osb);
 void ocfs2_free_alloc_context(struct ocfs2_alloc_context *ac);
 static inline int ocfs2_alloc_context_bits_left(struct ocfs2_alloc_context *ac)
 {
@@ -88,6 +89,8 @@ int ocfs2_claim_metadata(struct ocfs2_super *osb,
 			 u64 *blkno_start);
 int ocfs2_claim_new_inode(struct ocfs2_super *osb,
 			  handle_t *handle,
+			  struct inode *dir,
+			  struct buffer_head *parent_fe_bh,
 			  struct ocfs2_alloc_context *ac,
 			  u16 *suballoc_bit,
 			  u64 *fe_blkno);
@@ -124,6 +127,11 @@ int ocfs2_free_clusters(handle_t *handle,
 			struct buffer_head *bitmap_bh,
 			u64 start_blk,
 			unsigned int num_clusters);
+int ocfs2_release_clusters(handle_t *handle,
+			   struct inode *bitmap_inode,
+			   struct buffer_head *bitmap_bh,
+			   u64 start_blk,
+			   unsigned int num_clusters);
 
 static inline u64 ocfs2_which_suballoc_group(u64 block, unsigned int bit)
 {
@@ -164,12 +172,28 @@ void ocfs2_free_ac_resource(struct ocfs2_alloc_context *ac);
  * and return that block offset. */
 u64 ocfs2_which_cluster_group(struct inode *inode, u32 cluster);
 
-/* somewhat more expensive than our other checks, so use sparingly. */
+/*
+ * By default, ocfs2_read_group_descriptor() calls ocfs2_error() when it
+ * finds a problem.  A caller that wants to check a group descriptor
+ * without going readonly should read the block with ocfs2_read_block[s]()
+ * and then checking it with this function.  This is only resize, really.
+ * Everyone else should be using ocfs2_read_group_descriptor().
+ */
 int ocfs2_check_group_descriptor(struct super_block *sb,
 				 struct ocfs2_dinode *di,
-				 struct ocfs2_group_desc *gd);
+				 struct buffer_head *bh);
+/*
+ * Read a group descriptor block into *bh.  If *bh is NULL, a bh will be
+ * allocated.  This is a cached read.  The descriptor will be validated with
+ * ocfs2_validate_group_descriptor().
+ */
+int ocfs2_read_group_descriptor(struct inode *inode, struct ocfs2_dinode *di,
+				u64 gd_blkno, struct buffer_head **bh);
+
 int ocfs2_lock_allocators(struct inode *inode, struct ocfs2_extent_tree *et,
 			  u32 clusters_to_add, u32 extents_to_split,
 			  struct ocfs2_alloc_context **data_ac,
 			  struct ocfs2_alloc_context **meta_ac);
+
+int ocfs2_test_inode_bit(struct ocfs2_super *osb, u64 blkno, int *res);
 #endif /* _CHAINALLOC_H_ */

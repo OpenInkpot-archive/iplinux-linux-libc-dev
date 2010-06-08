@@ -7,6 +7,7 @@
  */
 
 #include <linux/irq.h>
+#include <linux/gfp.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/interrupt.h>
@@ -20,11 +21,11 @@ static struct proc_dir_entry *root_irq_dir;
 static int irq_affinity_proc_show(struct seq_file *m, void *v)
 {
 	struct irq_desc *desc = irq_to_desc((long)m->private);
-	cpumask_t *mask = &desc->affinity;
+	const struct cpumask *mask = desc->affinity;
 
 #ifdef CONFIG_GENERIC_PENDING_IRQ
 	if (desc->status & IRQ_MOVE_PENDING)
-		mask = &desc->pending_mask;
+		mask = desc->pending_mask;
 #endif
 	seq_cpumask(m, mask);
 	seq_putc(m, '\n');
@@ -40,33 +41,42 @@ static ssize_t irq_affinity_proc_write(struct file *file,
 		const char __user *buffer, size_t count, loff_t *pos)
 {
 	unsigned int irq = (int)(long)PDE(file->f_path.dentry->d_inode)->data;
-	cpumask_t new_value;
+	cpumask_var_t new_value;
 	int err;
 
 	if (!irq_to_desc(irq)->chip->set_affinity || no_irq_affinity ||
 	    irq_balancing_disabled(irq))
 		return -EIO;
 
+	if (!alloc_cpumask_var(&new_value, GFP_KERNEL))
+		return -ENOMEM;
+
 	err = cpumask_parse_user(buffer, count, new_value);
 	if (err)
-		return err;
+		goto free_cpumask;
 
-	if (!is_affinity_mask_valid(new_value))
-		return -EINVAL;
+	if (!is_affinity_mask_valid(new_value)) {
+		err = -EINVAL;
+		goto free_cpumask;
+	}
 
 	/*
 	 * Do not allow disabling IRQs completely - it's a too easy
 	 * way to make the system unusable accidentally :-) At least
 	 * one online CPU still has to be targeted.
 	 */
-	if (!cpus_intersects(new_value, cpu_online_map))
+	if (!cpumask_intersects(new_value, cpu_online_mask)) {
 		/* Special case for empty set - allow the architecture
 		   code to set default SMP affinity. */
-		return irq_select_affinity_usr(irq) ? -EINVAL : count;
+		err = irq_select_affinity_usr(irq) ? -EINVAL : count;
+	} else {
+		irq_set_affinity(irq, new_value);
+		err = count;
+	}
 
-	irq_set_affinity(irq, new_value);
-
-	return count;
+free_cpumask:
+	free_cpumask_var(new_value);
+	return err;
 }
 
 static int irq_affinity_proc_open(struct inode *inode, struct file *file)
@@ -84,7 +94,7 @@ static const struct file_operations irq_affinity_proc_fops = {
 
 static int default_affinity_show(struct seq_file *m, void *v)
 {
-	seq_cpumask(m, &irq_default_affinity);
+	seq_cpumask(m, irq_default_affinity);
 	seq_putc(m, '\n');
 	return 0;
 }
@@ -92,32 +102,42 @@ static int default_affinity_show(struct seq_file *m, void *v)
 static ssize_t default_affinity_write(struct file *file,
 		const char __user *buffer, size_t count, loff_t *ppos)
 {
-	cpumask_t new_value;
+	cpumask_var_t new_value;
 	int err;
+
+	if (!alloc_cpumask_var(&new_value, GFP_KERNEL))
+		return -ENOMEM;
 
 	err = cpumask_parse_user(buffer, count, new_value);
 	if (err)
-		return err;
+		goto out;
 
-	if (!is_affinity_mask_valid(new_value))
-		return -EINVAL;
+	if (!is_affinity_mask_valid(new_value)) {
+		err = -EINVAL;
+		goto out;
+	}
 
 	/*
 	 * Do not allow disabling IRQs completely - it's a too easy
 	 * way to make the system unusable accidentally :-) At least
 	 * one online CPU still has to be targeted.
 	 */
-	if (!cpus_intersects(new_value, cpu_online_map))
-		return -EINVAL;
+	if (!cpumask_intersects(new_value, cpu_online_mask)) {
+		err = -EINVAL;
+		goto out;
+	}
 
-	irq_default_affinity = new_value;
+	cpumask_copy(irq_default_affinity, new_value);
+	err = count;
 
-	return count;
+out:
+	free_cpumask_var(new_value);
+	return err;
 }
 
 static int default_affinity_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, default_affinity_show, NULL);
+	return single_open(file, default_affinity_show, PDE(inode)->data);
 }
 
 static const struct file_operations default_affinity_proc_fops = {
@@ -129,17 +149,27 @@ static const struct file_operations default_affinity_proc_fops = {
 };
 #endif
 
-static int irq_spurious_read(char *page, char **start, off_t off,
-				  int count, int *eof, void *data)
+static int irq_spurious_proc_show(struct seq_file *m, void *v)
 {
-	struct irq_desc *desc = irq_to_desc((long) data);
-	return sprintf(page, "count %u\n"
-			     "unhandled %u\n"
-			     "last_unhandled %u ms\n",
-			desc->irq_count,
-			desc->irqs_unhandled,
-			jiffies_to_msecs(desc->last_unhandled));
+	struct irq_desc *desc = irq_to_desc((long) m->private);
+
+	seq_printf(m, "count %u\n" "unhandled %u\n" "last_unhandled %u ms\n",
+		   desc->irq_count, desc->irqs_unhandled,
+		   jiffies_to_msecs(desc->last_unhandled));
+	return 0;
 }
+
+static int irq_spurious_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, irq_spurious_proc_show, NULL);
+}
+
+static const struct file_operations irq_spurious_proc_fops = {
+	.open		= irq_spurious_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
 
 #define MAX_NAMELEN 128
 
@@ -150,7 +180,7 @@ static int name_unique(unsigned int irq, struct irqaction *new_action)
 	unsigned long flags;
 	int ret = 1;
 
-	spin_lock_irqsave(&desc->lock, flags);
+	raw_spin_lock_irqsave(&desc->lock, flags);
 	for (action = desc->action ; action; action = action->next) {
 		if ((action != new_action) && action->name &&
 				!strcmp(new_action->name, action->name)) {
@@ -158,7 +188,7 @@ static int name_unique(unsigned int irq, struct irqaction *new_action)
 			break;
 		}
 	}
-	spin_unlock_irqrestore(&desc->lock, flags);
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
 	return ret;
 }
 
@@ -185,7 +215,6 @@ void register_handler_proc(unsigned int irq, struct irqaction *action)
 void register_irq_proc(unsigned int irq, struct irq_desc *desc)
 {
 	char name [MAX_NAMELEN];
-	struct proc_dir_entry *entry;
 
 	if (!root_irq_dir || (desc->chip == &no_irq_chip) || desc->dir)
 		return;
@@ -195,6 +224,8 @@ void register_irq_proc(unsigned int irq, struct irq_desc *desc)
 
 	/* create /proc/irq/1234 */
 	desc->dir = proc_mkdir(name, root_irq_dir);
+	if (!desc->dir)
+		return;
 
 #ifdef CONFIG_SMP
 	/* create /proc/irq/<irq>/smp_affinity */
@@ -202,11 +233,8 @@ void register_irq_proc(unsigned int irq, struct irq_desc *desc)
 			 &irq_affinity_proc_fops, (void *)(long)irq);
 #endif
 
-	entry = create_proc_entry("spurious", 0444, desc->dir);
-	if (entry) {
-		entry->data = (void *)(long)irq;
-		entry->read_proc = irq_spurious_read;
-	}
+	proc_create_data("spurious", 0444, desc->dir,
+			 &irq_spurious_proc_fops, (void *)(long)irq);
 }
 
 #undef MAX_NAMELEN
@@ -243,7 +271,11 @@ void init_irq_proc(void)
 	/*
 	 * Create entries for all existing IRQs.
 	 */
-	for_each_irq_desc(irq, desc)
+	for_each_irq_desc(irq, desc) {
+		if (!desc)
+			continue;
+
 		register_irq_proc(irq, desc);
+	}
 }
 

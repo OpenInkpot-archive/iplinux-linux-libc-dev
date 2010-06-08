@@ -7,9 +7,9 @@
 #include <linux/types.h>
 #include <linux/file.h>
 #include <linux/fs.h>
-#include <linux/sunrpc/svc.h>
-#include <linux/nfsd/nfsd.h>
 #include <linux/nfsd/syscall.h>
+#include <linux/cred.h>
+#include <linux/sched.h>
 #include <linux/linkage.h>
 #include <linux/namei.h>
 #include <linux/mount.h>
@@ -36,12 +36,13 @@ static struct file *do_open(char *name, int flags)
 		return ERR_PTR(error);
 
 	if (flags == O_RDWR)
-		error = may_open(&nd,MAY_READ|MAY_WRITE,FMODE_READ|FMODE_WRITE);
+		error = may_open(&nd.path, MAY_READ|MAY_WRITE, flags);
 	else
-		error = may_open(&nd, MAY_WRITE, FMODE_WRITE);
+		error = may_open(&nd.path, MAY_WRITE, flags);
 
 	if (!error)
-		return dentry_open(nd.path.dentry, nd.path.mnt, flags);
+		return dentry_open(nd.path.dentry, nd.path.mnt, flags,
+				   current_cred());
 
 	path_put(&nd.path);
 	return ERR_PTR(error);
@@ -82,8 +83,8 @@ static struct {
 	},
 };
 
-long
-asmlinkage sys_nfsservctl(int cmd, struct nfsctl_arg __user *arg, void __user *res)
+SYSCALL_DEFINE3(nfsservctl, int, cmd, struct nfsctl_arg __user *, arg,
+		void __user *, res)
 {
 	struct file *file;
 	void __user *p = &arg->u;

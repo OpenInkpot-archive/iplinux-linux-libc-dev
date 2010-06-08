@@ -3,6 +3,7 @@
  *
  *  Copyright (C) 2007-2008 Yan Burman
  *  Copyright (C) 2008 Eric Piel
+ *  Copyright (C) 2008-2009 Pavel Machek
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -26,129 +27,67 @@
 #include <linux/types.h>
 #include <linux/platform_device.h>
 #include <linux/interrupt.h>
-#include <linux/input.h>
-#include <linux/kthread.h>
-#include <linux/semaphore.h>
+#include <linux/input-polldev.h>
 #include <linux/delay.h>
 #include <linux/wait.h>
 #include <linux/poll.h>
 #include <linux/freezer.h>
 #include <linux/uaccess.h>
-#include <acpi/acpi_drivers.h>
+#include <linux/miscdevice.h>
 #include <asm/atomic.h>
 #include "lis3lv02d.h"
 
 #define DRIVER_NAME     "lis3lv02d"
-#define ACPI_MDPS_CLASS "accelerometer"
 
 /* joystick device poll interval in milliseconds */
 #define MDPS_POLL_INTERVAL 50
 /*
  * The sensor can also generate interrupts (DRDY) but it's pretty pointless
- * because their are generated even if the data do not change. So it's better
+ * because they are generated even if the data do not change. So it's better
  * to keep the interrupt for the free-fall event. The values are updated at
  * 40Hz (at the lowest frequency), but as it can be pretty time consuming on
  * some low processor, we poll the sensor only at 20Hz... enough for the
  * joystick.
  */
 
-/* Maximum value our axis may get for the input device (signed 12 bits) */
-#define MDPS_MAX_VAL 2048
+#define LIS3_PWRON_DELAY_WAI_12B	(5000)
+#define LIS3_PWRON_DELAY_WAI_8B		(3000)
 
-struct axis_conversion {
-	s8	x;
-	s8	y;
-	s8	z;
+/*
+ * LIS3LV02D spec says 1024 LSBs corresponds 1 G -> 1LSB is 1000/1024 mG
+ * LIS302D spec says: 18 mG / digit
+ * LIS3_ACCURACY is used to increase accuracy of the intermediate
+ * calculation results.
+ */
+#define LIS3_ACCURACY			1024
+/* Sensitivity values for -2G +2G scale */
+#define LIS3_SENSITIVITY_12B		((LIS3_ACCURACY * 1000) / 1024)
+#define LIS3_SENSITIVITY_8B		(18 * LIS3_ACCURACY)
+
+#define LIS3_DEFAULT_FUZZ		3
+#define LIS3_DEFAULT_FLAT		3
+
+struct lis3lv02d lis3_dev = {
+	.misc_wait   = __WAIT_QUEUE_HEAD_INITIALIZER(lis3_dev.misc_wait),
 };
 
-struct acpi_lis3lv02d {
-	struct acpi_device	*device;   /* The ACPI device */
-	struct input_dev	*idev;     /* input device */
-	struct task_struct	*kthread;  /* kthread for input */
-	struct mutex            lock;
-	struct platform_device	*pdev;     /* platform device */
-	atomic_t		count;     /* interrupt count after last read */
-	int			xcalib;    /* calibrated null value for x */
-	int			ycalib;    /* calibrated null value for y */
-	int			zcalib;    /* calibrated null value for z */
-	unsigned char		is_on;     /* whether the device is on or off */
-	unsigned char		usage;     /* usage counter */
-	struct axis_conversion	ac;        /* hw -> logical axis */
-};
+EXPORT_SYMBOL_GPL(lis3_dev);
 
-static struct acpi_lis3lv02d adev;
-
-static int lis3lv02d_remove_fs(void);
-static int lis3lv02d_add_fs(struct acpi_device *device);
-
-/* For automatic insertion of the module */
-static struct acpi_device_id lis3lv02d_device_ids[] = {
-	{"HPQ0004", 0}, /* HP Mobile Data Protection System PNP */
-	{"", 0},
-};
-MODULE_DEVICE_TABLE(acpi, lis3lv02d_device_ids);
-
-/**
- * lis3lv02d_acpi_init - ACPI _INI method: initialize the device.
- * @handle: the handle of the device
- *
- * Returns AE_OK on success.
- */
-static inline acpi_status lis3lv02d_acpi_init(acpi_handle handle)
+static s16 lis3lv02d_read_8(struct lis3lv02d *lis3, int reg)
 {
-	return acpi_evaluate_object(handle, METHOD_NAME__INI, NULL, NULL);
+	s8 lo;
+	if (lis3->read(lis3, reg, &lo) < 0)
+		return 0;
+
+	return lo;
 }
 
-/**
- * lis3lv02d_acpi_read - ACPI ALRD method: read a register
- * @handle: the handle of the device
- * @reg:    the register to read
- * @ret:    result of the operation
- *
- * Returns AE_OK on success.
- */
-static acpi_status lis3lv02d_acpi_read(acpi_handle handle, int reg, u8 *ret)
-{
-	union acpi_object arg0 = { ACPI_TYPE_INTEGER };
-	struct acpi_object_list args = { 1, &arg0 };
-	unsigned long long lret;
-	acpi_status status;
-
-	arg0.integer.value = reg;
-
-	status = acpi_evaluate_integer(handle, "ALRD", &args, &lret);
-	*ret = lret;
-	return status;
-}
-
-/**
- * lis3lv02d_acpi_write - ACPI ALWR method: write to a register
- * @handle: the handle of the device
- * @reg:    the register to write to
- * @val:    the value to write
- *
- * Returns AE_OK on success.
- */
-static acpi_status lis3lv02d_acpi_write(acpi_handle handle, int reg, u8 val)
-{
-	unsigned long long ret; /* Not used when writting */
-	union acpi_object in_obj[2];
-	struct acpi_object_list args = { 2, in_obj };
-
-	in_obj[0].type          = ACPI_TYPE_INTEGER;
-	in_obj[0].integer.value = reg;
-	in_obj[1].type          = ACPI_TYPE_INTEGER;
-	in_obj[1].integer.value = val;
-
-	return acpi_evaluate_integer(handle, "ALWR", &args, &ret);
-}
-
-static s16 lis3lv02d_read_16(acpi_handle handle, int reg)
+static s16 lis3lv02d_read_12(struct lis3lv02d *lis3, int reg)
 {
 	u8 lo, hi;
 
-	lis3lv02d_acpi_read(handle, reg, &lo);
-	lis3lv02d_acpi_read(handle, reg + 1, &hi);
+	lis3->read(lis3, reg - 1, &lo);
+	lis3->read(lis3, reg, &hi);
 	/* In "12 bit right justified" mode, bit 6, bit 7, bit 8 = bit 5 */
 	return (s16)((hi << 8) | lo);
 }
@@ -170,351 +109,392 @@ static inline int lis3lv02d_get_axis(s8 axis, int hw_values[3])
 
 /**
  * lis3lv02d_get_xyz - Get X, Y and Z axis values from the accelerometer
- * @handle: the handle to the device
- * @x:      where to store the X axis value
- * @y:      where to store the Y axis value
- * @z:      where to store the Z axis value
+ * @lis3: pointer to the device struct
+ * @x:    where to store the X axis value
+ * @y:    where to store the Y axis value
+ * @z:    where to store the Z axis value
  *
  * Note that 40Hz input device can eat up about 10% CPU at 800MHZ
  */
-static void lis3lv02d_get_xyz(acpi_handle handle, int *x, int *y, int *z)
+static void lis3lv02d_get_xyz(struct lis3lv02d *lis3, int *x, int *y, int *z)
 {
 	int position[3];
+	int i;
 
-	position[0] = lis3lv02d_read_16(handle, OUTX_L);
-	position[1] = lis3lv02d_read_16(handle, OUTY_L);
-	position[2] = lis3lv02d_read_16(handle, OUTZ_L);
+	mutex_lock(&lis3->mutex);
+	position[0] = lis3->read_data(lis3, OUTX);
+	position[1] = lis3->read_data(lis3, OUTY);
+	position[2] = lis3->read_data(lis3, OUTZ);
+	mutex_unlock(&lis3->mutex);
 
-	*x = lis3lv02d_get_axis(adev.ac.x, position);
-	*y = lis3lv02d_get_axis(adev.ac.y, position);
-	*z = lis3lv02d_get_axis(adev.ac.z, position);
+	for (i = 0; i < 3; i++)
+		position[i] = (position[i] * lis3->scale) / LIS3_ACCURACY;
+
+	*x = lis3lv02d_get_axis(lis3->ac.x, position);
+	*y = lis3lv02d_get_axis(lis3->ac.y, position);
+	*z = lis3lv02d_get_axis(lis3->ac.z, position);
 }
 
-static inline void lis3lv02d_poweroff(acpi_handle handle)
+/* conversion btw sampling rate and the register values */
+static int lis3_12_rates[4] = {40, 160, 640, 2560};
+static int lis3_8_rates[2] = {100, 400};
+
+/* ODR is Output Data Rate */
+static int lis3lv02d_get_odr(void)
 {
-	adev.is_on = 0;
-	/* disable X,Y,Z axis and power down */
-	lis3lv02d_acpi_write(handle, CTRL_REG1, 0x00);
+	u8 ctrl;
+	int shift;
+
+	lis3_dev.read(&lis3_dev, CTRL_REG1, &ctrl);
+	ctrl &= lis3_dev.odr_mask;
+	shift = ffs(lis3_dev.odr_mask) - 1;
+	return lis3_dev.odrs[(ctrl >> shift)];
 }
 
-static void lis3lv02d_poweron(acpi_handle handle)
+static int lis3lv02d_set_odr(int rate)
 {
-	u8 val;
+	u8 ctrl;
+	int i, len, shift;
 
-	adev.is_on = 1;
-	lis3lv02d_acpi_init(handle);
-	lis3lv02d_acpi_write(handle, FF_WU_CFG, 0);
-	/*
-	 * BDU: LSB and MSB values are not updated until both have been read.
-	 *      So the value read will always be correct.
-	 * IEN: Interrupt for free-fall and DD, not for data-ready.
-	 */
-	lis3lv02d_acpi_read(handle, CTRL_REG2, &val);
-	val |= CTRL2_BDU | CTRL2_IEN;
-	lis3lv02d_acpi_write(handle, CTRL_REG2, val);
+	lis3_dev.read(&lis3_dev, CTRL_REG1, &ctrl);
+	ctrl &= ~lis3_dev.odr_mask;
+	len = 1 << hweight_long(lis3_dev.odr_mask); /* # of possible values */
+	shift = ffs(lis3_dev.odr_mask) - 1;
+
+	for (i = 0; i < len; i++)
+		if (lis3_dev.odrs[i] == rate) {
+			lis3_dev.write(&lis3_dev, CTRL_REG1,
+					ctrl | (i << shift));
+			return 0;
+		}
+	return -EINVAL;
 }
 
-#ifdef CONFIG_PM
-static int lis3lv02d_suspend(struct acpi_device *device, pm_message_t state)
+static int lis3lv02d_selftest(struct lis3lv02d *lis3, s16 results[3])
 {
-	/* make sure the device is off when we suspend */
-	lis3lv02d_poweroff(device->handle);
-	return 0;
-}
+	u8 reg;
+	s16 x, y, z;
+	u8 selftest;
+	int ret;
 
-static int lis3lv02d_resume(struct acpi_device *device)
-{
-	/* put back the device in the right state (ACPI might turn it on) */
-	mutex_lock(&adev.lock);
-	if (adev.usage > 0)
-		lis3lv02d_poweron(device->handle);
+	mutex_lock(&lis3->mutex);
+	if (lis3_dev.whoami == WAI_12B)
+		selftest = CTRL1_ST;
 	else
-		lis3lv02d_poweroff(device->handle);
-	mutex_unlock(&adev.lock);
+		selftest = CTRL1_STP;
+
+	lis3->read(lis3, CTRL_REG1, &reg);
+	lis3->write(lis3, CTRL_REG1, (reg | selftest));
+	msleep(lis3->pwron_delay / lis3lv02d_get_odr());
+
+	/* Read directly to avoid axis remap */
+	x = lis3->read_data(lis3, OUTX);
+	y = lis3->read_data(lis3, OUTY);
+	z = lis3->read_data(lis3, OUTZ);
+
+	/* back to normal settings */
+	lis3->write(lis3, CTRL_REG1, reg);
+	msleep(lis3->pwron_delay / lis3lv02d_get_odr());
+
+	results[0] = x - lis3->read_data(lis3, OUTX);
+	results[1] = y - lis3->read_data(lis3, OUTY);
+	results[2] = z - lis3->read_data(lis3, OUTZ);
+
+	ret = 0;
+	if (lis3->pdata) {
+		int i;
+		for (i = 0; i < 3; i++) {
+			/* Check against selftest acceptance limits */
+			if ((results[i] < lis3->pdata->st_min_limits[i]) ||
+			    (results[i] > lis3->pdata->st_max_limits[i])) {
+				ret = -EIO;
+				goto fail;
+			}
+		}
+	}
+
+	/* test passed */
+fail:
+	mutex_unlock(&lis3->mutex);
+	return ret;
+}
+
+void lis3lv02d_poweroff(struct lis3lv02d *lis3)
+{
+	/* disable X,Y,Z axis and power down */
+	lis3->write(lis3, CTRL_REG1, 0x00);
+}
+EXPORT_SYMBOL_GPL(lis3lv02d_poweroff);
+
+void lis3lv02d_poweron(struct lis3lv02d *lis3)
+{
+	u8 reg;
+
+	lis3->init(lis3);
+
+	/* LIS3 power on delay is quite long */
+	msleep(lis3->pwron_delay / lis3lv02d_get_odr());
+
+	/*
+	 * Common configuration
+	 * BDU: (12 bits sensors only) LSB and MSB values are not updated until
+	 *      both have been read. So the value read will always be correct.
+	 */
+	if (lis3->whoami ==  WAI_12B) {
+		lis3->read(lis3, CTRL_REG2, &reg);
+		reg |= CTRL2_BDU;
+		lis3->write(lis3, CTRL_REG2, reg);
+	}
+}
+EXPORT_SYMBOL_GPL(lis3lv02d_poweron);
+
+
+static irqreturn_t lis302dl_interrupt(int irq, void *dummy)
+{
+	/*
+	 * Be careful: on some HP laptops the bios force DD when on battery and
+	 * the lid is closed. This leads to interrupts as soon as a little move
+	 * is done.
+	 */
+	atomic_inc(&lis3_dev.count);
+
+	wake_up_interruptible(&lis3_dev.misc_wait);
+	kill_fasync(&lis3_dev.async_queue, SIGIO, POLL_IN);
+	return IRQ_HANDLED;
+}
+
+static int lis3lv02d_misc_open(struct inode *inode, struct file *file)
+{
+	int ret;
+
+	if (test_and_set_bit(0, &lis3_dev.misc_opened))
+		return -EBUSY; /* already open */
+
+	atomic_set(&lis3_dev.count, 0);
+
+	/*
+	 * The sensor can generate interrupts for free-fall and direction
+	 * detection (distinguishable with FF_WU_SRC and DD_SRC) but to keep
+	 * the things simple and _fast_ we activate it only for free-fall, so
+	 * no need to read register (very slow with ACPI). For the same reason,
+	 * we forbid shared interrupts.
+	 *
+	 * IRQF_TRIGGER_RISING seems pointless on HP laptops because the
+	 * io-apic is not configurable (and generates a warning) but I keep it
+	 * in case of support for other hardware.
+	 */
+	ret = request_irq(lis3_dev.irq, lis302dl_interrupt, IRQF_TRIGGER_RISING,
+			  DRIVER_NAME, &lis3_dev);
+
+	if (ret) {
+		clear_bit(0, &lis3_dev.misc_opened);
+		printk(KERN_ERR DRIVER_NAME ": IRQ%d allocation failed\n", lis3_dev.irq);
+		return -EBUSY;
+	}
 	return 0;
 }
-#else
-#define lis3lv02d_suspend NULL
-#define lis3lv02d_resume NULL
-#endif
 
-
-/*
- * To be called before starting to use the device. It makes sure that the
- * device will always be on until a call to lis3lv02d_decrease_use(). Not to be
- * used from interrupt context.
- */
-static void lis3lv02d_increase_use(struct acpi_lis3lv02d *dev)
+static int lis3lv02d_misc_release(struct inode *inode, struct file *file)
 {
-	mutex_lock(&dev->lock);
-	dev->usage++;
-	if (dev->usage == 1) {
-		if (!dev->is_on)
-			lis3lv02d_poweron(dev->device->handle);
+	fasync_helper(-1, file, 0, &lis3_dev.async_queue);
+	free_irq(lis3_dev.irq, &lis3_dev);
+	clear_bit(0, &lis3_dev.misc_opened); /* release the device */
+	return 0;
+}
+
+static ssize_t lis3lv02d_misc_read(struct file *file, char __user *buf,
+				size_t count, loff_t *pos)
+{
+	DECLARE_WAITQUEUE(wait, current);
+	u32 data;
+	unsigned char byte_data;
+	ssize_t retval = 1;
+
+	if (count < 1)
+		return -EINVAL;
+
+	add_wait_queue(&lis3_dev.misc_wait, &wait);
+	while (true) {
+		set_current_state(TASK_INTERRUPTIBLE);
+		data = atomic_xchg(&lis3_dev.count, 0);
+		if (data)
+			break;
+
+		if (file->f_flags & O_NONBLOCK) {
+			retval = -EAGAIN;
+			goto out;
+		}
+
+		if (signal_pending(current)) {
+			retval = -ERESTARTSYS;
+			goto out;
+		}
+
+		schedule();
 	}
-	mutex_unlock(&dev->lock);
+
+	if (data < 255)
+		byte_data = data;
+	else
+		byte_data = 255;
+
+	/* make sure we are not going into copy_to_user() with
+	 * TASK_INTERRUPTIBLE state */
+	set_current_state(TASK_RUNNING);
+	if (copy_to_user(buf, &byte_data, sizeof(byte_data)))
+		retval = -EFAULT;
+
+out:
+	__set_current_state(TASK_RUNNING);
+	remove_wait_queue(&lis3_dev.misc_wait, &wait);
+
+	return retval;
 }
 
-/*
- * To be called whenever a usage of the device is stopped.
- * It will make sure to turn off the device when there is not usage.
- */
-static void lis3lv02d_decrease_use(struct acpi_lis3lv02d *dev)
+static unsigned int lis3lv02d_misc_poll(struct file *file, poll_table *wait)
 {
-	mutex_lock(&dev->lock);
-	dev->usage--;
-	if (dev->usage == 0)
-		lis3lv02d_poweroff(dev->device->handle);
-	mutex_unlock(&dev->lock);
+	poll_wait(file, &lis3_dev.misc_wait, wait);
+	if (atomic_read(&lis3_dev.count))
+		return POLLIN | POLLRDNORM;
+	return 0;
 }
 
-/**
- * lis3lv02d_joystick_kthread - Kthread polling function
- * @data: unused - here to conform to threadfn prototype
- */
-static int lis3lv02d_joystick_kthread(void *data)
+static int lis3lv02d_misc_fasync(int fd, struct file *file, int on)
+{
+	return fasync_helper(fd, file, on, &lis3_dev.async_queue);
+}
+
+static const struct file_operations lis3lv02d_misc_fops = {
+	.owner   = THIS_MODULE,
+	.llseek  = no_llseek,
+	.read    = lis3lv02d_misc_read,
+	.open    = lis3lv02d_misc_open,
+	.release = lis3lv02d_misc_release,
+	.poll    = lis3lv02d_misc_poll,
+	.fasync  = lis3lv02d_misc_fasync,
+};
+
+static struct miscdevice lis3lv02d_misc_device = {
+	.minor   = MISC_DYNAMIC_MINOR,
+	.name    = "freefall",
+	.fops    = &lis3lv02d_misc_fops,
+};
+
+static void lis3lv02d_joystick_poll(struct input_polled_dev *pidev)
 {
 	int x, y, z;
 
-	while (!kthread_should_stop()) {
-		lis3lv02d_get_xyz(adev.device->handle, &x, &y, &z);
-		input_report_abs(adev.idev, ABS_X, x - adev.xcalib);
-		input_report_abs(adev.idev, ABS_Y, y - adev.ycalib);
-		input_report_abs(adev.idev, ABS_Z, z - adev.zcalib);
-
-		input_sync(adev.idev);
-
-		try_to_freeze();
-		msleep_interruptible(MDPS_POLL_INTERVAL);
-	}
-
-	return 0;
+	lis3lv02d_get_xyz(&lis3_dev, &x, &y, &z);
+	input_report_abs(pidev->input, ABS_X, x);
+	input_report_abs(pidev->input, ABS_Y, y);
+	input_report_abs(pidev->input, ABS_Z, z);
+	input_sync(pidev->input);
 }
 
-static int lis3lv02d_joystick_open(struct input_dev *input)
+int lis3lv02d_joystick_enable(void)
 {
-	lis3lv02d_increase_use(&adev);
-	adev.kthread = kthread_run(lis3lv02d_joystick_kthread, NULL, "klis3lv02d");
-	if (IS_ERR(adev.kthread)) {
-		lis3lv02d_decrease_use(&adev);
-		return PTR_ERR(adev.kthread);
-	}
-
-	return 0;
-}
-
-static void lis3lv02d_joystick_close(struct input_dev *input)
-{
-	kthread_stop(adev.kthread);
-	lis3lv02d_decrease_use(&adev);
-}
-
-
-static inline void lis3lv02d_calibrate_joystick(void)
-{
-	lis3lv02d_get_xyz(adev.device->handle, &adev.xcalib, &adev.ycalib, &adev.zcalib);
-}
-
-static int lis3lv02d_joystick_enable(void)
-{
+	struct input_dev *input_dev;
 	int err;
+	int max_val, fuzz, flat;
 
-	if (adev.idev)
+	if (lis3_dev.idev)
 		return -EINVAL;
 
-	adev.idev = input_allocate_device();
-	if (!adev.idev)
+	lis3_dev.idev = input_allocate_polled_device();
+	if (!lis3_dev.idev)
 		return -ENOMEM;
 
-	lis3lv02d_calibrate_joystick();
+	lis3_dev.idev->poll = lis3lv02d_joystick_poll;
+	lis3_dev.idev->poll_interval = MDPS_POLL_INTERVAL;
+	input_dev = lis3_dev.idev->input;
 
-	adev.idev->name       = "ST LIS3LV02DL Accelerometer";
-	adev.idev->phys       = DRIVER_NAME "/input0";
-	adev.idev->id.bustype = BUS_HOST;
-	adev.idev->id.vendor  = 0;
-	adev.idev->dev.parent = &adev.pdev->dev;
-	adev.idev->open       = lis3lv02d_joystick_open;
-	adev.idev->close      = lis3lv02d_joystick_close;
+	input_dev->name       = "ST LIS3LV02DL Accelerometer";
+	input_dev->phys       = DRIVER_NAME "/input0";
+	input_dev->id.bustype = BUS_HOST;
+	input_dev->id.vendor  = 0;
+	input_dev->dev.parent = &lis3_dev.pdev->dev;
 
-	set_bit(EV_ABS, adev.idev->evbit);
-	input_set_abs_params(adev.idev, ABS_X, -MDPS_MAX_VAL, MDPS_MAX_VAL, 3, 3);
-	input_set_abs_params(adev.idev, ABS_Y, -MDPS_MAX_VAL, MDPS_MAX_VAL, 3, 3);
-	input_set_abs_params(adev.idev, ABS_Z, -MDPS_MAX_VAL, MDPS_MAX_VAL, 3, 3);
+	set_bit(EV_ABS, input_dev->evbit);
+	max_val = (lis3_dev.mdps_max_val * lis3_dev.scale) / LIS3_ACCURACY;
+	fuzz = (LIS3_DEFAULT_FUZZ * lis3_dev.scale) / LIS3_ACCURACY;
+	flat = (LIS3_DEFAULT_FLAT * lis3_dev.scale) / LIS3_ACCURACY;
+	input_set_abs_params(input_dev, ABS_X, -max_val, max_val, fuzz, flat);
+	input_set_abs_params(input_dev, ABS_Y, -max_val, max_val, fuzz, flat);
+	input_set_abs_params(input_dev, ABS_Z, -max_val, max_val, fuzz, flat);
 
-	err = input_register_device(adev.idev);
+	err = input_register_polled_device(lis3_dev.idev);
 	if (err) {
-		input_free_device(adev.idev);
-		adev.idev = NULL;
+		input_free_polled_device(lis3_dev.idev);
+		lis3_dev.idev = NULL;
 	}
 
 	return err;
 }
+EXPORT_SYMBOL_GPL(lis3lv02d_joystick_enable);
 
-static void lis3lv02d_joystick_disable(void)
+void lis3lv02d_joystick_disable(void)
 {
-	if (!adev.idev)
+	if (!lis3_dev.idev)
 		return;
 
-	input_unregister_device(adev.idev);
-	adev.idev = NULL;
+	if (lis3_dev.irq)
+		misc_deregister(&lis3lv02d_misc_device);
+	input_unregister_polled_device(lis3_dev.idev);
+	input_free_polled_device(lis3_dev.idev);
+	lis3_dev.idev = NULL;
 }
-
-
-/*
- * Initialise the accelerometer and the various subsystems.
- * Should be rather independant of the bus system.
- */
-static int lis3lv02d_init_device(struct acpi_lis3lv02d *dev)
-{
-	mutex_init(&dev->lock);
-	lis3lv02d_add_fs(dev->device);
-	lis3lv02d_increase_use(dev);
-
-	if (lis3lv02d_joystick_enable())
-		printk(KERN_ERR DRIVER_NAME ": joystick initialization failed\n");
-
-	lis3lv02d_decrease_use(dev);
-	return 0;
-}
-
-static int lis3lv02d_dmi_matched(const struct dmi_system_id *dmi)
-{
-	adev.ac = *((struct axis_conversion *)dmi->driver_data);
-	printk(KERN_INFO DRIVER_NAME ": hardware type %s found.\n", dmi->ident);
-
-	return 1;
-}
-
-/* Represents, for each axis seen by userspace, the corresponding hw axis (+1).
- * If the value is negative, the opposite of the hw value is used. */
-static struct axis_conversion lis3lv02d_axis_normal = {1, 2, 3};
-static struct axis_conversion lis3lv02d_axis_y_inverted = {1, -2, 3};
-static struct axis_conversion lis3lv02d_axis_x_inverted = {-1, 2, 3};
-static struct axis_conversion lis3lv02d_axis_z_inverted = {1, 2, -3};
-static struct axis_conversion lis3lv02d_axis_xy_rotated_left = {-2, 1, 3};
-static struct axis_conversion lis3lv02d_axis_xy_swap_inverted = {-2, -1, 3};
-
-#define AXIS_DMI_MATCH(_ident, _name, _axis) {		\
-	.ident = _ident,				\
-	.callback = lis3lv02d_dmi_matched,		\
-	.matches = {					\
-		DMI_MATCH(DMI_PRODUCT_NAME, _name)	\
-	},						\
-	.driver_data = &lis3lv02d_axis_##_axis		\
-}
-static struct dmi_system_id lis3lv02d_dmi_ids[] = {
-	/* product names are truncated to match all kinds of a same model */
-	AXIS_DMI_MATCH("NC64x0", "HP Compaq nc64", x_inverted),
-	AXIS_DMI_MATCH("NC84x0", "HP Compaq nc84", z_inverted),
-	AXIS_DMI_MATCH("NX9420", "HP Compaq nx9420", x_inverted),
-	AXIS_DMI_MATCH("NW9440", "HP Compaq nw9440", x_inverted),
-	AXIS_DMI_MATCH("NC2510", "HP Compaq 2510", y_inverted),
-	AXIS_DMI_MATCH("NC8510", "HP Compaq 8510", xy_swap_inverted),
-	AXIS_DMI_MATCH("HP2133", "HP 2133", xy_rotated_left),
-	{ NULL, }
-/* Laptop models without axis info (yet):
- * "NC651xx" "HP Compaq 651"
- * "NC671xx" "HP Compaq 671"
- * "NC6910" "HP Compaq 6910"
- * HP Compaq 8710x Notebook PC / Mobile Workstation
- * "NC2400" "HP Compaq nc2400"
- * "NX74x0" "HP Compaq nx74"
- * "NX6325" "HP Compaq nx6325"
- * "NC4400" "HP Compaq nc4400"
- */
-};
-
-static int lis3lv02d_add(struct acpi_device *device)
-{
-	u8 val;
-
-	if (!device)
-		return -EINVAL;
-
-	adev.device = device;
-	strcpy(acpi_device_name(device), DRIVER_NAME);
-	strcpy(acpi_device_class(device), ACPI_MDPS_CLASS);
-	device->driver_data = &adev;
-
-	lis3lv02d_acpi_read(device->handle, WHO_AM_I, &val);
-	if ((val != LIS3LV02DL_ID) && (val != LIS302DL_ID)) {
-		printk(KERN_ERR DRIVER_NAME
-				": Accelerometer chip not LIS3LV02D{L,Q}\n");
-	}
-
-	/* If possible use a "standard" axes order */
-	if (dmi_check_system(lis3lv02d_dmi_ids) == 0) {
-		printk(KERN_INFO DRIVER_NAME ": laptop model unknown, "
-				 "using default axes configuration\n");
-		adev.ac = lis3lv02d_axis_normal;
-	}
-
-	return lis3lv02d_init_device(&adev);
-}
-
-static int lis3lv02d_remove(struct acpi_device *device, int type)
-{
-	if (!device)
-		return -EINVAL;
-
-	lis3lv02d_joystick_disable();
-	lis3lv02d_poweroff(device->handle);
-
-	return lis3lv02d_remove_fs();
-}
-
+EXPORT_SYMBOL_GPL(lis3lv02d_joystick_disable);
 
 /* Sysfs stuff */
+static ssize_t lis3lv02d_selftest_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	int result;
+	s16 values[3];
+
+	result = lis3lv02d_selftest(&lis3_dev, values);
+	return sprintf(buf, "%s %d %d %d\n", result == 0 ? "OK" : "FAIL",
+		values[0], values[1], values[2]);
+}
+
 static ssize_t lis3lv02d_position_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	int x, y, z;
 
-	lis3lv02d_increase_use(&adev);
-	lis3lv02d_get_xyz(adev.device->handle, &x, &y, &z);
-	lis3lv02d_decrease_use(&adev);
+	lis3lv02d_get_xyz(&lis3_dev, &x, &y, &z);
 	return sprintf(buf, "(%d,%d,%d)\n", x, y, z);
 }
 
-static ssize_t lis3lv02d_calibrate_show(struct device *dev,
-				struct device_attribute *attr, char *buf)
-{
-	return sprintf(buf, "(%d,%d,%d)\n", adev.xcalib, adev.ycalib, adev.zcalib);
-}
-
-static ssize_t lis3lv02d_calibrate_store(struct device *dev,
-				struct device_attribute *attr,
-				const char *buf, size_t count)
-{
-	lis3lv02d_increase_use(&adev);
-	lis3lv02d_calibrate_joystick();
-	lis3lv02d_decrease_use(&adev);
-	return count;
-}
-
-/* conversion btw sampling rate and the register values */
-static int lis3lv02dl_df_val[4] = {40, 160, 640, 2560};
 static ssize_t lis3lv02d_rate_show(struct device *dev,
 			struct device_attribute *attr, char *buf)
 {
-	u8 ctrl;
-	int val;
-
-	lis3lv02d_increase_use(&adev);
-	lis3lv02d_acpi_read(adev.device->handle, CTRL_REG1, &ctrl);
-	lis3lv02d_decrease_use(&adev);
-	val = (ctrl & (CTRL1_DF0 | CTRL1_DF1)) >> 4;
-	return sprintf(buf, "%d\n", lis3lv02dl_df_val[val]);
+	return sprintf(buf, "%d\n", lis3lv02d_get_odr());
 }
 
+static ssize_t lis3lv02d_rate_set(struct device *dev,
+				struct device_attribute *attr, const char *buf,
+				size_t count)
+{
+	unsigned long rate;
+
+	if (strict_strtoul(buf, 0, &rate))
+		return -EINVAL;
+
+	if (lis3lv02d_set_odr(rate))
+		return -EINVAL;
+
+	return count;
+}
+
+static DEVICE_ATTR(selftest, S_IRUSR, lis3lv02d_selftest_show, NULL);
 static DEVICE_ATTR(position, S_IRUGO, lis3lv02d_position_show, NULL);
-static DEVICE_ATTR(calibrate, S_IRUGO|S_IWUSR, lis3lv02d_calibrate_show,
-	lis3lv02d_calibrate_store);
-static DEVICE_ATTR(rate, S_IRUGO, lis3lv02d_rate_show, NULL);
+static DEVICE_ATTR(rate, S_IRUGO | S_IWUSR, lis3lv02d_rate_show,
+					    lis3lv02d_rate_set);
 
 static struct attribute *lis3lv02d_attributes[] = {
+	&dev_attr_selftest.attr,
 	&dev_attr_position.attr,
-	&dev_attr_calibrate.attr,
 	&dev_attr_rate.attr,
 	NULL
 };
@@ -523,59 +503,108 @@ static struct attribute_group lis3lv02d_attribute_group = {
 	.attrs = lis3lv02d_attributes
 };
 
-static int lis3lv02d_add_fs(struct acpi_device *device)
-{
-	adev.pdev = platform_device_register_simple(DRIVER_NAME, -1, NULL, 0);
-	if (IS_ERR(adev.pdev))
-		return PTR_ERR(adev.pdev);
 
-	return sysfs_create_group(&adev.pdev->dev.kobj, &lis3lv02d_attribute_group);
+static int lis3lv02d_add_fs(struct lis3lv02d *lis3)
+{
+	lis3->pdev = platform_device_register_simple(DRIVER_NAME, -1, NULL, 0);
+	if (IS_ERR(lis3->pdev))
+		return PTR_ERR(lis3->pdev);
+
+	return sysfs_create_group(&lis3->pdev->dev.kobj, &lis3lv02d_attribute_group);
 }
 
-static int lis3lv02d_remove_fs(void)
+int lis3lv02d_remove_fs(struct lis3lv02d *lis3)
 {
-	sysfs_remove_group(&adev.pdev->dev.kobj, &lis3lv02d_attribute_group);
-	platform_device_unregister(adev.pdev);
+	sysfs_remove_group(&lis3->pdev->dev.kobj, &lis3lv02d_attribute_group);
+	platform_device_unregister(lis3->pdev);
 	return 0;
 }
+EXPORT_SYMBOL_GPL(lis3lv02d_remove_fs);
 
-/* For the HP MDPS aka 3D Driveguard */
-static struct acpi_driver lis3lv02d_driver = {
-	.name  = DRIVER_NAME,
-	.class = ACPI_MDPS_CLASS,
-	.ids   = lis3lv02d_device_ids,
-	.ops = {
-		.add     = lis3lv02d_add,
-		.remove  = lis3lv02d_remove,
-		.suspend = lis3lv02d_suspend,
-		.resume  = lis3lv02d_resume,
+/*
+ * Initialise the accelerometer and the various subsystems.
+ * Should be rather independent of the bus system.
+ */
+int lis3lv02d_init_device(struct lis3lv02d *dev)
+{
+	dev->whoami = lis3lv02d_read_8(dev, WHO_AM_I);
+
+	switch (dev->whoami) {
+	case WAI_12B:
+		printk(KERN_INFO DRIVER_NAME ": 12 bits sensor found\n");
+		dev->read_data = lis3lv02d_read_12;
+		dev->mdps_max_val = 2048;
+		dev->pwron_delay = LIS3_PWRON_DELAY_WAI_12B;
+		dev->odrs = lis3_12_rates;
+		dev->odr_mask = CTRL1_DF0 | CTRL1_DF1;
+		dev->scale = LIS3_SENSITIVITY_12B;
+		break;
+	case WAI_8B:
+		printk(KERN_INFO DRIVER_NAME ": 8 bits sensor found\n");
+		dev->read_data = lis3lv02d_read_8;
+		dev->mdps_max_val = 128;
+		dev->pwron_delay = LIS3_PWRON_DELAY_WAI_8B;
+		dev->odrs = lis3_8_rates;
+		dev->odr_mask = CTRL1_DR;
+		dev->scale = LIS3_SENSITIVITY_8B;
+		break;
+	default:
+		printk(KERN_ERR DRIVER_NAME
+			": unknown sensor type 0x%X\n", dev->whoami);
+		return -EINVAL;
 	}
-};
 
-static int __init lis3lv02d_init_module(void)
-{
-	int ret;
+	mutex_init(&dev->mutex);
 
-	if (acpi_disabled)
-		return -ENODEV;
+	lis3lv02d_add_fs(dev);
+	lis3lv02d_poweron(dev);
 
-	ret = acpi_bus_register_driver(&lis3lv02d_driver);
-	if (ret < 0)
-		return ret;
+	if (lis3lv02d_joystick_enable())
+		printk(KERN_ERR DRIVER_NAME ": joystick initialization failed\n");
 
-	printk(KERN_INFO DRIVER_NAME " driver loaded.\n");
+	/* passing in platform specific data is purely optional and only
+	 * used by the SPI transport layer at the moment */
+	if (dev->pdata) {
+		struct lis3lv02d_platform_data *p = dev->pdata;
 
+		if (p->click_flags && (dev->whoami == WAI_8B)) {
+			dev->write(dev, CLICK_CFG, p->click_flags);
+			dev->write(dev, CLICK_TIMELIMIT, p->click_time_limit);
+			dev->write(dev, CLICK_LATENCY, p->click_latency);
+			dev->write(dev, CLICK_WINDOW, p->click_window);
+			dev->write(dev, CLICK_THSZ, p->click_thresh_z & 0xf);
+			dev->write(dev, CLICK_THSY_X,
+					(p->click_thresh_x & 0xf) |
+					(p->click_thresh_y << 4));
+		}
+
+		if (p->wakeup_flags && (dev->whoami == WAI_8B)) {
+			dev->write(dev, FF_WU_CFG_1, p->wakeup_flags);
+			dev->write(dev, FF_WU_THS_1, p->wakeup_thresh & 0x7f);
+			/* default to 2.5ms for now */
+			dev->write(dev, FF_WU_DURATION_1, 1);
+			/* enable high pass filter for both free-fall units */
+			dev->write(dev, CTRL_REG2, HP_FF_WU1 | HP_FF_WU2);
+		}
+
+		if (p->irq_cfg)
+			dev->write(dev, CTRL_REG3, p->irq_cfg);
+	}
+
+	/* bail if we did not get an IRQ from the bus layer */
+	if (!dev->irq) {
+		printk(KERN_ERR DRIVER_NAME
+			": No IRQ. Disabling /dev/freefall\n");
+		goto out;
+	}
+
+	if (misc_register(&lis3lv02d_misc_device))
+		printk(KERN_ERR DRIVER_NAME ": misc_register failed\n");
+out:
 	return 0;
 }
-
-static void __exit lis3lv02d_exit_module(void)
-{
-	acpi_bus_unregister_driver(&lis3lv02d_driver);
-}
+EXPORT_SYMBOL_GPL(lis3lv02d_init_device);
 
 MODULE_DESCRIPTION("ST LIS3LV02Dx three-axis digital accelerometer driver");
-MODULE_AUTHOR("Yan Burman and Eric Piel");
+MODULE_AUTHOR("Yan Burman, Eric Piel, Pavel Machek");
 MODULE_LICENSE("GPL");
-
-module_init(lis3lv02d_init_module);
-module_exit(lis3lv02d_exit_module);

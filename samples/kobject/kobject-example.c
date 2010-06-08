@@ -44,7 +44,7 @@ static struct kobj_attribute foo_attribute =
 	__ATTR(foo, 0666, foo_show, foo_store);
 
 /*
- * More complex function where we determine which varible is being accessed by
+ * More complex function where we determine which variable is being accessed by
  * looking at the attribute for the "baz" and "bar" files.
  */
 static ssize_t b_show(struct kobject *kobj, struct kobj_attribute *attr,
@@ -79,7 +79,7 @@ static struct kobj_attribute bar_attribute =
 
 
 /*
- * Create a group of attributes so that we can create and destory them all
+ * Create a group of attributes so that we can create and destroy them all
  * at once.
  */
 static struct attribute *attrs[] = {
@@ -101,7 +101,7 @@ static struct attribute_group attr_group = {
 
 static struct kobject *example_kobj;
 
-static int example_init(void)
+static int __init example_init(void)
 {
 	int retval;
 
@@ -126,7 +126,7 @@ static int example_init(void)
 	return retval;
 }
 
-static void example_exit(void)
+static void __exit example_exit(void)
 {
 	kobject_put(example_kobj);
 }

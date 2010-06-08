@@ -28,6 +28,7 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/gfp.h>
 #include <linux/err.h>
 #include <asm/atomic.h>
 #include <asm/uaccess.h>
@@ -373,6 +374,8 @@ static int convert_type86(struct zcrypt_device *zdev,
 			zdev->max_mod_size = PCICC_MAX_MOD_SIZE_OLD;
 			return -EAGAIN;
 		}
+		if (service_rc == 8 && service_rs == 72)
+			return -EINVAL;
 		zdev->online = 0;
 		return -EAGAIN;	/* repeat the request on a different device. */
 	}
@@ -447,19 +450,23 @@ static void zcrypt_pcicc_receive(struct ap_device *ap_dev,
 		.type = TYPE82_RSP_CODE,
 		.reply_code = REP82_ERROR_MACHINE_FAILURE,
 	};
-	struct type86_reply *t86r = reply->message;
+	struct type86_reply *t86r;
 	int length;
 
 	/* Copy the reply message to the request message buffer. */
-	if (IS_ERR(reply))
+	if (IS_ERR(reply)) {
 		memcpy(msg->message, &error_reply, sizeof(error_reply));
-	else if (t86r->hdr.type == TYPE86_RSP_CODE &&
+		goto out;
+	}
+	t86r = reply->message;
+	if (t86r->hdr.type == TYPE86_RSP_CODE &&
 		 t86r->cprb.cprb_ver_id == 0x01) {
 		length = sizeof(struct type86_reply) + t86r->length - 2;
 		length = min(PCICC_MAX_RESPONSE_SIZE, length);
 		memcpy(msg->message, reply->message, length);
 	} else
 		memcpy(msg->message, reply->message, sizeof error_reply);
+out:
 	complete((struct completion *) msg->private);
 }
 
@@ -479,6 +486,7 @@ static long zcrypt_pcicc_modexpo(struct zcrypt_device *zdev,
 	struct completion work;
 	int rc;
 
+	ap_init_message(&ap_msg);
 	ap_msg.message = (void *) get_zeroed_page(GFP_KERNEL);
 	if (!ap_msg.message)
 		return -ENOMEM;
@@ -517,6 +525,7 @@ static long zcrypt_pcicc_modexpo_crt(struct zcrypt_device *zdev,
 	struct completion work;
 	int rc;
 
+	ap_init_message(&ap_msg);
 	ap_msg.message = (void *) get_zeroed_page(GFP_KERNEL);
 	if (!ap_msg.message)
 		return -ENOMEM;

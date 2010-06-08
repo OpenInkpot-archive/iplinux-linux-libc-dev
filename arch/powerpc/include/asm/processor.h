@@ -69,8 +69,6 @@ extern int _prep_type;
 
 #ifdef __KERNEL__
 
-extern int have_of;
-
 struct task_struct;
 void start_thread(struct pt_regs *regs, unsigned long fdptr, unsigned long sp);
 void release_thread(struct task_struct *);
@@ -163,9 +161,41 @@ struct thread_struct {
 #ifdef CONFIG_PPC32
 	void		*pgdir;		/* root of page-table tree */
 #endif
-#if defined(CONFIG_4xx) || defined (CONFIG_BOOKE)
-	unsigned long	dbcr0;		/* debug control register values */
+#ifdef CONFIG_PPC_ADV_DEBUG_REGS
+	/*
+	 * The following help to manage the use of Debug Control Registers
+	 * om the BookE platforms.
+	 */
+	unsigned long	dbcr0;
 	unsigned long	dbcr1;
+#ifdef CONFIG_BOOKE
+	unsigned long	dbcr2;
+#endif
+	/*
+	 * The stored value of the DBSR register will be the value at the
+	 * last debug interrupt. This register can only be read from the
+	 * user (will never be written to) and has value while helping to
+	 * describe the reason for the last debug trap.  Torez
+	 */
+	unsigned long	dbsr;
+	/*
+	 * The following will contain addresses used by debug applications
+	 * to help trace and trap on particular address locations.
+	 * The bits in the Debug Control Registers above help define which
+	 * of the following registers will contain valid data and/or addresses.
+	 */
+	unsigned long	iac1;
+	unsigned long	iac2;
+#if CONFIG_PPC_ADV_DEBUG_IACS > 2
+	unsigned long	iac3;
+	unsigned long	iac4;
+#endif
+	unsigned long	dac1;
+	unsigned long	dac2;
+#if CONFIG_PPC_ADV_DEBUG_DVCS > 0
+	unsigned long	dvc1;
+	unsigned long	dvc2;
+#endif
 #endif
 	/* FP and VSX 0-31 register set */
 	double		fpr[32][TS_FPRWIDTH];
@@ -207,6 +237,11 @@ struct thread_struct {
 #define INIT_SP_LIMIT \
 	(_ALIGN_UP(sizeof(init_thread_info), 16) + (unsigned long) &init_stack)
 
+#ifdef CONFIG_SPE
+#define SPEFSCR_INIT .spefscr = SPEFSCR_FINVE | SPEFSCR_FDBZE | SPEFSCR_FUNFE | SPEFSCR_FOVFE,
+#else
+#define SPEFSCR_INIT
+#endif
 
 #ifdef CONFIG_PPC32
 #define INIT_THREAD { \
@@ -215,6 +250,7 @@ struct thread_struct {
 	.fs = KERNEL_DS, \
 	.pgdir = swapper_pg_dir, \
 	.fpexc_mode = MSR_FE0 | MSR_FE1, \
+	SPEFSCR_INIT \
 }
 #else
 #define INIT_THREAD  { \
@@ -307,6 +343,25 @@ static inline void prefetchw(const void *x)
 
 #ifdef CONFIG_PPC64
 #define HAVE_ARCH_PICK_MMAP_LAYOUT
+#endif
+
+#ifdef CONFIG_PPC64
+static inline unsigned long get_clean_sp(struct pt_regs *regs, int is_32)
+{
+	unsigned long sp;
+
+	if (is_32)
+		sp = regs->gpr[1] & 0x0ffffffffUL;
+	else
+		sp = regs->gpr[1];
+
+	return sp;
+}
+#else
+static inline unsigned long get_clean_sp(struct pt_regs *regs, int is_32)
+{
+	return regs->gpr[1];
+}
 #endif
 
 #endif /* __KERNEL__ */

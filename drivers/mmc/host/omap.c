@@ -26,16 +26,17 @@
 #include <linux/clk.h>
 #include <linux/scatterlist.h>
 #include <linux/i2c/tps65010.h>
+#include <linux/slab.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
 
-#include <mach/board.h>
-#include <mach/mmc.h>
+#include <plat/board.h>
+#include <plat/mmc.h>
 #include <mach/gpio.h>
-#include <mach/dma.h>
-#include <mach/mux.h>
-#include <mach/fpga.h>
+#include <plat/dma.h>
+#include <plat/mux.h>
+#include <plat/fpga.h>
 
 #define	OMAP_MMC_REG_CMD	0x00
 #define	OMAP_MMC_REG_ARGL	0x04
@@ -156,8 +157,6 @@ struct mmc_omap_host {
 	spinlock_t		dma_lock;
 	struct timer_list	dma_timer;
 	unsigned		dma_len;
-
-	short			power_pin;
 
 	struct mmc_omap_slot    *slots[OMAP_MMC_MAX_SLOTS];
 	struct mmc_omap_slot    *current_slot;
@@ -824,7 +823,7 @@ static irqreturn_t mmc_omap_irq(int irq, void *dev_id)
 		del_timer(&host->cmd_abort_timer);
 		host->abort = 1;
 		OMAP_MMC_WRITE(host, IE, 0);
-		disable_irq(host->irq);
+		disable_irq_nosync(host->irq);
 		schedule_work(&host->cmd_abort_work);
 		return IRQ_HANDLED;
 	}
@@ -1015,7 +1014,7 @@ static int mmc_omap_get_dma_channel(struct mmc_omap_host *host, struct mmc_data 
 	}
 
 	if (is_read) {
-		if (host->id == 1) {
+		if (host->id == 0) {
 			sync_dev = OMAP_DMA_MMC_RX;
 			dma_dev_name = "MMC1 read";
 		} else {
@@ -1023,7 +1022,7 @@ static int mmc_omap_get_dma_channel(struct mmc_omap_host *host, struct mmc_data 
 			dma_dev_name = "MMC2 read";
 		}
 	} else {
-		if (host->id == 1) {
+		if (host->id == 0) {
 			sync_dev = OMAP_DMA_MMC_TX;
 			dma_dev_name = "MMC1 write";
 		} else {
@@ -1317,7 +1316,7 @@ static int __init mmc_omap_new_slot(struct mmc_omap_host *host, int id)
 	host->slots[id] = slot;
 
 	mmc->caps = 0;
-	if (host->pdata->conf.wire4)
+	if (host->pdata->slots[id].wires >= 4)
 		mmc->caps |= MMC_CAP_4_BIT_DATA;
 
 	mmc->ops = &mmc_omap_ops;
@@ -1451,6 +1450,7 @@ static int __init mmc_omap_probe(struct platform_device *pdev)
 	host->irq = irq;
 
 	host->use_dma = 1;
+	host->dev->dma_mask = &pdata->dma_mask;
 	host->dma_ch = -1;
 
 	host->irq = irq;
@@ -1459,18 +1459,14 @@ static int __init mmc_omap_probe(struct platform_device *pdev)
 	if (!host->virt_base)
 		goto err_ioremap;
 
-	if (cpu_is_omap24xx()) {
-		host->iclk = clk_get(&pdev->dev, "mmc_ick");
-		if (IS_ERR(host->iclk))
-			goto err_free_mmc_host;
-		clk_enable(host->iclk);
+	host->iclk = clk_get(&pdev->dev, "ick");
+	if (IS_ERR(host->iclk)) {
+		ret = PTR_ERR(host->iclk);
+		goto err_free_mmc_host;
 	}
+	clk_enable(host->iclk);
 
-	if (!cpu_is_omap24xx())
-		host->fclk = clk_get(&pdev->dev, "mmc_ck");
-	else
-		host->fclk = clk_get(&pdev->dev, "mmc_fck");
-
+	host->fclk = clk_get(&pdev->dev, "fck");
 	if (IS_ERR(host->fclk)) {
 		ret = PTR_ERR(host->fclk);
 		goto err_free_iclk;
@@ -1507,10 +1503,8 @@ err_free_irq:
 err_free_fclk:
 	clk_put(host->fclk);
 err_free_iclk:
-	if (host->iclk != NULL) {
-		clk_disable(host->iclk);
-		clk_put(host->iclk);
-	}
+	clk_disable(host->iclk);
+	clk_put(host->iclk);
 err_free_mmc_host:
 	iounmap(host->virt_base);
 err_ioremap:
@@ -1535,10 +1529,11 @@ static int mmc_omap_remove(struct platform_device *pdev)
 	if (host->pdata->cleanup)
 		host->pdata->cleanup(&pdev->dev);
 
-	if (host->iclk && !IS_ERR(host->iclk))
-		clk_put(host->iclk);
-	if (host->fclk && !IS_ERR(host->fclk))
-		clk_put(host->fclk);
+	mmc_omap_fclk_enable(host, 0);
+	free_irq(host->irq, host);
+	clk_put(host->fclk);
+	clk_disable(host->iclk);
+	clk_put(host->iclk);
 
 	iounmap(host->virt_base);
 	release_mem_region(pdev->resource[0].start,
@@ -1600,7 +1595,6 @@ static int mmc_omap_resume(struct platform_device *pdev)
 #endif
 
 static struct platform_driver mmc_omap_driver = {
-	.probe		= mmc_omap_probe,
 	.remove		= mmc_omap_remove,
 	.suspend	= mmc_omap_suspend,
 	.resume		= mmc_omap_resume,
@@ -1612,7 +1606,7 @@ static struct platform_driver mmc_omap_driver = {
 
 static int __init mmc_omap_init(void)
 {
-	return platform_driver_register(&mmc_omap_driver);
+	return platform_driver_probe(&mmc_omap_driver, mmc_omap_probe);
 }
 
 static void __exit mmc_omap_exit(void)

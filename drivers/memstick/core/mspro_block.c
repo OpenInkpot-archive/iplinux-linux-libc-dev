@@ -17,6 +17,7 @@
 #include <linux/hdreg.h>
 #include <linux/kthread.h>
 #include <linux/delay.h>
+#include <linux/slab.h>
 #include <linux/memstick.h>
 
 #define DRIVER_NAME "mspro_block"
@@ -52,14 +53,14 @@ struct mspro_sys_attr {
 };
 
 struct mspro_attr_entry {
-	unsigned int  address;
-	unsigned int  size;
+	__be32 address;
+	__be32 size;
 	unsigned char id;
 	unsigned char reserved[3];
 } __attribute__((packed));
 
 struct mspro_attribute {
-	unsigned short          signature;
+	__be16 signature;
 	unsigned short          version;
 	unsigned char           count;
 	unsigned char           reserved[11];
@@ -69,28 +70,28 @@ struct mspro_attribute {
 struct mspro_sys_info {
 	unsigned char  class;
 	unsigned char  reserved0;
-	unsigned short block_size;
-	unsigned short block_count;
-	unsigned short user_block_count;
-	unsigned short page_size;
+	__be16 block_size;
+	__be16 block_count;
+	__be16 user_block_count;
+	__be16 page_size;
 	unsigned char  reserved1[2];
 	unsigned char  assembly_date[8];
-	unsigned int   serial_number;
+	__be32 serial_number;
 	unsigned char  assembly_maker_code;
 	unsigned char  assembly_model_code[3];
-	unsigned short memory_maker_code;
-	unsigned short memory_model_code;
+	__be16 memory_maker_code;
+	__be16 memory_model_code;
 	unsigned char  reserved2[4];
 	unsigned char  vcc;
 	unsigned char  vpp;
-	unsigned short controller_number;
-	unsigned short controller_function;
-	unsigned short start_sector;
-	unsigned short unit_size;
+	__be16 controller_number;
+	__be16 controller_function;
+	__be16 start_sector;
+	__be16 unit_size;
 	unsigned char  ms_sub_class;
 	unsigned char  reserved3[4];
 	unsigned char  interface_type;
-	unsigned short controller_code;
+	__be16 controller_code;
 	unsigned char  format_type;
 	unsigned char  reserved4;
 	unsigned char  device_type;
@@ -124,11 +125,11 @@ struct mspro_specfile {
 } __attribute__((packed));
 
 struct mspro_devinfo {
-	unsigned short cylinders;
-	unsigned short heads;
-	unsigned short bytes_per_track;
-	unsigned short bytes_per_sector;
-	unsigned short sectors_per_track;
+	__be16 cylinders;
+	__be16 heads;
+	__be16 bytes_per_track;
+	__be16 bytes_per_sector;
+	__be16 sectors_per_track;
 	unsigned char  reserved[6];
 } __attribute__((packed));
 
@@ -235,7 +236,7 @@ static int mspro_block_bd_getgeo(struct block_device *bdev,
 	return 0;
 }
 
-static struct block_device_operations ms_block_bdops = {
+static const struct block_device_operations ms_block_bdops = {
 	.open    = mspro_block_bd_open,
 	.release = mspro_block_bd_release,
 	.getgeo  = mspro_block_bd_getgeo,
@@ -338,8 +339,7 @@ static ssize_t mspro_block_attr_show_sysinfo(struct device *dev,
 	rc += scnprintf(buffer + rc, PAGE_SIZE - rc, "assembly date: "
 			"GMT%+d:%d %04u-%02u-%02u %02u:%02u:%02u\n",
 			date_tz, date_tz_f,
-			be16_to_cpu(*(unsigned short *)
-				    &x_sys->assembly_date[1]),
+			be16_to_cpup((__be16 *)&x_sys->assembly_date[1]),
 			x_sys->assembly_date[3], x_sys->assembly_date[4],
 			x_sys->assembly_date[5], x_sys->assembly_date[6],
 			x_sys->assembly_date[7]);
@@ -673,15 +673,14 @@ try_again:
 					       msb->req_sg);
 
 		if (!msb->seg_count) {
-			chunk = __blk_end_request(msb->block_req, -ENOMEM,
-					blk_rq_cur_bytes(msb->block_req));
+			chunk = __blk_end_request_cur(msb->block_req, -ENOMEM);
 			continue;
 		}
 
-		t_sec = msb->block_req->sector << 9;
+		t_sec = blk_rq_pos(msb->block_req) << 9;
 		sector_div(t_sec, msb->page_size);
 
-		count = msb->block_req->nr_sectors << 9;
+		count = blk_rq_bytes(msb->block_req);
 		count /= msb->page_size;
 
 		param.system = msb->system;
@@ -706,8 +705,8 @@ try_again:
 		return 0;
 	}
 
-	dev_dbg(&card->dev, "elv_next\n");
-	msb->block_req = elv_next_request(msb->queue);
+	dev_dbg(&card->dev, "blk_fetch\n");
+	msb->block_req = blk_fetch_request(msb->queue);
 	if (!msb->block_req) {
 		dev_dbg(&card->dev, "issue end\n");
 		return -EAGAIN;
@@ -746,7 +745,7 @@ static int mspro_block_complete_req(struct memstick_dev *card, int error)
 					t_len *= msb->page_size;
 			}
 		} else
-			t_len = msb->block_req->nr_sectors << 9;
+			t_len = blk_rq_bytes(msb->block_req);
 
 		dev_dbg(&card->dev, "transferred %x (%d)\n", t_len, error);
 
@@ -826,8 +825,8 @@ static void mspro_block_submit_req(struct request_queue *q)
 		return;
 
 	if (msb->eject) {
-		while ((req = elv_next_request(q)) != NULL)
-			__blk_end_request(req, -ENODEV, blk_rq_bytes(req));
+		while ((req = blk_fetch_request(q)) != NULL)
+			__blk_end_request_all(req, -ENODEV);
 
 		return;
 	}
@@ -887,14 +886,14 @@ try_again:
 	if (rc) {
 		printk(KERN_WARNING
 		       "%s: could not switch to 4-bit mode, error %d\n",
-		       card->dev.bus_id, rc);
+		       dev_name(&card->dev), rc);
 		return 0;
 	}
 
 	msb->system = MEMSTICK_SYS_PAR4;
 	host->set_param(host, MEMSTICK_INTERFACE, MEMSTICK_PAR4);
 	printk(KERN_INFO "%s: switching to 4-bit parallel mode\n",
-	       card->dev.bus_id);
+	       dev_name(&card->dev));
 
 	if (msb->caps & MEMSTICK_CAP_PAR8) {
 		rc = mspro_block_set_interface(card, MEMSTICK_SYS_PAR8);
@@ -905,11 +904,11 @@ try_again:
 					MEMSTICK_PAR8);
 			printk(KERN_INFO
 			       "%s: switching to 8-bit parallel mode\n",
-			       card->dev.bus_id);
+			       dev_name(&card->dev));
 		} else
 			printk(KERN_WARNING
 			       "%s: could not switch to 8-bit mode, error %d\n",
-			       card->dev.bus_id, rc);
+			       dev_name(&card->dev), rc);
 	}
 
 	card->next_request = h_mspro_block_req_init;
@@ -922,7 +921,7 @@ try_again:
 	if (rc) {
 		printk(KERN_WARNING
 		       "%s: interface error, trying to fall back to serial\n",
-		       card->dev.bus_id);
+		       dev_name(&card->dev));
 		msb->system = MEMSTICK_SYS_SERIAL;
 		host->set_param(host, MEMSTICK_POWER, MEMSTICK_POWER_OFF);
 		msleep(10);
@@ -992,14 +991,14 @@ static int mspro_block_read_attributes(struct memstick_dev *card)
 
 	if (be16_to_cpu(attr->signature) != MSPRO_BLOCK_SIGNATURE) {
 		printk(KERN_ERR "%s: unrecognized device signature %x\n",
-		       card->dev.bus_id, be16_to_cpu(attr->signature));
+		       dev_name(&card->dev), be16_to_cpu(attr->signature));
 		rc = -ENODEV;
 		goto out_free_attr;
 	}
 
 	if (attr->count > MSPRO_BLOCK_MAX_ATTRIBUTES) {
 		printk(KERN_WARNING "%s: way too many attribute entries\n",
-		       card->dev.bus_id);
+		       dev_name(&card->dev));
 		attr_count = MSPRO_BLOCK_MAX_ATTRIBUTES;
 	} else
 		attr_count = attr->count;
@@ -1228,9 +1227,8 @@ static int mspro_block_init_disk(struct memstick_dev *card)
 	blk_queue_prep_rq(msb->queue, mspro_block_prepare_req);
 
 	blk_queue_bounce_limit(msb->queue, limit);
-	blk_queue_max_sectors(msb->queue, MSPRO_BLOCK_MAX_PAGES);
-	blk_queue_max_phys_segments(msb->queue, MSPRO_BLOCK_MAX_SEGS);
-	blk_queue_max_hw_segments(msb->queue, MSPRO_BLOCK_MAX_SEGS);
+	blk_queue_max_hw_sectors(msb->queue, MSPRO_BLOCK_MAX_PAGES);
+	blk_queue_max_segments(msb->queue, MSPRO_BLOCK_MAX_SEGS);
 	blk_queue_max_segment_size(msb->queue,
 				   MSPRO_BLOCK_MAX_PAGES * msb->page_size);
 
@@ -1244,7 +1242,7 @@ static int mspro_block_init_disk(struct memstick_dev *card)
 
 	sprintf(msb->disk->disk_name, "mspblk%d", disk_id);
 
-	blk_queue_hardsect_size(msb->queue, msb->page_size);
+	blk_queue_logical_block_size(msb->queue, msb->page_size);
 
 	capacity = be16_to_cpu(sys_info->user_block_count);
 	capacity *= be16_to_cpu(sys_info->block_size);

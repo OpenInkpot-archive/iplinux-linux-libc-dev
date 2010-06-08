@@ -11,6 +11,7 @@
 #include <linux/mm.h>
 #include <linux/pagemap.h>
 #include <linux/statfs.h>
+#include <linux/slab.h>
 #include <linux/seq_file.h>
 #include <linux/mount.h>
 #include "hostfs.h"
@@ -31,12 +32,12 @@ static inline struct hostfs_inode_info *HOSTFS_I(struct inode *inode)
 
 #define FILE_HOSTFS_I(file) HOSTFS_I((file)->f_path.dentry->d_inode)
 
-int hostfs_d_delete(struct dentry *dentry)
+static int hostfs_d_delete(struct dentry *dentry)
 {
 	return 1;
 }
 
-struct dentry_operations hostfs_dentry_ops = {
+static const struct dentry_operations hostfs_dentry_ops = {
 	.d_delete		= hostfs_d_delete,
 };
 
@@ -501,7 +502,7 @@ int hostfs_write_begin(struct file *file, struct address_space *mapping,
 {
 	pgoff_t index = pos >> PAGE_CACHE_SHIFT;
 
-	*pagep = __grab_cache_page(mapping, index);
+	*pagep = grab_cache_page_write_begin(mapping, index, flags);
 	if (!*pagep)
 		return -ENOMEM;
 	return 0;
@@ -972,6 +973,7 @@ static int hostfs_fill_sb_common(struct super_block *sb, void *d, int silent)
 	sb->s_blocksize_bits = 10;
 	sb->s_magic = HOSTFS_SUPER_MAGIC;
 	sb->s_op = &hostfs_sbops;
+	sb->s_maxbytes = MAX_LFS_FILESIZE;
 
 	/* NULL is printed as <NULL> by sprintf: avoid that. */
 	if (req_root == NULL)

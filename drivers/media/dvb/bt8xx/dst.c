@@ -917,9 +917,7 @@ static int dst_get_mac(struct dst_state *state)
 	}
 	memset(&state->mac_address, '\0', 8);
 	memcpy(&state->mac_address, &state->rxbuffer, 6);
-	dprintk(verbose, DST_ERROR, 1, "MAC Address=[%02x:%02x:%02x:%02x:%02x:%02x]",
-		state->mac_address[0], state->mac_address[1], state->mac_address[2],
-		state->mac_address[4], state->mac_address[5], state->mac_address[6]);
+	dprintk(verbose, DST_ERROR, 1, "MAC Address=[%pM]", state->mac_address);
 
 	return 0;
 }
@@ -1061,7 +1059,7 @@ static int dst_get_tuner_info(struct dst_state *state)
 		dprintk(verbose, DST_ERROR, 1, "DST type has TS=188");
 	}
 	if (state->board_info[0] == 0xbc) {
-		if (state->type_flags != DST_TYPE_IS_ATSC)
+		if (state->dst_type != DST_TYPE_IS_ATSC)
 			state->type_flags |= DST_TYPE_HAS_TS188;
 		else
 			state->type_flags |= DST_TYPE_HAS_NEWTUNE_2;
@@ -1354,8 +1352,7 @@ static int dst_get_tuna(struct dst_state *state)
 		return retval;
 	}
 	if ((state->type_flags & DST_TYPE_HAS_VLF) &&
-		!(state->dst_type == DST_TYPE_IS_CABLE) &&
-		!(state->dst_type == DST_TYPE_IS_ATSC)) {
+	   !(state->dst_type == DST_TYPE_IS_ATSC)) {
 
 		if (state->rx_tuna[9] != dst_check_sum(&state->rx_tuna[0], 9)) {
 			dprintk(verbose, DST_INFO, 1, "checksum failure ? ");
@@ -1685,7 +1682,7 @@ static int dst_tune_frontend(struct dvb_frontend* fe,
 
 static int dst_get_tuning_algo(struct dvb_frontend *fe)
 {
-	return dst_algo;
+	return dst_algo ? DVBFE_ALGO_HW : DVBFE_ALGO_SW;
 }
 
 static int dst_get_frontend(struct dvb_frontend *fe, struct dvb_frontend_parameters *p)
@@ -1822,8 +1819,13 @@ static struct dvb_frontend_ops dst_dvbc_ops = {
 		.frequency_max = 858000000,
 		.symbol_rate_min = 1000000,
 		.symbol_rate_max = 45000000,
-	/*     . symbol_rate_tolerance	=	???,*/
-		.caps = FE_CAN_FEC_AUTO | FE_CAN_QAM_AUTO
+		.caps = FE_CAN_FEC_AUTO |
+			FE_CAN_QAM_AUTO |
+			FE_CAN_QAM_16	|
+			FE_CAN_QAM_32	|
+			FE_CAN_QAM_64	|
+			FE_CAN_QAM_128	|
+			FE_CAN_QAM_256
 	},
 
 	.release = dst_release,

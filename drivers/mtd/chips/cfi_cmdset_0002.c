@@ -71,8 +71,8 @@ static int get_chip(struct map_info *map, struct flchip *chip, unsigned long adr
 static void put_chip(struct map_info *map, struct flchip *chip, unsigned long adr);
 #include "fwh_lock.h"
 
-static int cfi_atmel_lock(struct mtd_info *mtd, loff_t ofs, size_t len);
-static int cfi_atmel_unlock(struct mtd_info *mtd, loff_t ofs, size_t len);
+static int cfi_atmel_lock(struct mtd_info *mtd, loff_t ofs, uint64_t len);
+static int cfi_atmel_unlock(struct mtd_info *mtd, loff_t ofs, uint64_t len);
 
 static struct mtd_chip_driver cfi_amdstd_chipdrv = {
 	.probe		= NULL, /* Not usable directly */
@@ -322,6 +322,14 @@ static struct cfi_fixup fixup_table[] = {
 };
 
 
+static void cfi_fixup_major_minor(struct cfi_private *cfi,
+				  struct cfi_pri_amdstd *extp)
+{
+	if (cfi->mfr == CFI_MFR_SAMSUNG && cfi->id == 0x257e &&
+	    extp->MajorVersion == '0')
+		extp->MajorVersion = '1';
+}
+
 struct mtd_info *cfi_cmdset_0002(struct map_info *map, int primary)
 {
 	struct cfi_private *cfi = map->fldrv_priv;
@@ -362,6 +370,8 @@ struct mtd_info *cfi_cmdset_0002(struct map_info *map, int primary)
 			kfree(mtd);
 			return NULL;
 		}
+
+		cfi_fixup_major_minor(cfi, extp);
 
 		if (extp->MajorVersion != '1' ||
 		    (extp->MinorVersion < '0' || extp->MinorVersion > '4')) {
@@ -480,10 +490,6 @@ static struct mtd_info *cfi_amdstd_setup(struct mtd_info *mtd)
 	}
 #endif
 
-	/* FIXME: erase-suspend-program is broken.  See
-	   http://lists.infradead.org/pipermail/linux-mtd/2003-December/009001.html */
-	printk(KERN_NOTICE "cfi_cmdset_0002: Disabling erase-suspend-program due to code brokenness.\n");
-
 	__module_get(THIS_MODULE);
 	return mtd;
 
@@ -563,7 +569,6 @@ static int get_chip(struct map_info *map, struct flchip *chip, unsigned long adr
 
 			if (time_after(jiffies, timeo)) {
 				printk(KERN_ERR "Waiting for chip to be ready timed out.\n");
-				spin_unlock(chip->mutex);
 				return -EIO;
 			}
 			spin_unlock(chip->mutex);
@@ -579,15 +584,9 @@ static int get_chip(struct map_info *map, struct flchip *chip, unsigned long adr
 		return 0;
 
 	case FL_ERASING:
-		if (mode == FL_WRITING) /* FIXME: Erase-suspend-program appears broken. */
-			goto sleep;
-
-		if (!(   mode == FL_READY
-		      || mode == FL_POINT
-		      || !cfip
-		      || (mode == FL_WRITING && (cfip->EraseSuspend & 0x2))
-		      || (mode == FL_WRITING && (cfip->EraseSuspend & 0x1)
-		    )))
+		if (!cfip || !(cfip->EraseSuspend & (0x1|0x2)) ||
+		    !(mode == FL_READY || mode == FL_POINT ||
+		    (mode == FL_WRITING && (cfip->EraseSuspend & 0x2))))
 			goto sleep;
 
 		/* We could check to see if we're trying to access the sector
@@ -1774,12 +1773,12 @@ out_unlock:
 	return ret;
 }
 
-static int cfi_atmel_lock(struct mtd_info *mtd, loff_t ofs, size_t len)
+static int cfi_atmel_lock(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 {
 	return cfi_varsize_frob(mtd, do_atmel_lock, ofs, len, NULL);
 }
 
-static int cfi_atmel_unlock(struct mtd_info *mtd, loff_t ofs, size_t len)
+static int cfi_atmel_unlock(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 {
 	return cfi_varsize_frob(mtd, do_atmel_unlock, ofs, len, NULL);
 }

@@ -25,28 +25,22 @@
 #ifdef CONFIG_CRYPTO_FIPS
 static struct ctl_table crypto_sysctl_table[] = {
 	{
-		.ctl_name       = CTL_UNNUMBERED,
 		.procname       = "fips_enabled",
 		.data           = &fips_enabled,
 		.maxlen         = sizeof(int),
 		.mode           = 0444,
-		.proc_handler   = &proc_dointvec
+		.proc_handler   = proc_dointvec
 	},
-	{
-		.ctl_name = 0,
-	},
+	{}
 };
 
 static struct ctl_table crypto_dir_table[] = {
 	{
-		.ctl_name       = CTL_UNNUMBERED,
 		.procname       = "crypto",
 		.mode           = 0555,
 		.child          = crypto_sysctl_table
 	},
-	{
-		.ctl_name = 0,
-	},
+	{}
 };
 
 static struct ctl_table_header *crypto_sysctls;
@@ -94,6 +88,17 @@ static int c_show(struct seq_file *m, void *p)
 	seq_printf(m, "selftest     : %s\n",
 		   (alg->cra_flags & CRYPTO_ALG_TESTED) ?
 		   "passed" : "unknown");
+
+	if (alg->cra_flags & CRYPTO_ALG_LARVAL) {
+		seq_printf(m, "type         : larval\n");
+		seq_printf(m, "flags        : 0x%x\n", alg->cra_flags);
+		goto out;
+	}
+
+	if (alg->cra_type && alg->cra_type->show) {
+		alg->cra_type->show(m, alg);
+		goto out;
+	}
 	
 	switch (alg->cra_flags & (CRYPTO_ALG_TYPE_MASK | CRYPTO_ALG_LARVAL)) {
 	case CRYPTO_ALG_TYPE_CIPHER:
@@ -104,27 +109,15 @@ static int c_show(struct seq_file *m, void *p)
 		seq_printf(m, "max keysize  : %u\n",
 					alg->cra_cipher.cia_max_keysize);
 		break;
-		
-	case CRYPTO_ALG_TYPE_DIGEST:
-		seq_printf(m, "type         : digest\n");
-		seq_printf(m, "blocksize    : %u\n", alg->cra_blocksize);
-		seq_printf(m, "digestsize   : %u\n",
-		           alg->cra_digest.dia_digestsize);
-		break;
 	case CRYPTO_ALG_TYPE_COMPRESS:
 		seq_printf(m, "type         : compression\n");
 		break;
 	default:
-		if (alg->cra_flags & CRYPTO_ALG_LARVAL) {
-			seq_printf(m, "type         : larval\n");
-			seq_printf(m, "flags        : 0x%x\n", alg->cra_flags);
-		} else if (alg->cra_type && alg->cra_type->show)
-			alg->cra_type->show(m, alg);
-		else
-			seq_printf(m, "type         : unknown\n");
+		seq_printf(m, "type         : unknown\n");
 		break;
 	}
 
+out:
 	seq_putc(m, '\n');
 	return 0;
 }

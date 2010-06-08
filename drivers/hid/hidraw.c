@@ -28,8 +28,10 @@
 #include <linux/poll.h>
 #include <linux/device.h>
 #include <linux/major.h>
+#include <linux/slab.h>
 #include <linux/hid.h>
 #include <linux/mutex.h>
+#include <linux/sched.h>
 #include <linux/smp_lock.h>
 
 #include <linux/hidraw.h>
@@ -47,10 +49,9 @@ static ssize_t hidraw_read(struct file *file, char __user *buffer, size_t count,
 	char *report;
 	DECLARE_WAITQUEUE(wait, current);
 
+	mutex_lock(&list->read_mutex);
+
 	while (ret == 0) {
-
-		mutex_lock(&list->read_mutex);
-
 		if (list->head == list->tail) {
 			add_wait_queue(&list->hidraw->wait, &wait);
 			set_current_state(TASK_INTERRUPTIBLE);
@@ -134,7 +135,7 @@ static ssize_t hidraw_write(struct file *file, const char __user *buffer, size_t
 		goto out;
 	}
 
-	ret = dev->hid_output_raw_report(dev, buf, count);
+	ret = dev->hid_output_raw_report(dev, buf, count, HID_OUTPUT_REPORT);
 out:
 	kfree(buf);
 	return ret;
@@ -181,9 +182,17 @@ static int hidraw_open(struct inode *inode, struct file *file)
 
 	dev = hidraw_table[minor];
 	if (!dev->open++) {
+		if (dev->hid->ll_driver->power) {
+			err = dev->hid->ll_driver->power(dev->hid, PM_HINT_FULLON);
+			if (err < 0)
+				goto out_unlock;
+		}
 		err = dev->hid->ll_driver->open(dev->hid);
-		if (err < 0)
+		if (err < 0) {
+			if (dev->hid->ll_driver->power)
+				dev->hid->ll_driver->power(dev->hid, PM_HINT_NORMAL);
 			dev->open--;
+		}
 	}
 
 out_unlock:
@@ -208,11 +217,14 @@ static int hidraw_release(struct inode * inode, struct file * file)
 
 	list_del(&list->node);
 	dev = hidraw_table[minor];
-	if (!dev->open--) {
-		if (list->hidraw->exist)
+	if (!--dev->open) {
+		if (list->hidraw->exist) {
+			if (dev->hid->ll_driver->power)
+				dev->hid->ll_driver->power(dev->hid, PM_HINT_NORMAL);
 			dev->hid->ll_driver->close(dev->hid);
-		else
+		} else {
 			kfree(list->hidraw);
+		}
 	}
 
 	kfree(list);
@@ -265,7 +277,43 @@ static long hidraw_ioctl(struct file *file, unsigned int cmd,
 				break;
 			}
 		default:
-			ret = -ENOTTY;
+			{
+				struct hid_device *hid = dev->hid;
+				if (_IOC_TYPE(cmd) != 'H' || _IOC_DIR(cmd) != _IOC_READ) {
+					ret = -EINVAL;
+					break;
+				}
+
+				if (_IOC_NR(cmd) == _IOC_NR(HIDIOCGRAWNAME(0))) {
+					int len;
+					if (!hid->name) {
+						ret = 0;
+						break;
+					}
+					len = strlen(hid->name) + 1;
+					if (len > _IOC_SIZE(cmd))
+						len = _IOC_SIZE(cmd);
+					ret = copy_to_user(user_arg, hid->name, len) ?
+						-EFAULT : len;
+					break;
+				}
+
+				if (_IOC_NR(cmd) == _IOC_NR(HIDIOCGRAWPHYS(0))) {
+					int len;
+					if (!hid->phys) {
+						ret = 0;
+						break;
+					}
+					len = strlen(hid->phys) + 1;
+					if (len > _IOC_SIZE(cmd))
+						len = _IOC_SIZE(cmd);
+					ret = copy_to_user(user_arg, hid->phys, len) ?
+						-EFAULT : len;
+					break;
+				}
+                }
+
+		ret = -ENOTTY;
 	}
 	unlock_kernel();
 	return ret;
@@ -302,10 +350,7 @@ int hidraw_connect(struct hid_device *hid)
 	int minor, result;
 	struct hidraw *dev;
 
-	/* TODO currently we accept any HID device. This should later
-	 * probably be fixed to accept only those devices which provide
-	 * non-input applications
-	 */
+	/* we accept any HID device, no matter the applications */
 
 	dev = kzalloc(sizeof(struct hidraw), GFP_KERNEL);
 	if (!dev)
@@ -329,7 +374,7 @@ int hidraw_connect(struct hid_device *hid)
 		goto out;
 	}
 
-	dev->dev = device_create(hidraw_class, NULL, MKDEV(hidraw_major, minor),
+	dev->dev = device_create(hidraw_class, &hid->dev, MKDEV(hidraw_major, minor),
 				 NULL, "%s%d", "hidraw", minor);
 
 	if (IS_ERR(dev->dev)) {

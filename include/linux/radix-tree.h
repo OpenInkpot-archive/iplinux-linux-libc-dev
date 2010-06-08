@@ -121,6 +121,13 @@ do {									\
  * (Note, rcu_assign_pointer and rcu_dereference are not needed to control
  * access to data items when inserting into or looking up from the radix tree)
  *
+ * Note that the value returned by radix_tree_tag_get() may not be relied upon
+ * if only the RCU read lock is held.  Functions to set/clear tags and to
+ * delete nodes running concurrently with it may affect its result such that
+ * two consecutive reads in the same locked section may return different
+ * values.  If reliability is required, modification functions must also be
+ * excluded from concurrency.
+ *
  * radix_tree_tagged is able to be called without locking or RCU.
  */
 
@@ -136,7 +143,7 @@ do {									\
  */
 static inline void *radix_tree_deref_slot(void **pslot)
 {
-	void *ret = *pslot;
+	void *ret = rcu_dereference(*pslot);
 	if (unlikely(radix_tree_is_indirect_ptr(ret)))
 		ret = RADIX_TREE_RETRY;
 	return ret;
@@ -166,6 +173,8 @@ unsigned int
 radix_tree_gang_lookup_slot(struct radix_tree_root *root, void ***results,
 			unsigned long first_index, unsigned int max_items);
 unsigned long radix_tree_next_hole(struct radix_tree_root *root,
+				unsigned long index, unsigned long max_scan);
+unsigned long radix_tree_prev_hole(struct radix_tree_root *root,
 				unsigned long index, unsigned long max_scan);
 int radix_tree_preload(gfp_t gfp_mask);
 void radix_tree_init(void);

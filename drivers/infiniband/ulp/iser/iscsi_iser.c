@@ -56,6 +56,7 @@
 #include <linux/net.h>
 #include <linux/scatterlist.h>
 #include <linux/delay.h>
+#include <linux/slab.h>
 
 #include <net/sock.h>
 
@@ -119,7 +120,37 @@ error:
 	iscsi_conn_failure(conn, rc);
 }
 
+static int iscsi_iser_pdu_alloc(struct iscsi_task *task, uint8_t opcode)
+{
+	struct iscsi_iser_task *iser_task = task->dd_data;
 
+	task->hdr = (struct iscsi_hdr *)&iser_task->desc.iscsi_header;
+	task->hdr_max = sizeof(iser_task->desc.iscsi_header);
+	return 0;
+}
+
+int iser_initialize_task_headers(struct iscsi_task *task,
+						struct iser_tx_desc *tx_desc)
+{
+	struct iscsi_iser_conn *iser_conn = task->conn->dd_data;
+	struct iser_device     *device    = iser_conn->ib_conn->device;
+	struct iscsi_iser_task *iser_task = task->dd_data;
+	u64 dma_addr;
+
+	dma_addr = ib_dma_map_single(device->ib_device, (void *)tx_desc,
+				ISER_HEADERS_LEN, DMA_TO_DEVICE);
+	if (ib_dma_mapping_error(device->ib_device, dma_addr))
+		return -ENOMEM;
+
+	tx_desc->dma_addr = dma_addr;
+	tx_desc->tx_sg[0].addr   = tx_desc->dma_addr;
+	tx_desc->tx_sg[0].length = ISER_HEADERS_LEN;
+	tx_desc->tx_sg[0].lkey   = device->mr->lkey;
+
+	iser_task->headers_initialized	= 1;
+	iser_task->iser_conn		= iser_conn;
+	return 0;
+}
 /**
  * iscsi_iser_task_init - Initialize task
  * @task: iscsi task
@@ -129,17 +160,17 @@ error:
 static int
 iscsi_iser_task_init(struct iscsi_task *task)
 {
-	struct iscsi_iser_conn *iser_conn  = task->conn->dd_data;
 	struct iscsi_iser_task *iser_task = task->dd_data;
 
+	if (!iser_task->headers_initialized)
+		if (iser_initialize_task_headers(task, &iser_task->desc))
+			return -ENOMEM;
+
 	/* mgmt task */
-	if (!task->sc) {
-		iser_task->desc.data = task->data;
+	if (!task->sc)
 		return 0;
-	}
 
 	iser_task->command_sent = 0;
-	iser_task->iser_conn    = iser_conn;
 	iser_task_rdma_init(iser_task);
 	return 0;
 }
@@ -160,7 +191,7 @@ iscsi_iser_mtask_xmit(struct iscsi_conn *conn, struct iscsi_task *task)
 {
 	int error = 0;
 
-	debug_scsi("task deq [cid %d itt 0x%x]\n", conn->id, task->itt);
+	iser_dbg("mtask xmit [cid %d itt 0x%x]\n", conn->id, task->itt);
 
 	error = iser_send_control(conn, task);
 
@@ -170,9 +201,6 @@ iscsi_iser_mtask_xmit(struct iscsi_conn *conn, struct iscsi_task *task)
 	 * - if yes, the task is recycled at iscsi_complete_pdu
 	 * - if no,  the task is recycled at iser_snd_completion
 	 */
-	if (error && error != -ENOBUFS)
-		iscsi_conn_failure(conn, ISCSI_ERR_CONN_FAILED);
-
 	return error;
 }
 
@@ -180,25 +208,26 @@ static int
 iscsi_iser_task_xmit_unsol_data(struct iscsi_conn *conn,
 				 struct iscsi_task *task)
 {
-	struct iscsi_data  hdr;
+	struct iscsi_r2t_info *r2t = &task->unsol_r2t;
+	struct iscsi_data hdr;
 	int error = 0;
 
 	/* Send data-out PDUs while there's still unsolicited data to send */
-	while (task->unsol_count > 0) {
-		iscsi_prep_unsolicit_data_pdu(task, &hdr);
-		debug_scsi("Sending data-out: itt 0x%x, data count %d\n",
-			   hdr.itt, task->data_count);
+	while (iscsi_task_has_unsol_data(task)) {
+		iscsi_prep_data_out_pdu(task, r2t, &hdr);
+		iser_dbg("Sending data-out: itt 0x%x, data count %d\n",
+			   hdr.itt, r2t->data_count);
 
 		/* the buffer description has been passed with the command */
 		/* Send the command */
 		error = iser_send_data_out(conn, task, &hdr);
 		if (error) {
-			task->unsol_datasn--;
+			r2t->datasn--;
 			goto iscsi_iser_task_xmit_unsol_data_exit;
 		}
-		task->unsol_count -= task->data_count;
-		debug_scsi("Need to send %d more as data-out PDUs\n",
-			   task->unsol_count);
+		r2t->sent += r2t->data_count;
+		iser_dbg("Need to send %d more as data-out PDUs\n",
+			   r2t->data_length - r2t->sent);
 	}
 
 iscsi_iser_task_xmit_unsol_data_exit:
@@ -218,12 +247,12 @@ iscsi_iser_task_xmit(struct iscsi_task *task)
 	if (task->sc->sc_data_direction == DMA_TO_DEVICE) {
 		BUG_ON(scsi_bufflen(task->sc) == 0);
 
-		debug_scsi("cmd [itt %x total %d imm %d unsol_data %d\n",
+		iser_dbg("cmd [itt %x total %d imm %d unsol_data %d\n",
 			   task->itt, scsi_bufflen(task->sc),
-			   task->imm_count, task->unsol_count);
+			   task->imm_count, task->unsol_r2t.data_length);
 	}
 
-	debug_scsi("task deq [cid %d itt 0x%x]\n",
+	iser_dbg("ctask xmit [cid %d itt 0x%x]\n",
 		   conn->id, task->itt);
 
 	/* Send the cmd PDU */
@@ -235,17 +264,14 @@ iscsi_iser_task_xmit(struct iscsi_task *task)
 	}
 
 	/* Send unsolicited data-out PDU(s) if necessary */
-	if (task->unsol_count)
+	if (iscsi_task_has_unsol_data(task))
 		error = iscsi_iser_task_xmit_unsol_data(conn, task);
 
  iscsi_iser_task_xmit_exit:
-	if (error && error != -ENOBUFS)
-		iscsi_conn_failure(conn, ISCSI_ERR_CONN_FAILED);
 	return error;
 }
 
-static void
-iscsi_iser_cleanup_task(struct iscsi_conn *conn, struct iscsi_task *task)
+static void iscsi_iser_cleanup_task(struct iscsi_task *task)
 {
 	struct iscsi_iser_task *iser_task = task->dd_data;
 
@@ -275,7 +301,7 @@ iscsi_iser_conn_create(struct iscsi_cls_session *cls_session, uint32_t conn_idx)
 	 * due to issues with the login code re iser sematics
 	 * this not set in iscsi_conn_setup - FIXME
 	 */
-	conn->max_recv_dlength = 128;
+	conn->max_recv_dlength = ISER_RECV_DATA_SEG_LEN;
 
 	iser_conn = conn->dd_data;
 	conn->dd_data = iser_conn;
@@ -386,17 +412,14 @@ static void iscsi_iser_session_destroy(struct iscsi_cls_session *cls_session)
 static struct iscsi_cls_session *
 iscsi_iser_session_create(struct iscsi_endpoint *ep,
 			  uint16_t cmds_max, uint16_t qdepth,
-			  uint32_t initial_cmdsn, uint32_t *hostno)
+			  uint32_t initial_cmdsn)
 {
 	struct iscsi_cls_session *cls_session;
 	struct iscsi_session *session;
 	struct Scsi_Host *shost;
-	int i;
-	struct iscsi_task *task;
-	struct iscsi_iser_task *iser_task;
 	struct iser_conn *ib_conn;
 
-	shost = iscsi_host_alloc(&iscsi_iser_sht, 0, ISCSI_MAX_CMD_PER_LUN);
+	shost = iscsi_host_alloc(&iscsi_iser_sht, 0, 0);
 	if (!shost)
 		return NULL;
 	shost->transportt = iscsi_iser_scsi_transport;
@@ -415,14 +438,13 @@ iscsi_iser_session_create(struct iscsi_endpoint *ep,
 	if (iscsi_host_add(shost,
 			   ep ? ib_conn->device->ib_device->dma_device : NULL))
 		goto free_host;
-	*hostno = shost->host_no;
 
 	/*
 	 * we do not support setting can_queue cmd_per_lun from userspace yet
 	 * because we preallocate so many resources
 	 */
 	cls_session = iscsi_session_setup(&iscsi_iser_transport, shost,
-					  ISCSI_DEF_XMIT_CMDS_MAX,
+					  ISCSI_DEF_XMIT_CMDS_MAX, 0,
 					  sizeof(struct iscsi_iser_task),
 					  initial_cmdsn, 0);
 	if (!cls_session)
@@ -430,13 +452,6 @@ iscsi_iser_session_create(struct iscsi_endpoint *ep,
 	session = cls_session->dd_data;
 
 	shost->can_queue = session->scsi_cmds_max;
-	/* libiscsi setup itts, data and pool so just set desc fields */
-	for (i = 0; i < session->cmds_max; i++) {
-		task = session->cmds[i];
-		iser_task = task->dd_data;
-		task->hdr = (struct iscsi_cmd *)&iser_task->desc.iscsi_header;
-		task->hdr_max = sizeof(iser_task->desc.iscsi_header);
-	}
 	return cls_session;
 
 remove_host:
@@ -517,7 +532,8 @@ iscsi_iser_conn_get_stats(struct iscsi_cls_conn *cls_conn, struct iscsi_stats *s
 }
 
 static struct iscsi_endpoint *
-iscsi_iser_ep_connect(struct sockaddr *dst_addr, int non_blocking)
+iscsi_iser_ep_connect(struct Scsi_Host *shost, struct sockaddr *dst_addr,
+		      int non_blocking)
 {
 	int err;
 	struct iser_conn *ib_conn;
@@ -595,10 +611,11 @@ static struct scsi_host_template iscsi_iser_sht = {
 	.change_queue_depth	= iscsi_change_queue_depth,
 	.sg_tablesize           = ISCSI_ISER_SG_TABLESIZE,
 	.max_sectors		= 1024,
-	.cmd_per_lun            = ISCSI_MAX_CMD_PER_LUN,
+	.cmd_per_lun            = ISER_DEF_CMD_PER_LUN,
 	.eh_abort_handler       = iscsi_eh_abort,
 	.eh_device_reset_handler= iscsi_eh_device_reset,
-	.eh_target_reset_handler= iscsi_eh_target_reset,
+	.eh_target_reset_handler = iscsi_eh_recover_target,
+	.target_alloc		= iscsi_target_alloc,
 	.use_clustering         = DISABLE_CLUSTERING,
 	.proc_name              = "iscsi_iser",
 	.this_id                = -1,
@@ -626,6 +643,7 @@ static struct iscsi_transport iscsi_iser_transport = {
 				  ISCSI_USERNAME | ISCSI_PASSWORD |
 				  ISCSI_USERNAME_IN | ISCSI_PASSWORD_IN |
 				  ISCSI_FAST_ABORT | ISCSI_ABORT_TMO |
+				  ISCSI_LU_RESET_TMO | ISCSI_TGT_RESET_TMO |
 				  ISCSI_PING_TMO | ISCSI_RECV_TMO |
 				  ISCSI_IFACE_NAME | ISCSI_INITIATOR_NAME,
 	.host_param_mask	= ISCSI_HOST_HWADDRESS |
@@ -652,6 +670,7 @@ static struct iscsi_transport iscsi_iser_transport = {
 	.init_task		= iscsi_iser_task_init,
 	.xmit_task		= iscsi_iser_task_xmit,
 	.cleanup_task		= iscsi_iser_cleanup_task,
+	.alloc_pdu		= iscsi_iser_pdu_alloc,
 	/* recovery */
 	.session_recovery_timedout = iscsi_session_recovery_timedout,
 
@@ -674,7 +693,7 @@ static int __init iser_init(void)
 	memset(&ig, 0, sizeof(struct iser_global));
 
 	ig.desc_cache = kmem_cache_create("iser_descriptors",
-					  sizeof (struct iser_desc),
+					  sizeof(struct iser_tx_desc),
 					  0, SLAB_HWCACHE_ALIGN,
 					  NULL);
 	if (ig.desc_cache == NULL)

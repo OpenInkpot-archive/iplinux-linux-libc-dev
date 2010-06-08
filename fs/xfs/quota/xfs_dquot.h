@@ -34,7 +34,7 @@
  */
 typedef struct xfs_dqhash {
 	struct xfs_dquot *qh_next;
-	mutex_t		  qh_lock;
+	struct mutex	  qh_lock;
 	uint		  qh_version;	/* ever increasing version */
 	uint		  qh_nelems;	/* number of dquots on the list */
 } xfs_dqhash_t;
@@ -81,13 +81,10 @@ typedef struct xfs_dquot {
 	xfs_qcnt_t	 q_res_bcount;	/* total regular nblks used+reserved */
 	xfs_qcnt_t	 q_res_icount;	/* total inos allocd+reserved */
 	xfs_qcnt_t	 q_res_rtbcount;/* total realtime blks used+reserved */
-	mutex_t		 q_qlock;	/* quota lock */
+	struct mutex	 q_qlock;	/* quota lock */
 	struct completion q_flush;	/* flush completion queue */
-	uint		 q_pincount;	/* pin count for this dquot */
-	sv_t		 q_pinwait;	/* sync var for pinning */
-#ifdef XFS_DQUOT_TRACE
-	struct ktrace	*q_trace;	/* trace header structure */
-#endif
+	atomic_t          q_pincount;	/* dquot pin count */
+	wait_queue_head_t q_pinwait;	/* dquot pinning wait queue */
 } xfs_dquot_t;
 
 
@@ -97,20 +94,17 @@ typedef struct xfs_dquot {
 #define dq_hashlist	q_lists.dqm_hashlist
 #define dq_flags	q_lists.dqm_flags
 
+/*
+ * Lock hierarchy for q_qlock:
+ *	XFS_QLOCK_NORMAL is the implicit default,
+ * 	XFS_QLOCK_NESTED is the dquot with the higher id in xfs_dqlock2
+ */
+enum {
+	XFS_QLOCK_NORMAL = 0,
+	XFS_QLOCK_NESTED,
+};
+
 #define XFS_DQHOLD(dqp)		((dqp)->q_nrefs++)
-
-#ifdef DEBUG
-static inline int
-XFS_DQ_IS_LOCKED(xfs_dquot_t *dqp)
-{
-	if (mutex_trylock(&dqp->q_qlock)) {
-		mutex_unlock(&dqp->q_qlock);
-		return 0;
-	}
-	return 1;
-}
-#endif
-
 
 /*
  * Manage the q_flush completion queue embedded in the dquot.  This completion
@@ -132,6 +126,7 @@ static inline void xfs_dqfunlock(xfs_dquot_t *dqp)
 	complete(&dqp->q_flush);
 }
 
+#define XFS_DQ_IS_LOCKED(dqp)	(mutex_is_locked(&((dqp)->q_qlock)))
 #define XFS_DQ_IS_ON_FREELIST(dqp)  ((dqp)->dq_flnext != (dqp))
 #define XFS_DQ_IS_DIRTY(dqp)	((dqp)->dq_flags & XFS_DQ_DIRTY)
 #define XFS_QM_ISUDQ(dqp)	((dqp)->dq_flags & XFS_DQ_USER)
@@ -145,24 +140,6 @@ static inline void xfs_dqfunlock(xfs_dquot_t *dqp)
 #define XFS_IS_THIS_QUOTA_OFF(d) (! (XFS_QM_ISUDQ(d) ? \
 				     (XFS_IS_UQUOTA_ON((d)->q_mount)) : \
 				     (XFS_IS_OQUOTA_ON((d)->q_mount))))
-
-#ifdef XFS_DQUOT_TRACE
-/*
- * Dquot Tracing stuff.
- */
-#define DQUOT_TRACE_SIZE	64
-#define DQUOT_KTRACE_ENTRY	1
-
-extern void		__xfs_dqtrace_entry(xfs_dquot_t *dqp, char *func,
-					    void *, xfs_inode_t *);
-#define xfs_dqtrace_entry_ino(a,b,ip) \
-		__xfs_dqtrace_entry((a), (b), (void*)__return_address, (ip))
-#define xfs_dqtrace_entry(a,b) \
-		__xfs_dqtrace_entry((a), (b), (void*)__return_address, NULL)
-#else
-#define xfs_dqtrace_entry(a,b)
-#define xfs_dqtrace_entry_ino(a,b,ip)
-#endif
 
 #ifdef QUOTADEBUG
 extern void		xfs_qm_dqprint(xfs_dquot_t *);
@@ -183,7 +160,6 @@ extern void		xfs_qm_adjust_dqlimits(xfs_mount_t *,
 extern int		xfs_qm_dqget(xfs_mount_t *, xfs_inode_t *,
 					xfs_dqid_t, uint, uint, xfs_dquot_t **);
 extern void		xfs_qm_dqput(xfs_dquot_t *);
-extern void		xfs_qm_dqrele(xfs_dquot_t *);
 extern void		xfs_dqlock(xfs_dquot_t *);
 extern void		xfs_dqlock2(xfs_dquot_t *, xfs_dquot_t *);
 extern void		xfs_dqunlock(xfs_dquot_t *);

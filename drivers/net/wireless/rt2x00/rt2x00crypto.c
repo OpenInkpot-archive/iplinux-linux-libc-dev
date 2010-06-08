@@ -1,5 +1,5 @@
 /*
-	Copyright (C) 2004 - 2008 rt2x00 SourceForge Project
+	Copyright (C) 2004 - 2009 Ivo van Doorn <IvDoorn@gmail.com>
 	<http://rt2x00.serialmonkey.com>
 
 	This program is free software; you can redistribute it and/or modify
@@ -33,7 +33,7 @@ enum cipher rt2x00crypto_key_to_cipher(struct ieee80211_key_conf *key)
 {
 	switch (key->alg) {
 	case ALG_WEP:
-		if (key->keylen == LEN_WEP40)
+		if (key->keylen == WLAN_KEY_LEN_WEP40)
 			return CIPHER_WEP64;
 		else
 			return CIPHER_WEP128;
@@ -46,10 +46,43 @@ enum cipher rt2x00crypto_key_to_cipher(struct ieee80211_key_conf *key)
 	}
 }
 
-unsigned int rt2x00crypto_tx_overhead(struct ieee80211_tx_info *tx_info)
+void rt2x00crypto_create_tx_descriptor(struct queue_entry *entry,
+				       struct txentry_desc *txdesc)
 {
+	struct rt2x00_dev *rt2x00dev = entry->queue->rt2x00dev;
+	struct ieee80211_tx_info *tx_info = IEEE80211_SKB_CB(entry->skb);
+	struct ieee80211_key_conf *hw_key = tx_info->control.hw_key;
+
+	if (!test_bit(CONFIG_SUPPORT_HW_CRYPTO, &rt2x00dev->flags) || !hw_key)
+		return;
+
+	__set_bit(ENTRY_TXD_ENCRYPT, &txdesc->flags);
+
+	txdesc->cipher = rt2x00crypto_key_to_cipher(hw_key);
+
+	if (hw_key->flags & IEEE80211_KEY_FLAG_PAIRWISE)
+		__set_bit(ENTRY_TXD_ENCRYPT_PAIRWISE, &txdesc->flags);
+
+	txdesc->key_idx = hw_key->hw_key_idx;
+	txdesc->iv_offset = txdesc->header_length;
+	txdesc->iv_len = hw_key->iv_len;
+
+	if (!(hw_key->flags & IEEE80211_KEY_FLAG_GENERATE_IV))
+		__set_bit(ENTRY_TXD_ENCRYPT_IV, &txdesc->flags);
+
+	if (!(hw_key->flags & IEEE80211_KEY_FLAG_GENERATE_MMIC))
+		__set_bit(ENTRY_TXD_ENCRYPT_MMIC, &txdesc->flags);
+}
+
+unsigned int rt2x00crypto_tx_overhead(struct rt2x00_dev *rt2x00dev,
+				      struct sk_buff *skb)
+{
+	struct ieee80211_tx_info *tx_info = IEEE80211_SKB_CB(skb);
 	struct ieee80211_key_conf *key = tx_info->control.hw_key;
 	unsigned int overhead = 0;
+
+	if (!test_bit(CONFIG_SUPPORT_HW_CRYPTO, &rt2x00dev->flags) || !key)
+		return overhead;
 
 	/*
 	 * Extend frame length to include IV/EIV/ICV/MMIC,
@@ -69,38 +102,44 @@ unsigned int rt2x00crypto_tx_overhead(struct ieee80211_tx_info *tx_info)
 	return overhead;
 }
 
-void rt2x00crypto_tx_remove_iv(struct sk_buff *skb, unsigned int iv_len)
+void rt2x00crypto_tx_copy_iv(struct sk_buff *skb, struct txentry_desc *txdesc)
 {
 	struct skb_frame_desc *skbdesc = get_skb_frame_desc(skb);
-	unsigned int header_length = ieee80211_get_hdrlen_from_skb(skb);
 
-	if (unlikely(!iv_len))
+	if (unlikely(!txdesc->iv_len))
 		return;
 
 	/* Copy IV/EIV data */
-	if (iv_len >= 4)
-		memcpy(&skbdesc->iv, skb->data + header_length, 4);
-	if (iv_len >= 8)
-		memcpy(&skbdesc->eiv, skb->data + header_length + 4, 4);
-
-	/* Move ieee80211 header */
-	memmove(skb->data + iv_len, skb->data, header_length);
-
-	/* Pull buffer to correct size */
-	skb_pull(skb, iv_len);
-
-	/* IV/EIV data has officially be stripped */
-	skbdesc->flags |= FRAME_DESC_IV_STRIPPED;
+	memcpy(skbdesc->iv, skb->data + txdesc->iv_offset, txdesc->iv_len);
 }
 
-void rt2x00crypto_tx_insert_iv(struct sk_buff *skb)
+void rt2x00crypto_tx_remove_iv(struct sk_buff *skb, struct txentry_desc *txdesc)
 {
 	struct skb_frame_desc *skbdesc = get_skb_frame_desc(skb);
-	unsigned int header_length = ieee80211_get_hdrlen_from_skb(skb);
-	const unsigned int iv_len =
-	    ((!!(skbdesc->iv)) * 4) + ((!!(skbdesc->eiv)) * 4);
 
-	if (!(skbdesc->flags & FRAME_DESC_IV_STRIPPED))
+	if (unlikely(!txdesc->iv_len))
+		return;
+
+	/* Copy IV/EIV data */
+	memcpy(skbdesc->iv, skb->data + txdesc->iv_offset, txdesc->iv_len);
+
+	/* Move ieee80211 header */
+	memmove(skb->data + txdesc->iv_len, skb->data, txdesc->iv_offset);
+
+	/* Pull buffer to correct size */
+	skb_pull(skb, txdesc->iv_len);
+
+	/* IV/EIV data has officially been stripped */
+	skbdesc->flags |= SKBDESC_IV_STRIPPED;
+}
+
+void rt2x00crypto_tx_insert_iv(struct sk_buff *skb, unsigned int header_length)
+{
+	struct skb_frame_desc *skbdesc = get_skb_frame_desc(skb);
+	const unsigned int iv_len =
+	    ((!!(skbdesc->iv[0])) * 4) + ((!!(skbdesc->iv[1])) * 4);
+
+	if (!(skbdesc->flags & SKBDESC_IV_STRIPPED))
 		return;
 
 	skb_push(skb, iv_len);
@@ -109,20 +148,18 @@ void rt2x00crypto_tx_insert_iv(struct sk_buff *skb)
 	memmove(skb->data, skb->data + iv_len, header_length);
 
 	/* Copy IV/EIV data */
-	if (iv_len >= 4)
-		memcpy(skb->data + header_length, &skbdesc->iv, 4);
-	if (iv_len >= 8)
-		memcpy(skb->data + header_length + 4, &skbdesc->eiv, 4);
+	memcpy(skb->data + header_length, skbdesc->iv, iv_len);
 
 	/* IV/EIV data has returned into the frame */
-	skbdesc->flags &= ~FRAME_DESC_IV_STRIPPED;
+	skbdesc->flags &= ~SKBDESC_IV_STRIPPED;
 }
 
-void rt2x00crypto_rx_insert_iv(struct sk_buff *skb, unsigned int align,
+void rt2x00crypto_rx_insert_iv(struct sk_buff *skb,
 			       unsigned int header_length,
 			       struct rxdone_entry_desc *rxdesc)
 {
 	unsigned int payload_len = rxdesc->size - header_length;
+	unsigned int align = ALIGN_SIZE(skb, header_length);
 	unsigned int iv_len;
 	unsigned int icv_len;
 	unsigned int transfer = 0;
@@ -152,40 +189,48 @@ void rt2x00crypto_rx_insert_iv(struct sk_buff *skb, unsigned int align,
 	}
 
 	/*
-	 * Make room for new data, note that we increase both
-	 * headsize and tailsize when required. The tailsize is
-	 * only needed when ICV data needs to be inserted and
-	 * the padding is smaller then the ICV data.
-	 * When alignment requirements is greater then the
-	 * ICV data we must trim the skb to the correct size
-	 * because we need to remove the extra bytes.
+	 * Make room for new data. There are 2 possibilities
+	 * either the alignment is already present between
+	 * the 802.11 header and payload. In that case we
+	 * we have to move the header less then the iv_len
+	 * since we can use the already available l2pad bytes
+	 * for the iv data.
+	 * When the alignment must be added manually we must
+	 * move the header more then iv_len since we must
+	 * make room for the payload move as well.
 	 */
-	skb_push(skb, iv_len + align);
-	if (align < icv_len)
-		skb_put(skb, icv_len - align);
-	else if (align > icv_len)
-		skb_trim(skb, rxdesc->size + iv_len + icv_len);
+	if (rxdesc->dev_flags & RXDONE_L2PAD) {
+		skb_push(skb, iv_len - align);
+		skb_put(skb, icv_len);
 
-	/* Move ieee80211 header */
-	memmove(skb->data + transfer,
-		skb->data + transfer + iv_len + align,
-		header_length);
-	transfer += header_length;
+		/* Move ieee80211 header */
+		memmove(skb->data + transfer,
+			skb->data + transfer + (iv_len - align),
+			header_length);
+		transfer += header_length;
+	} else {
+		skb_push(skb, iv_len + align);
+		if (align < icv_len)
+			skb_put(skb, icv_len - align);
+		else if (align > icv_len)
+			skb_trim(skb, rxdesc->size + iv_len + icv_len);
 
-	/* Copy IV data */
-	if (iv_len >= 4) {
-		memcpy(skb->data + transfer, &rxdesc->iv, 4);
-		transfer += 4;
+		/* Move ieee80211 header */
+		memmove(skb->data + transfer,
+			skb->data + transfer + iv_len + align,
+			header_length);
+		transfer += header_length;
 	}
 
-	/* Copy EIV data */
-	if (iv_len >= 8) {
-		memcpy(skb->data + transfer, &rxdesc->eiv, 4);
-		transfer += 4;
-	}
+	/* Copy IV/EIV data */
+	memcpy(skb->data + transfer, rxdesc->iv, iv_len);
+	transfer += iv_len;
 
-	/* Move payload */
-	if (align) {
+	/*
+	 * Move payload for alignment purposes. Note that
+	 * this is only needed when no l2 padding is present.
+	 */
+	if (!(rxdesc->dev_flags & RXDONE_L2PAD)) {
 		memmove(skb->data + transfer,
 			skb->data + transfer + align,
 			payload_len);
@@ -198,16 +243,14 @@ void rt2x00crypto_rx_insert_iv(struct sk_buff *skb, unsigned int align,
 	 */
 	transfer += payload_len;
 
-	/* Copy ICV data */
-	if (icv_len >= 4) {
-		memcpy(skb->data + transfer, &rxdesc->icv, 4);
-		/*
-		 * AES appends 8 bytes, we can't fill the upper
-		 * 4 bytes, but mac80211 doesn't care about what
-		 * we provide here anyway and strips it immediately.
-		 */
-		transfer += icv_len;
-	}
+	/*
+	 * Copy ICV data
+	 * AES appends 8 bytes, we can't fill the upper
+	 * 4 bytes, but mac80211 doesn't care about what
+	 * we provide here anyway and strips it immediately.
+	 */
+	memcpy(skb->data + transfer, &rxdesc->icv, 4);
+	transfer += icv_len;
 
 	/* IV/EIV/ICV has been inserted into frame */
 	rxdesc->size = transfer;

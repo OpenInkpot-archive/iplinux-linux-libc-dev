@@ -21,12 +21,13 @@
 #include <linux/bcd.h>
 #include <linux/clk.h>
 #include <linux/log2.h>
+#include <linux/slab.h>
 
 #include <mach/hardware.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/plat-s3c/regs-rtc.h>
+#include <plat/regs-rtc.h>
 
 /* I have yet to find an S3C implementation with more than one
  * of these rtc blocks in */
@@ -93,6 +94,9 @@ static int s3c_rtc_setpie(struct device *dev, int enabled)
 static int s3c_rtc_setfreq(struct device *dev, int freq)
 {
 	unsigned int tmp;
+
+	if (!is_power_of_2(freq))
+		return -EINVAL;
 
 	spin_lock_irq(&s3c_rtc_pie_lock);
 

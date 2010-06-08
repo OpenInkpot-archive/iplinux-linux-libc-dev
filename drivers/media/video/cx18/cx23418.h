@@ -44,6 +44,7 @@
 
 /* All commands for CPU have the following mask set */
 #define CPU_CMD_MASK                        	0x20000000
+#define CPU_CMD_MASK_DEBUG       		(CPU_CMD_MASK | 0x00000000)
 #define CPU_CMD_MASK_ACK                    	(CPU_CMD_MASK | 0x80000000)
 #define CPU_CMD_MASK_CAPTURE                	(CPU_CMD_MASK | 0x00020000)
 #define CPU_CMD_MASK_TS                     	(CPU_CMD_MASK | 0x00040000)
@@ -55,6 +56,22 @@
 #define APU_CMD_MASK 				0x10000000
 #define APU_CMD_MASK_ACK 			(APU_CMD_MASK | 0x80000000)
 
+#define CX18_APU_ENCODING_METHOD_MPEG		(0 << 28)
+#define CX18_APU_ENCODING_METHOD_AC3		(1 << 28)
+
+/* Description: Command APU to start audio
+   IN[0] - audio parameters (same as CX18_CPU_SET_AUDIO_PARAMETERS?)
+   IN[1] - caller buffer address, or 0
+   ReturnCode - ??? */
+#define CX18_APU_START				(APU_CMD_MASK | 0x01)
+
+/* Description: Command APU to stop audio
+   IN[0] - encoding method to stop
+   ReturnCode - ??? */
+#define CX18_APU_STOP				(APU_CMD_MASK | 0x02)
+
+/* Description: Command APU to reset the AI
+   ReturnCode - ??? */
 #define CX18_APU_RESETAI 			(APU_CMD_MASK | 0x05)
 
 /* Description: This command indicates that a Memory Descriptor List has been
@@ -70,6 +87,11 @@
    IN[1] - An offset of a string in the MiniMe memory;
 	   0/zero/NULL means "I have nothing to say" */
 #define CX18_EPU_DEBUG 				(EPU_CMD_MASK_DEBUG | 0x0003)
+
+/* Reads memory/registers (32-bit)
+   IN[0] - Address
+   OUT[1] - Value */
+#define CX18_CPU_DEBUG_PEEK32			(CPU_CMD_MASK_DEBUG | 0x0003)
 
 /* Description: This command starts streaming with the set channel type
    IN[0] - Task handle. Handle of the task to start
@@ -169,7 +191,8 @@
 #define CX18_CPU_SET_MEDIAN_CORING           	(CPU_CMD_MASK_CAPTURE | 0x000E)
 
 /* Description: This command set the picture type mask for index file
-   IN[0] - 	0 = disable index file output
+   IN[0] - Task handle (ignored by firmware)
+   IN[1] - 	0 = disable index file output
 			1 = output I picture
 			2 = P picture
 			4 = B picture
@@ -341,7 +364,7 @@
 /* Description: This command provides the offset to a Memory Descriptor List
    IN[0] - Task handle. Handle of the task to start
    IN[1] - Offset of the MDL from the beginning of the local DDR.
-   IN[2] - Number of cx18_mdl structures in the array pointed to by IN[1]
+   IN[2] - Number of cx18_mdl_ent structures in the array pointed to by IN[1]
    IN[3] - Buffer ID
    IN[4] - Total buffer length
    ReturnCode - One of the ERR_DE_... */

@@ -21,6 +21,7 @@
 #define __WHCD_H
 
 #include <linux/uwb/whci.h>
+#include <linux/uwb/umc.h>
 #include <linux/workqueue.h>
 
 #include "whci-hc.h"
@@ -28,6 +29,7 @@
 /* Generic command timeout. */
 #define WHC_GENCMD_TIMEOUT_MS 100
 
+struct whc_dbg;
 
 struct whc {
 	struct wusbhc wusbhc;
@@ -69,6 +71,8 @@ struct whc {
 	struct list_head periodic_removed_list;
 	wait_queue_head_t periodic_list_wq;
 	struct work_struct periodic_work;
+
+	struct whc_dbg *dbg;
 };
 
 #define wusbhc_to_whc(w) (container_of((w), struct whc, wusbhc))
@@ -79,6 +83,11 @@ struct whc {
  * @offset: start of the URB's data for this TD.
  * @len: the length of data in the associated TD.
  * @ntds_remaining: number of TDs (starting from this one) in this transfer.
+ *
+ * @bounce_buf: a bounce buffer if the std was from an urb with a sg
+ * list that could not be mapped to qTDs directly.
+ * @bounce_sg: the first scatterlist element bounce_buf is for.
+ * @bounce_offset: the offset into bounce_sg for the start of bounce_buf.
  *
  * Queued URBs may require more TDs than are available in a qset so we
  * use a list of these "software TDs" (sTDs) to hold per-TD data.
@@ -93,6 +102,10 @@ struct whc_std {
 	int num_pointers;
 	dma_addr_t dma_addr;
 	struct whc_page_list_entry *pl_virt;
+
+	void *bounce_buf;
+	struct scatterlist *bounce_sg;
+	unsigned bounce_offset;
 };
 
 /**
@@ -133,10 +146,11 @@ void whc_clean_up(struct whc *whc);
 /* hw.c */
 void whc_write_wusbcmd(struct whc *whc, u32 mask, u32 val);
 int whc_do_gencmd(struct whc *whc, u32 cmd, u32 params, void *addr, size_t len);
+void whc_hw_error(struct whc *whc, const char *reason);
 
 /* wusb.c */
 int whc_wusbhc_start(struct wusbhc *wusbhc);
-void whc_wusbhc_stop(struct wusbhc *wusbhc);
+void whc_wusbhc_stop(struct wusbhc *wusbhc, int delay);
 int whc_mmcie_add(struct wusbhc *wusbhc, u8 interval, u8 repeat_cnt,
 		  u8 handle, struct wuie_hdr *wuie);
 int whc_mmcie_rm(struct wusbhc *wusbhc, u8 handle);
@@ -179,6 +193,7 @@ void qset_free(struct whc *whc, struct whc_qset *qset);
 struct whc_qset *get_qset(struct whc *whc, struct urb *urb, gfp_t mem_flags);
 void qset_delete(struct whc *whc, struct whc_qset *qset);
 void qset_clear(struct whc *whc, struct whc_qset *qset);
+void qset_reset(struct whc *whc, struct whc_qset *qset);
 int qset_add_urb(struct whc *whc, struct whc_qset *qset, struct urb *urb,
 		 gfp_t mem_flags);
 void qset_free_std(struct whc *whc, struct whc_std *std);
@@ -190,8 +205,11 @@ void process_inactive_qtd(struct whc *whc, struct whc_qset *qset,
 				 struct whc_qtd *qtd);
 enum whc_update qset_add_qtds(struct whc *whc, struct whc_qset *qset);
 void qset_remove_complete(struct whc *whc, struct whc_qset *qset);
-void dump_qset(struct whc_qset *qset, struct device *dev);
 void pzl_update(struct whc *whc, uint32_t wusbcmd);
 void asl_update(struct whc *whc, uint32_t wusbcmd);
+
+/* debug.c */
+void whc_dbg_init(struct whc *whc);
+void whc_dbg_clean_up(struct whc *whc);
 
 #endif /* #ifndef __WHCD_H */

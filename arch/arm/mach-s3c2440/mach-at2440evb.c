@@ -28,6 +28,7 @@
 #include <asm/mach/irq.h>
 
 #include <mach/hardware.h>
+#include <mach/fb.h>
 #include <asm/irq.h>
 #include <asm/mach-types.h>
 
@@ -35,7 +36,8 @@
 #include <mach/regs-gpio.h>
 #include <mach/regs-mem.h>
 #include <mach/regs-lcd.h>
-#include <asm/plat-s3c/nand.h>
+#include <plat/nand.h>
+#include <plat/iic.h>
 
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/nand.h>
@@ -45,6 +47,7 @@
 #include <plat/clock.h>
 #include <plat/devs.h>
 #include <plat/cpu.h>
+#include <plat/mci.h>
 
 static struct map_desc at2440evb_iodesc[] __initdata = {
 	/* Nothing here */
@@ -93,7 +96,7 @@ static struct s3c2410_uartcfg at2440evb_uartcfgs[] __initdata = {
 
 /* NAND Flash on AT2440EVB board */
 
-static struct mtd_partition at2440evb_default_nand_part[] = {
+static struct mtd_partition __initdata at2440evb_default_nand_part[] = {
 	[0] = {
 		.name	= "Boot Agent",
 		.size	= SZ_256K,
@@ -111,7 +114,7 @@ static struct mtd_partition at2440evb_default_nand_part[] = {
 	},
 };
 
-static struct s3c2410_nand_set at2440evb_nand_sets[] = {
+static struct s3c2410_nand_set __initdata at2440evb_nand_sets[] = {
 	[0] = {
 		.name		= "nand",
 		.nr_chips	= 1,
@@ -120,7 +123,7 @@ static struct s3c2410_nand_set at2440evb_nand_sets[] = {
 	},
 };
 
-static struct s3c2410_platform_nand at2440evb_nand_info = {
+static struct s3c2410_platform_nand __initdata at2440evb_nand_info = {
 	.tacls		= 25,
 	.twrph0		= 55,
 	.twrph1		= 40,
@@ -162,20 +165,57 @@ static struct platform_device at2440evb_device_eth = {
 	},
 };
 
+static struct s3c24xx_mci_pdata at2440evb_mci_pdata __initdata = {
+	.gpio_detect	= S3C2410_GPG(10),
+};
+
+/* 7" LCD panel */
+
+static struct s3c2410fb_display at2440evb_lcd_cfg __initdata = {
+
+	.lcdcon5	= S3C2410_LCDCON5_FRM565 |
+			  S3C2410_LCDCON5_INVVLINE |
+			  S3C2410_LCDCON5_INVVFRAME |
+			  S3C2410_LCDCON5_PWREN |
+			  S3C2410_LCDCON5_HWSWP,
+
+	.type		= S3C2410_LCDCON1_TFT,
+
+	.width		= 800,
+	.height		= 480,
+
+	.pixclock	= 33333, /* HCLK 60 MHz, divisor 2 */
+	.xres		= 800,
+	.yres		= 480,
+	.bpp		= 16,
+	.left_margin	= 88,
+	.right_margin	= 40,
+	.hsync_len	= 128,
+	.upper_margin	= 32,
+	.lower_margin	= 11,
+	.vsync_len	= 2,
+};
+
+static struct s3c2410fb_mach_info at2440evb_fb_info __initdata = {
+	.displays	= &at2440evb_lcd_cfg,
+	.num_displays	= 1,
+	.default_display = 0,
+};
+
 static struct platform_device *at2440evb_devices[] __initdata = {
-	&s3c_device_usb,
+	&s3c_device_ohci,
 	&s3c_device_wdt,
 	&s3c_device_adc,
-	&s3c_device_i2c,
+	&s3c_device_i2c0,
 	&s3c_device_rtc,
 	&s3c_device_nand,
+	&s3c_device_sdi,
+	&s3c_device_lcd,
 	&at2440evb_device_eth,
 };
 
 static void __init at2440evb_map_io(void)
 {
-	s3c_device_nand.dev.platform_data = &at2440evb_nand_info;
-
 	s3c24xx_init_io(at2440evb_iodesc, ARRAY_SIZE(at2440evb_iodesc));
 	s3c24xx_init_clocks(16934400);
 	s3c24xx_init_uarts(at2440evb_uartcfgs, ARRAY_SIZE(at2440evb_uartcfgs));
@@ -183,6 +223,11 @@ static void __init at2440evb_map_io(void)
 
 static void __init at2440evb_init(void)
 {
+	s3c24xx_fb_set_platdata(&at2440evb_fb_info);
+	s3c24xx_mci_set_platdata(&at2440evb_mci_pdata);
+	s3c_nand_set_platdata(&at2440evb_nand_info);
+	s3c_i2c0_set_platdata(NULL);
+
 	platform_add_devices(at2440evb_devices, ARRAY_SIZE(at2440evb_devices));
 }
 

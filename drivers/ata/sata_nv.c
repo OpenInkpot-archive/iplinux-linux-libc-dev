@@ -38,6 +38,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/gfp.h>
 #include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/blkdev.h>
@@ -57,9 +58,9 @@ enum {
 	NV_MMIO_BAR			= 5,
 
 	NV_PORTS			= 2,
-	NV_PIO_MASK			= 0x1f,
-	NV_MWDMA_MASK			= 0x07,
-	NV_UDMA_MASK			= 0x7f,
+	NV_PIO_MASK			= ATA_PIO4,
+	NV_MWDMA_MASK			= ATA_MWDMA2,
+	NV_UDMA_MASK			= ATA_UDMA6,
 	NV_PORT0_SCR_REG_OFFSET		= 0x00,
 	NV_PORT1_SCR_REG_OFFSET		= 0x40,
 
@@ -305,10 +306,10 @@ static irqreturn_t nv_ck804_interrupt(int irq, void *dev_instance);
 static int nv_scr_read(struct ata_link *link, unsigned int sc_reg, u32 *val);
 static int nv_scr_write(struct ata_link *link, unsigned int sc_reg, u32 val);
 
+static int nv_hardreset(struct ata_link *link, unsigned int *class,
+			unsigned long deadline);
 static void nv_nf2_freeze(struct ata_port *ap);
 static void nv_nf2_thaw(struct ata_port *ap);
-static int nv_nf2_hardreset(struct ata_link *link, unsigned int *class,
-			    unsigned long deadline);
 static void nv_ck804_freeze(struct ata_port *ap);
 static void nv_ck804_thaw(struct ata_port *ap);
 static int nv_adma_slave_config(struct scsi_device *sdev);
@@ -352,6 +353,7 @@ enum nv_host_type
 	NFORCE3 = NFORCE2,	/* NF2 == NF3 as far as sata_nv is concerned */
 	CK804,
 	ADMA,
+	MCP5x,
 	SWNCQ,
 };
 
@@ -363,10 +365,10 @@ static const struct pci_device_id nv_pci_tbl[] = {
 	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_CK804_SATA2), CK804 },
 	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP04_SATA), CK804 },
 	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP04_SATA2), CK804 },
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP51_SATA), SWNCQ },
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP51_SATA2), SWNCQ },
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP55_SATA), SWNCQ },
-	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP55_SATA2), SWNCQ },
+	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP51_SATA), MCP5x },
+	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP51_SATA2), MCP5x },
+	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP55_SATA), MCP5x },
+	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP55_SATA2), MCP5x },
 	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP61_SATA), GENERIC },
 	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP61_SATA2), GENERIC },
 	{ PCI_VDEVICE(NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP61_SATA3), GENERIC },
@@ -405,39 +407,80 @@ static struct scsi_host_template nv_swncq_sht = {
 	.slave_configure	= nv_swncq_slave_config,
 };
 
-static struct ata_port_operations nv_common_ops = {
-	.inherits		= &ata_bmdma_port_ops,
-	.scr_read		= nv_scr_read,
-	.scr_write		= nv_scr_write,
-};
-
-/* OSDL bz11195 reports that link doesn't come online after hardreset
- * on generic nv's and there have been several other similar reports
- * on linux-ide.  Disable hardreset for generic nv's.
+/*
+ * NV SATA controllers have various different problems with hardreset
+ * protocol depending on the specific controller and device.
+ *
+ * GENERIC:
+ *
+ *  bko11195 reports that link doesn't come online after hardreset on
+ *  generic nv's and there have been several other similar reports on
+ *  linux-ide.
+ *
+ *  bko12351#c23 reports that warmplug on MCP61 doesn't work with
+ *  softreset.
+ *
+ * NF2/3:
+ *
+ *  bko3352 reports nf2/3 controllers can't determine device signature
+ *  reliably after hardreset.  The following thread reports detection
+ *  failure on cold boot with the standard debouncing timing.
+ *
+ *  http://thread.gmane.org/gmane.linux.ide/34098
+ *
+ *  bko12176 reports that hardreset fails to bring up the link during
+ *  boot on nf2.
+ *
+ * CK804:
+ *
+ *  For initial probing after boot and hot plugging, hardreset mostly
+ *  works fine on CK804 but curiously, reprobing on the initial port
+ *  by rescanning or rmmod/insmod fails to acquire the initial D2H Reg
+ *  FIS in somewhat undeterministic way.
+ *
+ * SWNCQ:
+ *
+ *  bko12351 reports that when SWNCQ is enabled, for hotplug to work,
+ *  hardreset should be used and hardreset can't report proper
+ *  signature, which suggests that mcp5x is closer to nf2 as long as
+ *  reset quirkiness is concerned.
+ *
+ *  bko12703 reports that boot probing fails for intel SSD with
+ *  hardreset.  Link fails to come online.  Softreset works fine.
+ *
+ * The failures are varied but the following patterns seem true for
+ * all flavors.
+ *
+ * - Softreset during boot always works.
+ *
+ * - Hardreset during boot sometimes fails to bring up the link on
+ *   certain comibnations and device signature acquisition is
+ *   unreliable.
+ *
+ * - Hardreset is often necessary after hotplug.
+ *
+ * So, preferring softreset for boot probing and error handling (as
+ * hardreset might bring down the link) but using hardreset for
+ * post-boot probing should work around the above issues in most
+ * cases.  Define nv_hardreset() which only kicks in for post-boot
+ * probing and use it for all variants.
  */
 static struct ata_port_operations nv_generic_ops = {
-	.inherits		= &nv_common_ops,
-	.hardreset		= ATA_OP_NULL,
+	.inherits		= &ata_bmdma_port_ops,
+	.lost_interrupt		= ATA_OP_NULL,
+	.scr_read		= nv_scr_read,
+	.scr_write		= nv_scr_write,
+	.hardreset		= nv_hardreset,
 };
 
-/* OSDL bz3352 reports that nf2/3 controllers can't determine device
- * signature reliably.  Also, the following thread reports detection
- * failure on cold boot with the standard debouncing timing.
- *
- * http://thread.gmane.org/gmane.linux.ide/34098
- *
- * Debounce with hotplug timing and request follow-up SRST.
- */
 static struct ata_port_operations nv_nf2_ops = {
-	.inherits		= &nv_common_ops,
+	.inherits		= &nv_generic_ops,
 	.freeze			= nv_nf2_freeze,
 	.thaw			= nv_nf2_thaw,
-	.hardreset		= nv_nf2_hardreset,
 };
 
-/* CK804 finally gets hardreset right */
 static struct ata_port_operations nv_ck804_ops = {
-	.inherits		= &nv_common_ops,
+	.inherits		= &nv_generic_ops,
 	.freeze			= nv_ck804_freeze,
 	.thaw			= nv_ck804_thaw,
 	.host_stop		= nv_ck804_host_stop,
@@ -531,6 +574,15 @@ static const struct ata_port_info nv_port_info[] = {
 		.port_ops	= &nv_adma_ops,
 		.private_data	= NV_PI_PRIV(nv_adma_interrupt, &nv_adma_sht),
 	},
+	/* MCP5x */
+	{
+		.flags		= ATA_FLAG_SATA | ATA_FLAG_NO_LEGACY,
+		.pio_mask	= NV_PIO_MASK,
+		.mwdma_mask	= NV_MWDMA_MASK,
+		.udma_mask	= NV_UDMA_MASK,
+		.port_ops	= &nv_generic_ops,
+		.private_data	= NV_PI_PRIV(nv_generic_interrupt, &nv_sht),
+	},
 	/* SWNCQ */
 	{
 		.flags	        = ATA_FLAG_SATA | ATA_FLAG_NO_LEGACY |
@@ -551,6 +603,7 @@ MODULE_VERSION(DRV_VERSION);
 
 static int adma_enabled;
 static int swncq_enabled = 1;
+static int msi_enabled;
 
 static void nv_adma_register_mode(struct ata_port *ap)
 {
@@ -720,7 +773,7 @@ static int nv_adma_slave_config(struct scsi_device *sdev)
 	}
 
 	blk_queue_segment_boundary(sdev->request_queue, segment_boundary);
-	blk_queue_max_hw_segments(sdev->request_queue, sg_tablesize);
+	blk_queue_max_segments(sdev->request_queue, sg_tablesize);
 	ata_port_printk(ap, KERN_INFO,
 		"DMA mask 0x%llX, segment boundary 0x%lX, hw segs %hu\n",
 		(unsigned long long)*ap->host->dev->dma_mask,
@@ -1530,6 +1583,38 @@ static int nv_scr_write(struct ata_link *link, unsigned int sc_reg, u32 val)
 	return 0;
 }
 
+static int nv_hardreset(struct ata_link *link, unsigned int *class,
+			unsigned long deadline)
+{
+	struct ata_eh_context *ehc = &link->eh_context;
+
+	/* Do hardreset iff it's post-boot probing, please read the
+	 * comment above port ops for details.
+	 */
+	if (!(link->ap->pflags & ATA_PFLAG_LOADING) &&
+	    !ata_dev_enabled(link->device))
+		sata_link_hardreset(link, sata_deb_timing_hotplug, deadline,
+				    NULL, NULL);
+	else {
+		const unsigned long *timing = sata_ehc_deb_timing(ehc);
+		int rc;
+
+		if (!(ehc->i.flags & ATA_EHI_QUIET))
+			ata_link_printk(link, KERN_INFO, "nv: skipping "
+					"hardreset on occupied port\n");
+
+		/* make sure the link is online */
+		rc = sata_link_resume(link, timing, deadline);
+		/* whine about phy resume failure but proceed */
+		if (rc && rc != -EOPNOTSUPP)
+			ata_link_printk(link, KERN_WARNING, "failed to resume "
+					"link (errno=%d)\n", rc);
+	}
+
+	/* device signature acquisition is unreliable */
+	return -EAGAIN;
+}
+
 static void nv_nf2_freeze(struct ata_port *ap)
 {
 	void __iomem *scr_addr = ap->host->ports[0]->ioaddr.scr_addr;
@@ -1552,17 +1637,6 @@ static void nv_nf2_thaw(struct ata_port *ap)
 	mask = ioread8(scr_addr + NV_INT_ENABLE);
 	mask |= (NV_INT_MASK << shift);
 	iowrite8(mask, scr_addr + NV_INT_ENABLE);
-}
-
-static int nv_nf2_hardreset(struct ata_link *link, unsigned int *class,
-			    unsigned long deadline)
-{
-	bool online;
-	int rc;
-
-	rc = sata_link_hardreset(link, sata_deb_timing_hotplug, deadline,
-				 &online, NULL);
-	return online ? -EAGAIN : rc;
 }
 
 static void nv_ck804_freeze(struct ata_port *ap)
@@ -1902,7 +1976,7 @@ static int nv_swncq_slave_config(struct scsi_device *sdev)
 	ata_id_c_string(dev->id, model_num, ATA_ID_PROD, sizeof(model_num));
 
 	if (strncmp(model_num, "Maxtor", 6) == 0) {
-		ata_scsi_change_queue_depth(sdev, 1);
+		ata_scsi_change_queue_depth(sdev, 1, SCSI_QDEPTH_DEFAULT);
 		ata_dev_printk(dev, KERN_NOTICE,
 			"Disabling SWNCQ mode (depth %x)\n", sdev->queue_depth);
 	}
@@ -2355,14 +2429,9 @@ static int nv_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (type == CK804 && adma_enabled) {
 		dev_printk(KERN_NOTICE, &pdev->dev, "Using ADMA mode\n");
 		type = ADMA;
-	}
-
-	if (type == SWNCQ) {
-		if (swncq_enabled)
-			dev_printk(KERN_NOTICE, &pdev->dev,
-				   "Using SWNCQ mode\n");
-		else
-			type = GENERIC;
+	} else if (type == MCP5x && swncq_enabled) {
+		dev_printk(KERN_NOTICE, &pdev->dev, "Using SWNCQ mode\n");
+		type = SWNCQ;
 	}
 
 	ppi[0] = &nv_port_info[type];
@@ -2403,6 +2472,11 @@ static int nv_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 			return rc;
 	} else if (type == SWNCQ)
 		nv_swncq_host_init(host);
+
+	if (msi_enabled) {
+		dev_printk(KERN_NOTICE, &pdev->dev, "Using MSI\n");
+		pci_enable_msi(pdev);
+	}
 
 	pci_set_master(pdev);
 	return ata_host_activate(host, pdev->irq, ipriv->irq_handler,
@@ -2500,7 +2574,9 @@ static void __exit nv_exit(void)
 module_init(nv_init);
 module_exit(nv_exit);
 module_param_named(adma, adma_enabled, bool, 0444);
-MODULE_PARM_DESC(adma, "Enable use of ADMA (Default: true)");
+MODULE_PARM_DESC(adma, "Enable use of ADMA (Default: false)");
 module_param_named(swncq, swncq_enabled, bool, 0444);
 MODULE_PARM_DESC(swncq, "Enable use of SWNCQ (Default: true)");
+module_param_named(msi, msi_enabled, bool, 0444);
+MODULE_PARM_DESC(msi, "Enable use of MSI (Default: false)");
 

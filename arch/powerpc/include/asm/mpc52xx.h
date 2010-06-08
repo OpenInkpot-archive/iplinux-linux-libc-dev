@@ -16,6 +16,7 @@
 #ifndef __ASSEMBLY__
 #include <asm/types.h>
 #include <asm/prom.h>
+#include <asm/mpc5xxx.h>
 #endif /* __ASSEMBLY__ */
 
 #include <linux/suspend.h>
@@ -239,6 +240,25 @@ struct mpc52xx_cdm {
 	u16 mclken_div_psc6;	/* CDM + 0x36  reg13 byte2,3 */
 };
 
+/* Interrupt controller Register set */
+struct mpc52xx_intr {
+	u32 per_mask;		/* INTR + 0x00 */
+	u32 per_pri1;		/* INTR + 0x04 */
+	u32 per_pri2;		/* INTR + 0x08 */
+	u32 per_pri3;		/* INTR + 0x0c */
+	u32 ctrl;		/* INTR + 0x10 */
+	u32 main_mask;		/* INTR + 0x14 */
+	u32 main_pri1;		/* INTR + 0x18 */
+	u32 main_pri2;		/* INTR + 0x1c */
+	u32 reserved1;		/* INTR + 0x20 */
+	u32 enc_status;		/* INTR + 0x24 */
+	u32 crit_status;	/* INTR + 0x28 */
+	u32 main_status;	/* INTR + 0x2c */
+	u32 per_status;		/* INTR + 0x30 */
+	u32 reserved2;		/* INTR + 0x34 */
+	u32 per_error;		/* INTR + 0x38 */
+};
+
 #endif /* __ASSEMBLY__ */
 
 
@@ -249,12 +269,59 @@ struct mpc52xx_cdm {
 #ifndef __ASSEMBLY__
 
 /* mpc52xx_common.c */
-extern unsigned int mpc52xx_find_ipb_freq(struct device_node *node);
 extern void mpc5200_setup_xlb_arbiter(void);
 extern void mpc52xx_declare_of_platform_devices(void);
 extern void mpc52xx_map_common_devices(void);
 extern int mpc52xx_set_psc_clkdiv(int psc_id, int clkdiv);
+extern unsigned int mpc52xx_get_xtal_freq(struct device_node *node);
 extern void mpc52xx_restart(char *cmd);
+
+/* mpc52xx_gpt.c */
+struct mpc52xx_gpt_priv;
+extern struct mpc52xx_gpt_priv *mpc52xx_gpt_from_irq(int irq);
+extern int mpc52xx_gpt_start_timer(struct mpc52xx_gpt_priv *gpt, u64 period,
+                            int continuous);
+extern u64 mpc52xx_gpt_timer_period(struct mpc52xx_gpt_priv *gpt);
+extern int mpc52xx_gpt_stop_timer(struct mpc52xx_gpt_priv *gpt);
+
+/* mpc52xx_lpbfifo.c */
+#define MPC52XX_LPBFIFO_FLAG_READ		(0)
+#define MPC52XX_LPBFIFO_FLAG_WRITE		(1<<0)
+#define MPC52XX_LPBFIFO_FLAG_NO_INCREMENT	(1<<1)
+#define MPC52XX_LPBFIFO_FLAG_NO_DMA		(1<<2)
+#define MPC52XX_LPBFIFO_FLAG_POLL_DMA		(1<<3)
+
+struct mpc52xx_lpbfifo_request {
+	struct list_head list;
+
+	/* localplus bus address */
+	unsigned int cs;
+	size_t offset;
+
+	/* Memory address */
+	void *data;
+	phys_addr_t data_phys;
+
+	/* Details of transfer */
+	size_t size;
+	size_t pos;	/* current position of transfer */
+	int flags;
+
+	/* What to do when finished */
+	void (*callback)(struct mpc52xx_lpbfifo_request *);
+
+	void *priv;		/* Driver private data */
+
+	/* statistics */
+	int irq_count;
+	int irq_ticks;
+	u8 last_byte;
+	int buffer_not_done_cnt;
+};
+
+extern int mpc52xx_lpbfifo_submit(struct mpc52xx_lpbfifo_request *req);
+extern void mpc52xx_lpbfifo_abort(struct mpc52xx_lpbfifo_request *req);
+extern void mpc52xx_lpbfifo_poll(void);
 
 /* mpc52xx_pic.c */
 extern void mpc52xx_init_irq(void);

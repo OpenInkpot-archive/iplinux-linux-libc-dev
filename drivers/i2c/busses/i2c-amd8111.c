@@ -17,6 +17,7 @@
 #include <linux/i2c.h>
 #include <linux/delay.h>
 #include <linux/acpi.h>
+#include <linux/slab.h>
 #include <asm/io.h>
 
 MODULE_LICENSE("GPL");
@@ -72,7 +73,7 @@ static unsigned int amd_ec_wait_write(struct amd_smbus *smbus)
 {
 	int timeout = 500;
 
-	while (timeout-- && (inb(smbus->base + AMD_EC_SC) & AMD_EC_SC_IBF))
+	while ((inb(smbus->base + AMD_EC_SC) & AMD_EC_SC_IBF) && --timeout)
 		udelay(1);
 
 	if (!timeout) {
@@ -88,7 +89,7 @@ static unsigned int amd_ec_wait_read(struct amd_smbus *smbus)
 {
 	int timeout = 500;
 
-	while (timeout-- && (~inb(smbus->base + AMD_EC_SC) & AMD_EC_SC_OBF))
+	while ((~inb(smbus->base + AMD_EC_SC) & AMD_EC_SC_OBF) && --timeout)
 		udelay(1);
 
 	if (!timeout) {
@@ -351,7 +352,7 @@ static const struct i2c_algorithm smbus_algorithm = {
 };
 
 
-static struct pci_device_id amd8111_ids[] = {
+static const struct pci_device_id amd8111_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_8111_SMBUS2) },
 	{ 0, }
 };
@@ -376,8 +377,10 @@ static int __devinit amd8111_probe(struct pci_dev *dev,
 	smbus->size = pci_resource_len(dev, 0);
 
 	error = acpi_check_resource_conflict(&dev->resource[0]);
-	if (error)
+	if (error) {
+		error = -ENODEV;
 		goto out_kfree;
+	}
 
 	if (!request_region(smbus->base, smbus->size, amd8111_driver.name)) {
 		error = -EBUSY;
@@ -387,7 +390,6 @@ static int __devinit amd8111_probe(struct pci_dev *dev,
 	smbus->adapter.owner = THIS_MODULE;
 	snprintf(smbus->adapter.name, sizeof(smbus->adapter.name),
 		"SMBus2 AMD8111 adapter at %04x", smbus->base);
-	smbus->adapter.id = I2C_HW_SMBUS_AMD8111;
 	smbus->adapter.class = I2C_CLASS_HWMON | I2C_CLASS_SPD;
 	smbus->adapter.algo = &smbus_algorithm;
 	smbus->adapter.algo_data = smbus;

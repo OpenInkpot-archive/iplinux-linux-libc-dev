@@ -5,6 +5,7 @@
 #include <linux/workqueue.h>
 #include <linux/aio_abi.h>
 #include <linux/uio.h>
+#include <linux/rcupdate.h>
 
 #include <asm/atomic.h>
 
@@ -101,7 +102,6 @@ struct kiocb {
 	} ki_obj;
 
 	__u64			ki_user_data;	/* user's data for completion */
-	wait_queue_t		ki_wait;
 	loff_t			ki_pos;
 
 	void			*private;
@@ -120,9 +120,9 @@ struct kiocb {
 
 	/*
 	 * If the aio_resfd field of the userspace iocb is not zero,
-	 * this is the underlying file* to deliver event to.
+	 * this is the underlying eventfd context to deliver events to.
 	 */
-	struct file		*ki_eventfd;
+	struct eventfd_ctx	*ki_eventfd;
 };
 
 #define is_sync_kiocb(iocb)	((iocb)->ki_key == KIOCB_SYNC_KEY)
@@ -139,7 +139,6 @@ struct kiocb {
 		(x)->ki_dtor = NULL;			\
 		(x)->ki_obj.tsk = tsk;			\
 		(x)->ki_user_data = 0;                  \
-		init_wait((&(x)->ki_wait));             \
 	} while (0)
 
 #define AIO_RING_MAGIC			0xa10a10a1
@@ -183,7 +182,7 @@ struct kioctx {
 
 	/* This needs improving */
 	unsigned long		user_id;
-	struct kioctx		*next;
+	struct hlist_node	list;
 
 	wait_queue_head_t	wait;
 
@@ -199,6 +198,8 @@ struct kioctx {
 	struct aio_ring_info	ring_info;
 
 	struct delayed_work	wq;
+
+	struct rcu_head		rcu_head;
 };
 
 /* prototypes */
@@ -219,10 +220,6 @@ static inline int aio_complete(struct kiocb *iocb, long res, long res2) { return
 struct mm_struct;
 static inline void exit_aio(struct mm_struct *mm) { }
 #endif /* CONFIG_AIO */
-
-#define io_wait_to_kiocb(wait) container_of(wait, struct kiocb, ki_wait)
-
-#include <linux/aio_abi.h>
 
 static inline struct kiocb *list_kiocb(struct list_head *h)
 {

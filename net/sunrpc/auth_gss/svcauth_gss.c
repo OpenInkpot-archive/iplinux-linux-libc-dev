@@ -37,6 +37,7 @@
  *
  */
 
+#include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/module.h>
 #include <linux/pagemap.h>
@@ -105,8 +106,8 @@ static int rsi_match(struct cache_head *a, struct cache_head *b)
 {
 	struct rsi *item = container_of(a, struct rsi, h);
 	struct rsi *tmp = container_of(b, struct rsi, h);
-	return netobj_equal(&item->in_handle, &tmp->in_handle)
-		&& netobj_equal(&item->in_token, &tmp->in_token);
+	return netobj_equal(&item->in_handle, &tmp->in_handle) &&
+	       netobj_equal(&item->in_token, &tmp->in_token);
 }
 
 static int dup_to_netobj(struct xdr_netobj *dst, char *src, int len)
@@ -179,6 +180,11 @@ static void rsi_request(struct cache_detail *cd,
 	qword_addhex(bpp, blen, rsii->in_handle.data, rsii->in_handle.len);
 	qword_addhex(bpp, blen, rsii->in_token.data, rsii->in_token.len);
 	(*bpp)[-1] = '\n';
+}
+
+static int rsi_upcall(struct cache_detail *cd, struct cache_head *h)
+{
+	return sunrpc_cache_pipe_upcall(cd, h, rsi_request);
 }
 
 
@@ -270,7 +276,7 @@ static struct cache_detail rsi_cache = {
 	.hash_table     = rsi_table,
 	.name           = "auth.rpcsec.init",
 	.cache_put      = rsi_put,
-	.cache_request  = rsi_request,
+	.cache_upcall   = rsi_upcall,
 	.cache_parse    = rsi_parse,
 	.match		= rsi_match,
 	.init		= rsi_init,
@@ -332,6 +338,7 @@ struct rsc {
 	struct svc_cred		cred;
 	struct gss_svc_seq_data	seqdata;
 	struct gss_ctx		*mechctx;
+	char			*client_name;
 };
 
 static struct cache_head *rsc_table[RSC_HASHMAX];
@@ -346,6 +353,7 @@ static void rsc_free(struct rsc *rsci)
 		gss_delete_sec_context(&rsci->mechctx);
 	if (rsci->cred.cr_group_info)
 		put_group_info(rsci->cred.cr_group_info);
+	kfree(rsci->client_name);
 }
 
 static void rsc_put(struct kref *ref)
@@ -383,6 +391,7 @@ rsc_init(struct cache_head *cnew, struct cache_head *ctmp)
 	tmp->handle.data = NULL;
 	new->mechctx = NULL;
 	new->cred.cr_group_info = NULL;
+	new->client_name = NULL;
 }
 
 static void
@@ -397,6 +406,8 @@ update_rsc(struct cache_head *cnew, struct cache_head *ctmp)
 	spin_lock_init(&new->seqdata.sd_lock);
 	new->cred = tmp->cred;
 	tmp->cred.cr_group_info = NULL;
+	new->client_name = tmp->client_name;
+	tmp->client_name = NULL;
 }
 
 static struct cache_head *
@@ -486,6 +497,15 @@ static int rsc_parse(struct cache_detail *cd,
 		status = gss_import_sec_context(buf, len, gm, &rsci.mechctx);
 		if (status)
 			goto out;
+
+		/* get client name */
+		len = qword_get(&mesg, buf, mlen);
+		if (len > 0) {
+			rsci.client_name = kstrdup(buf, GFP_KERNEL);
+			if (!rsci.client_name)
+				goto out;
+		}
+
 	}
 	rsci.h.expiry_time = expiry;
 	rscp = rsc_update(&rsci, rscp);
@@ -746,7 +766,7 @@ u32 svcauth_gss_flavor(struct auth_domain *dom)
 	return gd->pseudoflavor;
 }
 
-EXPORT_SYMBOL(svcauth_gss_flavor);
+EXPORT_SYMBOL_GPL(svcauth_gss_flavor);
 
 int
 svcauth_gss_register_pseudoflavor(u32 pseudoflavor, char * name)
@@ -780,7 +800,7 @@ out:
 	return stat;
 }
 
-EXPORT_SYMBOL(svcauth_gss_register_pseudoflavor);
+EXPORT_SYMBOL_GPL(svcauth_gss_register_pseudoflavor);
 
 static inline int
 read_u32_from_xdr_buf(struct xdr_buf *buf, int base, u32 *obj)
@@ -912,6 +932,16 @@ struct gss_svc_data {
 	__be32				*verf_start;
 	struct rsc			*rsci;
 };
+
+char *svc_gss_principal(struct svc_rqst *rqstp)
+{
+	struct gss_svc_data *gd = (struct gss_svc_data *)rqstp->rq_auth_data;
+
+	if (gd && gd->rsci)
+		return gd->rsci->client_name;
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(svc_gss_principal);
 
 static int
 svcauth_gss_set_client(struct svc_rqst *rqstp)
@@ -1345,8 +1375,10 @@ svcauth_gss_release(struct svc_rqst *rqstp)
 		if (stat)
 			goto out_err;
 		break;
-	default:
-		goto out_err;
+	/*
+	 * For any other gc_svc value, svcauth_gss_accept() already set
+	 * the auth_error appropriately; just fall through:
+	 */
 	}
 
 out:

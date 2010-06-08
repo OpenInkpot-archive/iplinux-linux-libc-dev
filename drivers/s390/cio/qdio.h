@@ -1,7 +1,7 @@
 /*
  * linux/drivers/s390/cio/qdio.h
  *
- * Copyright 2000,2008 IBM Corp.
+ * Copyright 2000,2009 IBM Corp.
  * Author(s): Utz Bacher <utz.bacher@de.ibm.com>
  *	      Jan Glauber <jang@linux.vnet.ibm.com>
  */
@@ -10,10 +10,10 @@
 
 #include <asm/page.h>
 #include <asm/schid.h>
+#include <asm/debug.h>
 #include "chsc.h"
 
 #define QDIO_BUSY_BIT_PATIENCE		100	/* 100 microseconds */
-#define QDIO_BUSY_BIT_GIVE_UP		2000000	/* 2 seconds = eternity */
 #define QDIO_INPUT_THRESHOLD		500	/* 500 microseconds */
 
 /*
@@ -111,12 +111,12 @@ static inline int do_sqbs(u64 token, unsigned char state, int queue,
 }
 
 static inline int do_eqbs(u64 token, unsigned char *state, int queue,
-			  int *start, int *count)
+			  int *start, int *count, int ack)
 {
 	register unsigned long _ccq asm ("0") = *count;
 	register unsigned long _token asm ("1") = token;
 	unsigned long _queuestart = ((unsigned long)queue << 32) | *start;
-	unsigned long _state = 0;
+	unsigned long _state = (unsigned long)ack << 63;
 
 	asm volatile(
 		"	.insn	rrf,0xB99c0000,%1,%2,0,0"
@@ -133,7 +133,7 @@ static inline int do_eqbs(u64 token, unsigned char *state, int queue,
 static inline int do_sqbs(u64 token, unsigned char state, int queue,
 			  int *start, int *count) { return 0; }
 static inline int do_eqbs(u64 token, unsigned char *state, int queue,
-			  int *start, int *count) { return 0; }
+			  int *start, int *count, int ack) { return 0; }
 #endif /* CONFIG_64BIT */
 
 struct qdio_irq;
@@ -182,40 +182,100 @@ struct scssc_area {
 	u32:32;
 } __attribute__ ((packed));
 
+struct qdio_dev_perf_stat {
+	unsigned int adapter_int;
+	unsigned int qdio_int;
+	unsigned int pci_request_int;
+
+	unsigned int tasklet_inbound;
+	unsigned int tasklet_inbound_resched;
+	unsigned int tasklet_inbound_resched2;
+	unsigned int tasklet_outbound;
+
+	unsigned int siga_read;
+	unsigned int siga_write;
+	unsigned int siga_sync;
+
+	unsigned int inbound_call;
+	unsigned int inbound_handler;
+	unsigned int stop_polling;
+	unsigned int inbound_queue_full;
+	unsigned int outbound_call;
+	unsigned int outbound_handler;
+	unsigned int fast_requeue;
+	unsigned int target_full;
+	unsigned int eqbs;
+	unsigned int eqbs_partial;
+	unsigned int sqbs;
+	unsigned int sqbs_partial;
+} ____cacheline_aligned;
+
+struct qdio_queue_perf_stat {
+	/*
+	 * Sorted into order-2 buckets: 1, 2-3, 4-7, ... 64-127, 128.
+	 * Since max. 127 SBALs are scanned reuse entry for 128 as queue full
+	 * aka 127 SBALs found.
+	 */
+	unsigned int nr_sbals[8];
+	unsigned int nr_sbal_error;
+	unsigned int nr_sbal_nop;
+	unsigned int nr_sbal_total;
+};
+
 struct qdio_input_q {
 	/* input buffer acknowledgement flag */
 	int polling;
-
+	/* first ACK'ed buffer */
+	int ack_start;
+	/* how much sbals are acknowledged with qebsm */
+	int ack_count;
 	/* last time of noticing incoming data */
 	u64 timestamp;
-
-	/* lock for clearing the acknowledgement */
-	spinlock_t lock;
 };
 
 struct qdio_output_q {
-	/* failed siga-w attempts*/
-	atomic_t busy_siga_counter;
-
-	/* start time of busy condition */
-	u64 timestamp;
-
 	/* PCIs are enabled for the queue */
 	int pci_out_enabled;
-
 	/* IQDIO: output multiple buffers (enhanced SIGA) */
 	int use_enh_siga;
-
 	/* timer to check for more outbound work */
 	struct timer_list timer;
 };
 
+/*
+ * Note on cache alignment: grouped slsb and write mostly data at the beginning
+ * sbal[] is read-only and starts on a new cacheline followed by read mostly.
+ */
 struct qdio_q {
 	struct slsb slsb;
+
 	union {
 		struct qdio_input_q in;
 		struct qdio_output_q out;
 	} u;
+
+	/*
+	 * inbound: next buffer the program should check for
+	 * outbound: next buffer to check if adapter processed it
+	 */
+	int first_to_check;
+
+	/* first_to_check of the last time */
+	int last_move;
+
+	/* beginning position for calling the program */
+	int first_to_kick;
+
+	/* number of buffers in use by the adapter */
+	atomic_t nr_buf_used;
+
+	/* error condition during a data transfer */
+	unsigned int qdio_error;
+
+	struct tasklet_struct tasklet;
+	struct qdio_queue_perf_stat q_stats;
+
+	struct qdio_buffer *sbal[QDIO_MAX_BUFFERS_PER_Q] ____cacheline_aligned;
 
 	/* queue number */
 	int nr;
@@ -232,31 +292,9 @@ struct qdio_q {
 	/* upper-layer program handler */
 	qdio_handler_t (*handler);
 
-	/*
-	 * inbound: next buffer the program should check for
-	 * outbound: next buffer to check for having been processed
-	 * by the card
-	 */
-	int first_to_check;
-
-	/* first_to_check of the last time */
-	int last_move_ftc;
-
-	/* beginning position for calling the program */
-	int first_to_kick;
-
-	/* number of buffers in use by the adapter */
-	atomic_t nr_buf_used;
-
+	struct dentry *debugfs_q;
 	struct qdio_irq *irq_ptr;
-	struct tasklet_struct tasklet;
-
-	/* error condition during a data transfer */
-	unsigned int qdio_error;
-
 	struct sl *sl;
-	struct qdio_buffer *sbal[QDIO_MAX_BUFFERS_PER_Q];
-
 	/*
 	 * Warning: Leave this member at the end so it won't be cleared in
 	 * qdio_fill_qs. A page is allocated under this pointer and used for
@@ -270,6 +308,8 @@ struct qdio_irq {
 	struct qib qib;
 	u32 *dsci;		/* address of device state change indicator */
 	struct ccw_device *cdev;
+	struct dentry *debugfs_dev;
+	struct dentry *debugfs_perf;
 
 	unsigned long int_parm;
 	struct subchannel_id schid;
@@ -287,28 +327,43 @@ struct qdio_irq {
 	struct ciw aqueue;
 
 	struct qdio_ssqd_desc ssqd_desc;
-
 	void (*orig_handler) (struct ccw_device *, unsigned long, struct irb *);
 
-	/*
-	 * Warning: Leave these members together at the end so they won't be
-	 * cleared in qdio_setup_irq.
-	 */
+	int perf_stat_enabled;
+
 	struct qdr *qdr;
 	unsigned long chsc_page;
 
 	struct qdio_q *input_qs[QDIO_MAX_QUEUES_PER_IRQ];
 	struct qdio_q *output_qs[QDIO_MAX_QUEUES_PER_IRQ];
 
+	debug_info_t *debug_area;
 	struct mutex setup_mutex;
+	struct qdio_dev_perf_stat perf_stat;
 };
 
 /* helper functions */
 #define queue_type(q)	q->irq_ptr->qib.qfmt
+#define SCH_NO(q)	(q->irq_ptr->schid.sch_no)
 
 #define is_thinint_irq(irq) \
 	(irq->qib.qfmt == QDIO_IQDIO_QFMT || \
 	 css_general_characteristics.aif_osa)
+
+#define qperf(__qdev, __attr)	((__qdev)->perf_stat.(__attr))
+
+#define qperf_inc(__q, __attr)						\
+({									\
+	struct qdio_irq *qdev = (__q)->irq_ptr;				\
+	if (qdev->perf_stat_enabled)					\
+		(qdev->perf_stat.__attr)++;				\
+})
+
+static inline void account_sbals_error(struct qdio_q *q, int count)
+{
+	q->q_stats.nr_sbal_error += count;
+	q->q_stats.nr_sbal_total += count;
+}
 
 /* the highest iqdio queue is used for multicast */
 static inline int multicast_outbound(struct qdio_q *q)
@@ -348,16 +403,10 @@ static inline unsigned long long get_usecs(void)
 	((bufnr + 1) & QDIO_MAX_BUFFERS_MASK)
 #define add_buf(bufnr, inc) \
 	((bufnr + inc) & QDIO_MAX_BUFFERS_MASK)
+#define sub_buf(bufnr, dec) \
+	((bufnr - dec) & QDIO_MAX_BUFFERS_MASK)
 
 /* prototypes for thin interrupt */
-void qdio_sync_after_thinint(struct qdio_q *q);
-int get_buf_state(struct qdio_q *q, unsigned int bufnr, unsigned char *state);
-void qdio_check_outbound_after_thinint(struct qdio_q *q);
-int qdio_inbound_q_moved(struct qdio_q *q);
-void qdio_kick_inbound_handler(struct qdio_q *q);
-void qdio_stop_polling(struct qdio_q *q);
-int qdio_siga_sync_q(struct qdio_q *q);
-
 void qdio_setup_thinint(struct qdio_irq *irq_ptr);
 int qdio_establish_thinint(struct qdio_irq *irq_ptr);
 void qdio_shutdown_thinint(struct qdio_irq *irq_ptr);
@@ -378,11 +427,18 @@ void qdio_int_handler(struct ccw_device *cdev, unsigned long intparm,
 int qdio_allocate_qs(struct qdio_irq *irq_ptr, int nr_input_qs,
 		     int nr_output_qs);
 void qdio_setup_ssqd_info(struct qdio_irq *irq_ptr);
+int qdio_setup_get_ssqd(struct qdio_irq *irq_ptr,
+			struct subchannel_id *schid,
+			struct qdio_ssqd_desc *data);
 int qdio_setup_irq(struct qdio_initialize *init_data);
 void qdio_print_subchannel_info(struct qdio_irq *irq_ptr,
 				struct ccw_device *cdev);
 void qdio_release_memory(struct qdio_irq *irq_ptr);
+int qdio_setup_create_sysfs(struct ccw_device *cdev);
+void qdio_setup_destroy_sysfs(struct ccw_device *cdev);
 int qdio_setup_init(void);
 void qdio_setup_exit(void);
 
+int debug_get_buf_state(struct qdio_q *q, unsigned int bufnr,
+			unsigned char *state);
 #endif /* _CIO_QDIO_H */

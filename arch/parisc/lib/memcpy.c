@@ -275,7 +275,7 @@ handle_store_error:
 
 
 /* Returns 0 for success, otherwise, returns number of bytes not transferred. */
-unsigned long pa_memcpy(void *dstp, const void *srcp, unsigned long len)
+static unsigned long pa_memcpy(void *dstp, const void *srcp, unsigned long len)
 {
 	register unsigned long src, dst, t1, t2, t3;
 	register unsigned char *pcs, *pcd;
@@ -405,7 +405,7 @@ byte_copy:
 
 unaligned_copy:
 	/* possibly we are aligned on a word, but not on a double... */
-	if (likely(t1 & (sizeof(unsigned int)-1)) == 0) {
+	if (likely((t1 & (sizeof(unsigned int)-1)) == 0)) {
 		t2 = src & (sizeof(unsigned int) - 1);
 
 		if (unlikely(t2 != 0)) {
@@ -475,7 +475,8 @@ unsigned long copy_to_user(void __user *dst, const void *src, unsigned long len)
 	return pa_memcpy((void __force *)dst, src, len);
 }
 
-unsigned long copy_from_user(void *dst, const void __user *src, unsigned long len)
+EXPORT_SYMBOL(__copy_from_user);
+unsigned long __copy_from_user(void *dst, const void __user *src, unsigned long len)
 {
 	mtsp(get_user_space(), 1);
 	mtsp(get_kernel_space(), 2);

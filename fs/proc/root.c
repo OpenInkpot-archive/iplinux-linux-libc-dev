@@ -16,7 +16,6 @@
 #include <linux/sched.h>
 #include <linux/module.h>
 #include <linux/bitops.h>
-#include <linux/smp_lock.h>
 #include <linux/mount.h>
 #include <linux/pid_namespace.h>
 
@@ -68,8 +67,7 @@ static int proc_get_sb(struct file_system_type *fs_type,
 		sb->s_flags = flags;
 		err = proc_fill_super(sb);
 		if (err) {
-			up_write(&sb->s_umount);
-			deactivate_super(sb);
+			deactivate_locked_super(sb);
 			return err;
 		}
 
@@ -84,7 +82,8 @@ static int proc_get_sb(struct file_system_type *fs_type,
 		ns->proc_mnt = mnt;
 	}
 
-	return simple_set_mnt(mnt, sb);
+	simple_set_mnt(mnt, sb);
+	return 0;
 }
 
 static void proc_kill_sb(struct super_block *sb)
@@ -162,17 +161,12 @@ static int proc_root_readdir(struct file * filp,
 	unsigned int nr = filp->f_pos;
 	int ret;
 
-	lock_kernel();
-
 	if (nr < FIRST_PROCESS_ENTRY) {
 		int error = proc_readdir(filp, dirent, filldir);
-		if (error <= 0) {
-			unlock_kernel();
+		if (error <= 0)
 			return error;
-		}
 		filp->f_pos = FIRST_PROCESS_ENTRY;
 	}
-	unlock_kernel();
 
 	ret = proc_pid_readdir(filp, dirent, filldir);
 	return ret;
@@ -226,9 +220,3 @@ void pid_ns_release_proc(struct pid_namespace *ns)
 {
 	mntput(ns->proc_mnt);
 }
-
-EXPORT_SYMBOL(proc_symlink);
-EXPORT_SYMBOL(proc_mkdir);
-EXPORT_SYMBOL(create_proc_entry);
-EXPORT_SYMBOL(proc_create_data);
-EXPORT_SYMBOL(remove_proc_entry);

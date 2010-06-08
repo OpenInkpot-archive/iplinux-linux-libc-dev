@@ -25,6 +25,7 @@
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/if_packet.h>
+#include <linux/gfp.h>
 #include <net/ip.h>
 #include <net/protocol.h>
 #include <net/netlink.h>
@@ -86,7 +87,7 @@ int sk_filter(struct sock *sk, struct sk_buff *skb)
 		return err;
 
 	rcu_read_lock_bh();
-	filter = rcu_dereference(sk->sk_filter);
+	filter = rcu_dereference_bh(sk->sk_filter);
 	if (filter) {
 		unsigned int pkt_len = sk_run_filter(skb, filter->insns,
 				filter->len);
@@ -303,6 +304,12 @@ load_b:
 		case SKF_AD_IFINDEX:
 			A = skb->dev->ifindex;
 			continue;
+		case SKF_AD_MARK:
+			A = skb->mark;
+			continue;
+		case SKF_AD_QUEUE:
+			A = skb->queue_mapping;
+			continue;
 		case SKF_AD_NLATTR: {
 			struct nlattr *nla;
 
@@ -313,6 +320,25 @@ load_b:
 
 			nla = nla_find((struct nlattr *)&skb->data[A],
 				       skb->len - A, X);
+			if (nla)
+				A = (void *)nla - (void *)skb->data;
+			else
+				A = 0;
+			continue;
+		}
+		case SKF_AD_NLATTR_NEST: {
+			struct nlattr *nla;
+
+			if (skb_is_nonlinear(skb))
+				return 0;
+			if (A > skb->len - sizeof(struct nlattr))
+				return 0;
+
+			nla = (struct nlattr *)&skb->data[A];
+			if (nla->nla_len > A - skb->len)
+				return 0;
+
+			nla = nla_find_nested(nla, X);
 			if (nla)
 				A = (void *)nla - (void *)skb->data;
 			else
@@ -496,7 +522,7 @@ int sk_attach_filter(struct sock_fprog *fprog, struct sock *sk)
 	}
 
 	rcu_read_lock_bh();
-	old_fp = rcu_dereference(sk->sk_filter);
+	old_fp = rcu_dereference_bh(sk->sk_filter);
 	rcu_assign_pointer(sk->sk_filter, fp);
 	rcu_read_unlock_bh();
 
@@ -504,6 +530,7 @@ int sk_attach_filter(struct sock_fprog *fprog, struct sock *sk)
 		sk_filter_delayed_uncharge(sk, old_fp);
 	return 0;
 }
+EXPORT_SYMBOL_GPL(sk_attach_filter);
 
 int sk_detach_filter(struct sock *sk)
 {
@@ -511,7 +538,7 @@ int sk_detach_filter(struct sock *sk)
 	struct sk_filter *filter;
 
 	rcu_read_lock_bh();
-	filter = rcu_dereference(sk->sk_filter);
+	filter = rcu_dereference_bh(sk->sk_filter);
 	if (filter) {
 		rcu_assign_pointer(sk->sk_filter, NULL);
 		sk_filter_delayed_uncharge(sk, filter);
@@ -520,3 +547,4 @@ int sk_detach_filter(struct sock *sk)
 	rcu_read_unlock_bh();
 	return ret;
 }
+EXPORT_SYMBOL_GPL(sk_detach_filter);

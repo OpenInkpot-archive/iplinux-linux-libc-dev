@@ -44,7 +44,7 @@
 #include "bf5xx-i2s-pcm.h"
 #include "bf5xx-i2s.h"
 
-static struct snd_soc_machine bf5xx_ssm2602;
+static struct snd_soc_card bf5xx_ssm2602;
 
 static int bf5xx_ssm2602_startup(struct snd_pcm_substream *substream)
 {
@@ -92,17 +92,17 @@ static int bf5xx_ssm2602_hw_params(struct snd_pcm_substream *substream,
 	 */
 
 	/* set codec DAI configuration */
-	ret = codec_dai->dai_ops.set_fmt(codec_dai, SND_SOC_DAIFMT_I2S |
+	ret = snd_soc_dai_set_fmt(codec_dai, SND_SOC_DAIFMT_I2S |
 		SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_CBM_CFM);
 	if (ret < 0)
 		return ret;
 	/* set cpu DAI configuration */
-	ret = cpu_dai->dai_ops.set_fmt(cpu_dai, SND_SOC_DAIFMT_I2S |
+	ret = snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_I2S |
 		SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_CBM_CFM);
 	if (ret < 0)
 		return ret;
 
-	ret = codec_dai->dai_ops.set_sysclk(codec_dai, SSM2602_SYSCLK, clk,
+	ret = snd_soc_dai_set_sysclk(codec_dai, SSM2602_SYSCLK, clk,
 		SND_SOC_CLOCK_IN);
 	if (ret < 0)
 		return ret;
@@ -135,37 +135,37 @@ static struct ssm2602_setup_data bf5xx_ssm2602_setup = {
 	.i2c_address = 0x1b,
 };
 
-static struct snd_soc_machine bf5xx_ssm2602 = {
+static struct snd_soc_card bf5xx_ssm2602 = {
 	.name = "bf5xx_ssm2602",
+	.platform = &bf5xx_i2s_soc_platform,
 	.dai_link = &bf5xx_ssm2602_dai,
 	.num_links = 1,
 };
 
 static struct snd_soc_device bf5xx_ssm2602_snd_devdata = {
-	.machine = &bf5xx_ssm2602,
-	.platform = &bf5xx_i2s_soc_platform,
+	.card = &bf5xx_ssm2602,
 	.codec_dev = &soc_codec_dev_ssm2602,
 	.codec_data = &bf5xx_ssm2602_setup,
 };
 
-static struct platform_device *bf52x_ssm2602_snd_device;
+static struct platform_device *bf5xx_ssm2602_snd_device;
 
 static int __init bf5xx_ssm2602_init(void)
 {
 	int ret;
 
 	pr_debug("%s enter\n", __func__);
-	bf52x_ssm2602_snd_device = platform_device_alloc("soc-audio", -1);
-	if (!bf52x_ssm2602_snd_device)
+	bf5xx_ssm2602_snd_device = platform_device_alloc("soc-audio", -1);
+	if (!bf5xx_ssm2602_snd_device)
 		return -ENOMEM;
 
-	platform_set_drvdata(bf52x_ssm2602_snd_device,
+	platform_set_drvdata(bf5xx_ssm2602_snd_device,
 				&bf5xx_ssm2602_snd_devdata);
-	bf5xx_ssm2602_snd_devdata.dev = &bf52x_ssm2602_snd_device->dev;
-	ret = platform_device_add(bf52x_ssm2602_snd_device);
+	bf5xx_ssm2602_snd_devdata.dev = &bf5xx_ssm2602_snd_device->dev;
+	ret = platform_device_add(bf5xx_ssm2602_snd_device);
 
 	if (ret)
-		platform_device_put(bf52x_ssm2602_snd_device);
+		platform_device_put(bf5xx_ssm2602_snd_device);
 
 	return ret;
 }
@@ -173,7 +173,7 @@ static int __init bf5xx_ssm2602_init(void)
 static void __exit bf5xx_ssm2602_exit(void)
 {
 	pr_debug("%s enter\n", __func__);
-	platform_device_unregister(bf52x_ssm2602_snd_device);
+	platform_device_unregister(bf5xx_ssm2602_snd_device);
 }
 
 module_init(bf5xx_ssm2602_init);

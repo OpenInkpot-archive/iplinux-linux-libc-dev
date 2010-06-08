@@ -11,6 +11,7 @@
 #include <linux/fb.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
+#include <linux/slab.h>
 
 #include "carminefb.h"
 #include "carminefb_regs.h"
@@ -168,7 +169,7 @@ static int carmine_setcolreg(unsigned regno, unsigned red, unsigned green,
 	blue >>= 8;
 	transp >>= 8;
 
-	((u32 *)info->pseudo_palette)[regno] = be32_to_cpu(transp << 24 |
+	((__be32 *)info->pseudo_palette)[regno] = cpu_to_be32(transp << 24 |
 		red << 0 | green << 8 | blue << 16);
 	return 0;
 }
@@ -562,7 +563,7 @@ static int __devinit alloc_carmine_fb(void __iomem *regs, void __iomem *smem_bas
 	if (ret < 0)
 		goto err_free_fb;
 
-	if (fb_mode > ARRAY_SIZE(carmine_modedb))
+	if (fb_mode >= ARRAY_SIZE(carmine_modedb))
 		fb_mode = CARMINEFB_DEFAULT_VIDEO_MODE;
 
 	par->cur_mode = par->new_mode = ~0;

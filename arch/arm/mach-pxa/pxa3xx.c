@@ -23,12 +23,15 @@
 #include <linux/sysdev.h>
 
 #include <mach/hardware.h>
+#include <mach/gpio.h>
 #include <mach/pxa3xx-regs.h>
 #include <mach/reset.h>
 #include <mach/ohci.h>
 #include <mach/pm.h>
 #include <mach/dma.h>
 #include <mach/ssp.h>
+#include <mach/regs-intc.h>
+#include <plat/i2c.h>
 
 #include "generic.h"
 #include "devices.h"
@@ -42,6 +45,9 @@
 
 #define ACCR_D0CS	(1 << 26)
 #define ACCR_PCCE	(1 << 11)
+
+#define PECR_IE(n)	((1 << ((n) * 2)) << 28)
+#define PECR_IS(n)	((1 << ((n) * 2)) << 29)
 
 /* crystal frequency to static memory controller multiplier (SMCFS) */
 static unsigned char smcfs_mult[8] = { 6, 0, 8, 0, 0, 16, };
@@ -216,43 +222,60 @@ static const struct clkops clk_dummy_ops = {
 	.disable	= clk_dummy_disable,
 };
 
-static struct clk pxa3xx_clks[] = {
-	{
-		.name           = "CLK_POUT",
-		.ops            = &clk_pout_ops,
-		.rate           = 13000000,
-		.delay          = 70,
-	},
+static struct clk clk_pxa3xx_pout = {
+	.ops		= &clk_pout_ops,
+	.rate		= 13000000,
+	.delay		= 70,
+};
 
+static struct clk clk_dummy = {
+	.ops		= &clk_dummy_ops,
+};
+
+static DEFINE_PXA3_CK(pxa3xx_lcd, LCD, &clk_pxa3xx_hsio_ops);
+static DEFINE_PXA3_CK(pxa3xx_camera, CAMERA, &clk_pxa3xx_hsio_ops);
+static DEFINE_PXA3_CK(pxa3xx_ac97, AC97, &clk_pxa3xx_ac97_ops);
+static DEFINE_PXA3_CKEN(pxa3xx_ffuart, FFUART, 14857000, 1);
+static DEFINE_PXA3_CKEN(pxa3xx_btuart, BTUART, 14857000, 1);
+static DEFINE_PXA3_CKEN(pxa3xx_stuart, STUART, 14857000, 1);
+static DEFINE_PXA3_CKEN(pxa3xx_i2c, I2C, 32842000, 0);
+static DEFINE_PXA3_CKEN(pxa3xx_udc, UDC, 48000000, 5);
+static DEFINE_PXA3_CKEN(pxa3xx_usbh, USBH, 48000000, 0);
+static DEFINE_PXA3_CKEN(pxa3xx_u2d, USB2, 48000000, 0);
+static DEFINE_PXA3_CKEN(pxa3xx_keypad, KEYPAD, 32768, 0);
+static DEFINE_PXA3_CKEN(pxa3xx_ssp1, SSP1, 13000000, 0);
+static DEFINE_PXA3_CKEN(pxa3xx_ssp2, SSP2, 13000000, 0);
+static DEFINE_PXA3_CKEN(pxa3xx_ssp3, SSP3, 13000000, 0);
+static DEFINE_PXA3_CKEN(pxa3xx_ssp4, SSP4, 13000000, 0);
+static DEFINE_PXA3_CKEN(pxa3xx_pwm0, PWM0, 13000000, 0);
+static DEFINE_PXA3_CKEN(pxa3xx_pwm1, PWM1, 13000000, 0);
+static DEFINE_PXA3_CKEN(pxa3xx_mmc1, MMC1, 19500000, 0);
+static DEFINE_PXA3_CKEN(pxa3xx_mmc2, MMC2, 19500000, 0);
+
+static struct clk_lookup pxa3xx_clkregs[] = {
+	INIT_CLKREG(&clk_pxa3xx_pout, NULL, "CLK_POUT"),
 	/* Power I2C clock is always on */
-	{
-		.name		= "I2CCLK",
-		.ops		= &clk_dummy_ops,
-		.dev		= &pxa3xx_device_i2c_power.dev,
-	},
-
-	PXA3xx_CK("LCDCLK",  LCD,    &clk_pxa3xx_hsio_ops, &pxa_device_fb.dev),
-	PXA3xx_CK("CAMCLK",  CAMERA, &clk_pxa3xx_hsio_ops, NULL),
-	PXA3xx_CK("AC97CLK", AC97,   &clk_pxa3xx_ac97_ops, NULL),
-
-	PXA3xx_CKEN("UARTCLK", FFUART, 14857000, 1, &pxa_device_ffuart.dev),
-	PXA3xx_CKEN("UARTCLK", BTUART, 14857000, 1, &pxa_device_btuart.dev),
-	PXA3xx_CKEN("UARTCLK", STUART, 14857000, 1, NULL),
-
-	PXA3xx_CKEN("I2CCLK", I2C,  32842000, 0, &pxa_device_i2c.dev),
-	PXA3xx_CKEN("UDCCLK", UDC,  48000000, 5, &pxa27x_device_udc.dev),
-	PXA3xx_CKEN("USBCLK", USBH, 48000000, 0, &pxa27x_device_ohci.dev),
-	PXA3xx_CKEN("KBDCLK", KEYPAD,  32768, 0, &pxa27x_device_keypad.dev),
-
-	PXA3xx_CKEN("SSPCLK", SSP1, 13000000, 0, &pxa27x_device_ssp1.dev),
-	PXA3xx_CKEN("SSPCLK", SSP2, 13000000, 0, &pxa27x_device_ssp2.dev),
-	PXA3xx_CKEN("SSPCLK", SSP3, 13000000, 0, &pxa27x_device_ssp3.dev),
-	PXA3xx_CKEN("SSPCLK", SSP4, 13000000, 0, &pxa3xx_device_ssp4.dev),
-	PXA3xx_CKEN("PWMCLK", PWM0, 13000000, 0, &pxa27x_device_pwm0.dev),
-	PXA3xx_CKEN("PWMCLK", PWM1, 13000000, 0, &pxa27x_device_pwm1.dev),
-
-	PXA3xx_CKEN("MMCCLK", MMC1, 19500000, 0, &pxa_device_mci.dev),
-	PXA3xx_CKEN("MMCCLK", MMC2, 19500000, 0, &pxa3xx_device_mci2.dev),
+	INIT_CLKREG(&clk_dummy, "pxa3xx-pwri2c.1", NULL),
+	INIT_CLKREG(&clk_pxa3xx_lcd, "pxa2xx-fb", NULL),
+	INIT_CLKREG(&clk_pxa3xx_camera, NULL, "CAMCLK"),
+	INIT_CLKREG(&clk_pxa3xx_ac97, NULL, "AC97CLK"),
+	INIT_CLKREG(&clk_pxa3xx_ffuart, "pxa2xx-uart.0", NULL),
+	INIT_CLKREG(&clk_pxa3xx_btuart, "pxa2xx-uart.1", NULL),
+	INIT_CLKREG(&clk_pxa3xx_stuart, "pxa2xx-uart.2", NULL),
+	INIT_CLKREG(&clk_pxa3xx_stuart, "pxa2xx-ir", "UARTCLK"),
+	INIT_CLKREG(&clk_pxa3xx_i2c, "pxa2xx-i2c.0", NULL),
+	INIT_CLKREG(&clk_pxa3xx_udc, "pxa27x-udc", NULL),
+	INIT_CLKREG(&clk_pxa3xx_usbh, "pxa27x-ohci", NULL),
+	INIT_CLKREG(&clk_pxa3xx_u2d, NULL, "U2DCLK"),
+	INIT_CLKREG(&clk_pxa3xx_keypad, "pxa27x-keypad", NULL),
+	INIT_CLKREG(&clk_pxa3xx_ssp1, "pxa27x-ssp.0", NULL),
+	INIT_CLKREG(&clk_pxa3xx_ssp2, "pxa27x-ssp.1", NULL),
+	INIT_CLKREG(&clk_pxa3xx_ssp3, "pxa27x-ssp.2", NULL),
+	INIT_CLKREG(&clk_pxa3xx_ssp4, "pxa27x-ssp.3", NULL),
+	INIT_CLKREG(&clk_pxa3xx_pwm0, "pxa27x-pwm.0", NULL),
+	INIT_CLKREG(&clk_pxa3xx_pwm1, "pxa27x-pwm.1", NULL),
+	INIT_CLKREG(&clk_pxa3xx_mmc1, "pxa2xx-mci.0", NULL),
+	INIT_CLKREG(&clk_pxa3xx_mmc2, "pxa2xx-mci.1", NULL),
 };
 
 #ifdef CONFIG_PM
@@ -513,6 +536,43 @@ static inline void pxa3xx_init_pm(void) {}
 #define pxa3xx_set_wake	NULL
 #endif
 
+static void pxa_ack_ext_wakeup(unsigned int irq)
+{
+	PECR |= PECR_IS(irq - IRQ_WAKEUP0);
+}
+
+static void pxa_mask_ext_wakeup(unsigned int irq)
+{
+	ICMR2 &= ~(1 << ((irq - PXA_IRQ(0)) & 0x1f));
+	PECR &= ~PECR_IE(irq - IRQ_WAKEUP0);
+}
+
+static void pxa_unmask_ext_wakeup(unsigned int irq)
+{
+	ICMR2 |= 1 << ((irq - PXA_IRQ(0)) & 0x1f);
+	PECR |= PECR_IE(irq - IRQ_WAKEUP0);
+}
+
+static struct irq_chip pxa_ext_wakeup_chip = {
+	.name		= "WAKEUP",
+	.ack		= pxa_ack_ext_wakeup,
+	.mask		= pxa_mask_ext_wakeup,
+	.unmask		= pxa_unmask_ext_wakeup,
+};
+
+static void __init pxa_init_ext_wakeup_irq(set_wake_t fn)
+{
+	int irq;
+
+	for (irq = IRQ_WAKEUP0; irq <= IRQ_WAKEUP1; irq++) {
+		set_irq_chip(irq, &pxa_ext_wakeup_chip);
+		set_irq_handler(irq, handle_edge_irq);
+		set_irq_flags(irq, IRQF_VALID);
+	}
+
+	pxa_ext_wakeup_chip.set_wake = fn;
+}
+
 void __init pxa3xx_init_irq(void)
 {
 	/* enable CP6 access */
@@ -522,43 +582,23 @@ void __init pxa3xx_init_irq(void)
 	__asm__ __volatile__("mcr p15, 0, %0, c15, c1, 0\n": :"r"(value));
 
 	pxa_init_irq(56, pxa3xx_set_wake);
-	pxa_init_gpio(128, NULL);
+	pxa_init_ext_wakeup_irq(pxa3xx_set_wake);
+	pxa_init_gpio(IRQ_GPIO_2_x, 2, 127, NULL);
 }
 
 /*
  * device registration specific to PXA3xx.
  */
 
-static struct resource i2c_power_resources[] = {
-	{
-		.start  = 0x40f500c0,
-		.end    = 0x40f500d3,
-		.flags	= IORESOURCE_MEM,
-	}, {
-		.start	= IRQ_PWRI2C,
-		.end	= IRQ_PWRI2C,
-		.flags	= IORESOURCE_IRQ,
-	},
-};
-
-struct platform_device pxa3xx_device_i2c_power = {
-	.name		= "pxa2xx-i2c",
-	.id		= 1,
-	.resource	= i2c_power_resources,
-	.num_resources	= ARRAY_SIZE(i2c_power_resources),
-};
-
 void __init pxa3xx_set_i2c_power_info(struct i2c_pxa_platform_data *info)
 {
-	pxa3xx_device_i2c_power.dev.platform_data = info;
+	pxa_register_device(&pxa3xx_device_i2c_power, info);
 }
 
 static struct platform_device *devices[] __initdata = {
-/*	&pxa_device_udc,	The UDC driver is PXA25x only */
-	&pxa_device_ffuart,
-	&pxa_device_btuart,
-	&pxa_device_stuart,
+	&pxa27x_device_udc,
 	&pxa_device_i2s,
+	&sa1100_device_rtc,
 	&pxa_device_rtc,
 	&pxa27x_device_ssp1,
 	&pxa27x_device_ssp2,
@@ -566,7 +606,6 @@ static struct platform_device *devices[] __initdata = {
 	&pxa3xx_device_ssp4,
 	&pxa27x_device_pwm0,
 	&pxa27x_device_pwm1,
-	&pxa3xx_device_i2c_power,
 };
 
 static struct sys_device pxa3xx_sysdev[] = {
@@ -595,9 +634,9 @@ static int __init pxa3xx_init(void)
 		 */
 		ASCR &= ~(ASCR_RDH | ASCR_D1S | ASCR_D2S | ASCR_D3S);
 
-		clks_register(pxa3xx_clks, ARRAY_SIZE(pxa3xx_clks));
+		clkdev_add_table(pxa3xx_clkregs, ARRAY_SIZE(pxa3xx_clkregs));
 
-		if ((ret = pxa_init_dma(32)))
+		if ((ret = pxa_init_dma(IRQ_DMA, 32)))
 			return ret;
 
 		pxa3xx_init_pm();

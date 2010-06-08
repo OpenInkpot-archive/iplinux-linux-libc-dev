@@ -15,17 +15,20 @@
 #include <linux/stringify.h>
 #include <linux/kobject.h>
 #include <linux/moduleparam.h>
-#include <linux/marker.h>
 #include <linux/tracepoint.h>
-#include <asm/local.h>
 
+#include <linux/percpu.h>
 #include <asm/module.h>
+
+#include <trace/events/module.h>
 
 /* Not Yet Implemented */
 #define MODULE_SUPPORTED_DEVICE(name)
 
-/* some toolchains uses a `_' prefix for all user symbols */
-#ifndef MODULE_SYMBOL_PREFIX
+/* Some toolchains use a `_' prefix for all user symbols. */
+#ifdef CONFIG_SYMBOL_PREFIX
+#define MODULE_SYMBOL_PREFIX CONFIG_SYMBOL_PREFIX
+#else
 #define MODULE_SYMBOL_PREFIX ""
 #endif
 
@@ -77,6 +80,7 @@ search_extable(const struct exception_table_entry *first,
 void sort_extable(struct exception_table_entry *start,
 		  struct exception_table_entry *finish);
 void sort_main_extable(void);
+void trim_init_extable(struct module *m);
 
 #ifdef MODULE
 #define MODULE_GENERIC_TABLE(gtype,name)			\
@@ -126,7 +130,10 @@ extern struct module __this_module;
  */
 #define MODULE_LICENSE(_license) MODULE_INFO(license, _license)
 
-/* Author, ideally of form NAME[, NAME]*[ and NAME] */
+/*
+ * Author(s), use "Name <email>" or just "Name", for multiple
+ * authors use multiple MODULE_AUTHOR() statements/lines.
+ */
 #define MODULE_AUTHOR(_author) MODULE_INFO(author, _author)
   
 /* What your module does. */
@@ -168,6 +175,7 @@ struct notifier_block;
 
 #ifdef CONFIG_MODULES
 
+extern int modules_disabled; /* for sysctl */
 /* Get/put a kernel symbol (calls must be symmetric) */
 void *__symbol_get(const char *symbol);
 void *__symbol_get_gpl(const char *symbol);
@@ -219,11 +227,6 @@ void *__symbol_get_gpl(const char *symbol);
 
 #endif
 
-struct module_ref
-{
-	local_t count;
-} ____cacheline_aligned;
-
 enum module_state
 {
 	MODULE_STATE_LIVE,
@@ -252,6 +255,10 @@ struct module
 	const struct kernel_symbol *syms;
 	const unsigned long *crcs;
 	unsigned int num_syms;
+
+	/* Kernel parameters. */
+	struct kernel_param *kp;
+	unsigned int num_kp;
 
 	/* GPL-only exported symbols. */
 	unsigned int num_gpl_syms;
@@ -294,9 +301,6 @@ struct module
 	/* The size of the executable code in each section.  */
 	unsigned int init_text_size, core_text_size;
 
-	/* The handle returned from unwind_add_table. */
-	void *unwind_info;
-
 	/* Arch-specific module values */
 	struct mod_arch_specific arch;
 
@@ -310,10 +314,14 @@ struct module
 #endif
 
 #ifdef CONFIG_KALLSYMS
-	/* We keep the symbol and string tables for kallsyms. */
-	Elf_Sym *symtab;
-	unsigned int num_symtab;
-	char *strtab;
+	/*
+	 * We keep the symbol and string tables for kallsyms.
+	 * The core_* fields below are temporary, loader-only (they
+	 * could really be discarded after module init).
+	 */
+	Elf_Sym *symtab, *core_symtab;
+	unsigned int num_symtab, core_num_syms;
+	char *strtab, *core_strtab;
 
 	/* Section attributes */
 	struct module_sect_attrs *sect_attrs;
@@ -322,19 +330,31 @@ struct module
 	struct module_notes_attrs *notes_attrs;
 #endif
 
+#ifdef CONFIG_SMP
 	/* Per-cpu data. */
-	void *percpu;
+	void __percpu *percpu;
+	unsigned int percpu_size;
+#endif
 
 	/* The command line arguments (may be mangled).  People like
 	   keeping pointers to this stuff */
 	char *args;
-#ifdef CONFIG_MARKERS
-	struct marker *markers;
-	unsigned int num_markers;
-#endif
 #ifdef CONFIG_TRACEPOINTS
 	struct tracepoint *tracepoints;
 	unsigned int num_tracepoints;
+#endif
+
+#ifdef CONFIG_TRACING
+	const char **trace_bprintk_fmt_start;
+	unsigned int num_trace_bprintk_fmt;
+#endif
+#ifdef CONFIG_EVENT_TRACING
+	struct ftrace_event_call *trace_events;
+	unsigned int num_trace_events;
+#endif
+#ifdef CONFIG_FTRACE_MCOUNT_RECORD
+	unsigned long *ftrace_callsites;
+	unsigned int num_ftrace_callsites;
 #endif
 
 #ifdef CONFIG_MODULE_UNLOAD
@@ -347,13 +367,23 @@ struct module
 	/* Destruction function. */
 	void (*exit)(void);
 
-	/* Reference counts */
-	struct module_ref ref[NR_CPUS];
+	struct module_ref {
+		unsigned int incs;
+		unsigned int decs;
+	} __percpu *refptr;
+#endif
+
+#ifdef CONFIG_CONSTRUCTORS
+	/* Constructor functions. */
+	ctor_fn_t *ctors;
+	unsigned int num_ctors;
 #endif
 };
 #ifndef MODULE_ARCH_INIT
 #define MODULE_ARCH_INIT {}
 #endif
+
+extern struct mutex module_mutex;
 
 /* FIXME: It'd be nice to isolate modules during init, too, so they
    aren't used before they (may) fail.  But presently too much code
@@ -363,10 +393,48 @@ static inline int module_is_live(struct module *mod)
 	return mod->state != MODULE_STATE_GOING;
 }
 
-/* Is this address in a module? (second is with no locks, for oops) */
-struct module *module_text_address(unsigned long addr);
 struct module *__module_text_address(unsigned long addr);
-int is_module_address(unsigned long addr);
+struct module *__module_address(unsigned long addr);
+bool is_module_address(unsigned long addr);
+bool is_module_percpu_address(unsigned long addr);
+bool is_module_text_address(unsigned long addr);
+
+static inline int within_module_core(unsigned long addr, struct module *mod)
+{
+	return (unsigned long)mod->module_core <= addr &&
+	       addr < (unsigned long)mod->module_core + mod->core_size;
+}
+
+static inline int within_module_init(unsigned long addr, struct module *mod)
+{
+	return (unsigned long)mod->module_init <= addr &&
+	       addr < (unsigned long)mod->module_init + mod->init_size;
+}
+
+/* Search for module by name: must hold module_mutex. */
+struct module *find_module(const char *name);
+
+struct symsearch {
+	const struct kernel_symbol *start, *stop;
+	const unsigned long *crcs;
+	enum {
+		NOT_GPL_ONLY,
+		GPL_ONLY,
+		WILL_BE_GPL_ONLY,
+	} licence;
+	bool unused;
+};
+
+/* Search for an exported symbol by name. */
+const struct kernel_symbol *find_symbol(const char *name,
+					struct module **owner,
+					const unsigned long **crc,
+					bool gplok,
+					bool warn);
+
+/* Walk the exported symbol table */
+bool each_symbol(bool (*fn)(const struct symsearch *arr, struct module *owner,
+			    unsigned int symnum, void *data), void *data);
 
 /* Returns 0 and fills in value, defined and namebuf, or -ERANGE if
    symnum out of range. */
@@ -375,6 +443,10 @@ int module_get_kallsym(unsigned int symnum, unsigned long *value, char *type,
 
 /* Look for this name: can be of form module:name. */
 unsigned long module_kallsyms_lookup_name(const char *name);
+
+int module_kallsyms_on_each_symbol(int (*fn)(void *, const char *,
+					     struct module *, unsigned long),
+				   void *data);
 
 extern void __module_put_and_exit(struct module *mod, long code)
 	__attribute__((noreturn));
@@ -391,9 +463,11 @@ void symbol_put_addr(void *addr);
 static inline void __module_get(struct module *module)
 {
 	if (module) {
-		BUG_ON(module_refcount(module) == 0);
-		local_inc(&module->ref[get_cpu()].count);
-		put_cpu();
+		preempt_disable();
+		__this_cpu_inc(module->refptr->incs);
+		trace_module_get(module, _THIS_IP_,
+				 __this_cpu_read(module->refptr->incs));
+		preempt_enable();
 	}
 }
 
@@ -402,12 +476,16 @@ static inline int try_module_get(struct module *module)
 	int ret = 1;
 
 	if (module) {
-		unsigned int cpu = get_cpu();
-		if (likely(module_is_live(module)))
-			local_inc(&module->ref[cpu].count);
-		else
+		preempt_disable();
+
+		if (likely(module_is_live(module))) {
+			__this_cpu_inc(module->refptr->incs);
+			trace_module_get(module, _THIS_IP_,
+				__this_cpu_read(module->refptr->incs));
+		} else
 			ret = 0;
-		put_cpu();
+
+		preempt_enable();
 	}
 	return ret;
 }
@@ -429,6 +507,7 @@ static inline void __module_get(struct module *module)
 #define symbol_put_addr(p) do { } while(0)
 
 #endif /* CONFIG_MODULE_UNLOAD */
+int use_module(struct module *a, struct module *b);
 
 /* This is a #define so the string doesn't get put in every .o file */
 #define module_name(mod)			\
@@ -456,8 +535,6 @@ int unregister_module_notifier(struct notifier_block * nb);
 
 extern void print_modules(void);
 
-extern void module_update_markers(void);
-
 extern void module_update_tracepoints(void);
 extern int module_get_iter_tracepoints(struct tracepoint_iter *iter);
 
@@ -475,21 +552,29 @@ search_module_extables(unsigned long addr)
 	return NULL;
 }
 
-/* Is this address in a module? */
-static inline struct module *module_text_address(unsigned long addr)
+static inline struct module *__module_address(unsigned long addr)
 {
 	return NULL;
 }
 
-/* Is this address in a module? (don't take a lock, we're oopsing) */
 static inline struct module *__module_text_address(unsigned long addr)
 {
 	return NULL;
 }
 
-static inline int is_module_address(unsigned long addr)
+static inline bool is_module_address(unsigned long addr)
 {
-	return 0;
+	return false;
+}
+
+static inline bool is_module_percpu_address(unsigned long addr)
+{
+	return false;
+}
+
+static inline bool is_module_text_address(unsigned long addr)
+{
+	return false;
 }
 
 /* Get/put a kernel symbol (calls should be symmetric) */
@@ -544,6 +629,14 @@ static inline unsigned long module_kallsyms_lookup_name(const char *name)
 	return 0;
 }
 
+static inline int module_kallsyms_on_each_symbol(int (*fn)(void *, const char *,
+							   struct module *,
+							   unsigned long),
+						 void *data)
+{
+	return 0;
+}
+
 static inline int register_module_notifier(struct notifier_block * nb)
 {
 	/* no events will happen anyway, so this can always succeed */
@@ -558,10 +651,6 @@ static inline int unregister_module_notifier(struct notifier_block * nb)
 #define module_put_and_exit(code) do_exit(code)
 
 static inline void print_modules(void)
-{
-}
-
-static inline void module_update_markers(void)
 {
 }
 
@@ -620,5 +709,22 @@ static inline void module_remove_modinfo_attrs(struct module *mod)
 /* BELOW HERE ALL THESE ARE OBSOLETE AND WILL VANISH */
 
 #define __MODULE_STRING(x) __stringify(x)
+
+
+#ifdef CONFIG_GENERIC_BUG
+int  module_bug_finalize(const Elf_Ehdr *, const Elf_Shdr *,
+			 struct module *);
+void module_bug_cleanup(struct module *);
+
+#else	/* !CONFIG_GENERIC_BUG */
+
+static inline int  module_bug_finalize(const Elf_Ehdr *hdr,
+					const Elf_Shdr *sechdrs,
+					struct module *mod)
+{
+	return 0;
+}
+static inline void module_bug_cleanup(struct module *mod) {}
+#endif	/* CONFIG_GENERIC_BUG */
 
 #endif /* _LINUX_MODULE_H */

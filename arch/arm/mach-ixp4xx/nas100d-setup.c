@@ -29,11 +29,25 @@
 #include <linux/i2c.h>
 #include <linux/i2c-gpio.h>
 #include <linux/io.h>
-
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/flash.h>
 #include <asm/gpio.h>
+
+#define NAS100D_SDA_PIN		5
+#define NAS100D_SCL_PIN		6
+
+/* Buttons */
+#define NAS100D_PB_GPIO         14   /* power button */
+#define NAS100D_RB_GPIO         4    /* reset button */
+
+/* Power control */
+#define NAS100D_PO_GPIO         12   /* power off */
+
+/* LEDs */
+#define NAS100D_LED_WLAN_GPIO	0
+#define NAS100D_LED_DISK_GPIO	3
+#define NAS100D_LED_PWR_GPIO	15
 
 static struct flash_platform_data nas100d_flash_data = {
 	.map_name		= "cfi_probe",
@@ -231,7 +245,6 @@ static irqreturn_t nas100d_reset_handler(int irq, void *dev_id)
 
 static void __init nas100d_init(void)
 {
-	DECLARE_MAC_BUF(mac_buf);
 	uint8_t __iomem *f;
 	int i;
 
@@ -294,8 +307,8 @@ static void __init nas100d_init(void)
 #endif
 		iounmap(f);
 	}
-	printk(KERN_INFO "NAS100D: Using MAC address %s for port 0\n",
-	       print_mac(mac_buf, nas100d_plat_eth[0].hwaddr));
+	printk(KERN_INFO "NAS100D: Using MAC address %pM for port 0\n",
+	       nas100d_plat_eth[0].hwaddr);
 
 }
 

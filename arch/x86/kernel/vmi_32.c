@@ -28,11 +28,13 @@
 #include <linux/mm.h>
 #include <linux/highmem.h>
 #include <linux/sched.h>
+#include <linux/gfp.h>
 #include <asm/vmi.h>
 #include <asm/io.h>
 #include <asm/fixmap.h>
 #include <asm/apicdef.h>
 #include <asm/apic.h>
+#include <asm/pgalloc.h>
 #include <asm/processor.h>
 #include <asm/timer.h>
 #include <asm/vmi_time.h>
@@ -266,136 +268,8 @@ static void vmi_nop(void)
 {
 }
 
-#ifdef CONFIG_DEBUG_PAGE_TYPE
-
-#ifdef CONFIG_X86_PAE
-#define MAX_BOOT_PTS (2048+4+1)
-#else
-#define MAX_BOOT_PTS (1024+1)
-#endif
-
-/*
- * During boot, mem_map is not yet available in paging_init, so stash
- * all the boot page allocations here.
- */
-static struct {
-	u32 pfn;
-	int type;
-} boot_page_allocations[MAX_BOOT_PTS];
-static int num_boot_page_allocations;
-static int boot_allocations_applied;
-
-void vmi_apply_boot_page_allocations(void)
-{
-	int i;
-	BUG_ON(!mem_map);
-	for (i = 0; i < num_boot_page_allocations; i++) {
-		struct page *page = pfn_to_page(boot_page_allocations[i].pfn);
-		page->type = boot_page_allocations[i].type;
-		page->type = boot_page_allocations[i].type &
-				~(VMI_PAGE_ZEROED | VMI_PAGE_CLONE);
-	}
-	boot_allocations_applied = 1;
-}
-
-static void record_page_type(u32 pfn, int type)
-{
-	BUG_ON(num_boot_page_allocations >= MAX_BOOT_PTS);
-	boot_page_allocations[num_boot_page_allocations].pfn = pfn;
-	boot_page_allocations[num_boot_page_allocations].type = type;
-	num_boot_page_allocations++;
-}
-
-static void check_zeroed_page(u32 pfn, int type, struct page *page)
-{
-	u32 *ptr;
-	int i;
-	int limit = PAGE_SIZE / sizeof(int);
-
-	if (page_address(page))
-		ptr = (u32 *)page_address(page);
-	else
-		ptr = (u32 *)__va(pfn << PAGE_SHIFT);
-	/*
-	 * When cloning the root in non-PAE mode, only the userspace
-	 * pdes need to be zeroed.
-	 */
-	if (type & VMI_PAGE_CLONE)
-		limit = KERNEL_PGD_BOUNDARY;
-	for (i = 0; i < limit; i++)
-		BUG_ON(ptr[i]);
-}
-
-/*
- * We stash the page type into struct page so we can verify the page
- * types are used properly.
- */
-static void vmi_set_page_type(u32 pfn, int type)
-{
-	/* PAE can have multiple roots per page - don't track */
-	if (PTRS_PER_PMD > 1 && (type & VMI_PAGE_PDP))
-		return;
-
-	if (boot_allocations_applied) {
-		struct page *page = pfn_to_page(pfn);
-		if (type != VMI_PAGE_NORMAL)
-			BUG_ON(page->type);
-		else
-			BUG_ON(page->type == VMI_PAGE_NORMAL);
-		page->type = type & ~(VMI_PAGE_ZEROED | VMI_PAGE_CLONE);
-		if (type & VMI_PAGE_ZEROED)
-			check_zeroed_page(pfn, type, page);
-	} else {
-		record_page_type(pfn, type);
-	}
-}
-
-static void vmi_check_page_type(u32 pfn, int type)
-{
-	/* PAE can have multiple roots per page - skip checks */
-	if (PTRS_PER_PMD > 1 && (type & VMI_PAGE_PDP))
-		return;
-
-	type &= ~(VMI_PAGE_ZEROED | VMI_PAGE_CLONE);
-	if (boot_allocations_applied) {
-		struct page *page = pfn_to_page(pfn);
-		BUG_ON((page->type ^ type) & VMI_PAGE_PAE);
-		BUG_ON(type == VMI_PAGE_NORMAL && page->type);
-		BUG_ON((type & page->type) == 0);
-	}
-}
-#else
-#define vmi_set_page_type(p,t) do { } while (0)
-#define vmi_check_page_type(p,t) do { } while (0)
-#endif
-
-#ifdef CONFIG_HIGHPTE
-static void *vmi_kmap_atomic_pte(struct page *page, enum km_type type)
-{
-	void *va = kmap_atomic(page, type);
-
-	/*
-	 * Internally, the VMI ROM must map virtual addresses to physical
-	 * addresses for processing MMU updates.  By the time MMU updates
-	 * are issued, this information is typically already lost.
-	 * Fortunately, the VMI provides a cache of mapping slots for active
-	 * page tables.
-	 *
-	 * We use slot zero for the linear mapping of physical memory, and
-	 * in HIGHPTE kernels, slot 1 and 2 for KM_PTE0 and KM_PTE1.
-	 *
-	 *  args:                 SLOT                 VA    COUNT PFN
-	 */
-	BUG_ON(type != KM_PTE0 && type != KM_PTE1);
-	vmi_ops.set_linear_mapping((type - KM_PTE0)+1, va, 1, page_to_pfn(page));
-
-	return va;
-}
-#endif
-
 static void vmi_allocate_pte(struct mm_struct *mm, unsigned long pfn)
 {
-	vmi_set_page_type(pfn, VMI_PAGE_L1);
 	vmi_ops.allocate_page(pfn, VMI_PAGE_L1, 0, 0, 0);
 }
 
@@ -406,27 +280,32 @@ static void vmi_allocate_pmd(struct mm_struct *mm, unsigned long pfn)
 	 * It is called only for swapper_pg_dir, which already has
 	 * data on it.
 	 */
- 	vmi_set_page_type(pfn, VMI_PAGE_L2);
 	vmi_ops.allocate_page(pfn, VMI_PAGE_L2, 0, 0, 0);
 }
 
 static void vmi_allocate_pmd_clone(unsigned long pfn, unsigned long clonepfn, unsigned long start, unsigned long count)
 {
- 	vmi_set_page_type(pfn, VMI_PAGE_L2 | VMI_PAGE_CLONE);
-	vmi_check_page_type(clonepfn, VMI_PAGE_L2);
 	vmi_ops.allocate_page(pfn, VMI_PAGE_L2 | VMI_PAGE_CLONE, clonepfn, start, count);
 }
 
 static void vmi_release_pte(unsigned long pfn)
 {
 	vmi_ops.release_page(pfn, VMI_PAGE_L1);
-	vmi_set_page_type(pfn, VMI_PAGE_NORMAL);
 }
 
 static void vmi_release_pmd(unsigned long pfn)
 {
 	vmi_ops.release_page(pfn, VMI_PAGE_L2);
-	vmi_set_page_type(pfn, VMI_PAGE_NORMAL);
+}
+
+/*
+ * We use the pgd_free hook for releasing the pgd page:
+ */
+static void vmi_pgd_free(struct mm_struct *mm, pgd_t *pgd)
+{
+	unsigned long pfn = __pa(pgd) >> PAGE_SHIFT;
+
+	vmi_ops.release_page(pfn, VMI_PAGE_L2);
 }
 
 /*
@@ -450,26 +329,22 @@ static void vmi_release_pmd(unsigned long pfn)
 
 static void vmi_update_pte(struct mm_struct *mm, unsigned long addr, pte_t *ptep)
 {
-	vmi_check_page_type(__pa(ptep) >> PAGE_SHIFT, VMI_PAGE_PTE);
 	vmi_ops.update_pte(ptep, vmi_flags_addr(mm, addr, VMI_PAGE_PT, 0));
 }
 
 static void vmi_update_pte_defer(struct mm_struct *mm, unsigned long addr, pte_t *ptep)
 {
-	vmi_check_page_type(__pa(ptep) >> PAGE_SHIFT, VMI_PAGE_PTE);
 	vmi_ops.update_pte(ptep, vmi_flags_addr_defer(mm, addr, VMI_PAGE_PT, 0));
 }
 
 static void vmi_set_pte(pte_t *ptep, pte_t pte)
 {
 	/* XXX because of set_pmd_pte, this can be called on PT or PD layers */
-	vmi_check_page_type(__pa(ptep) >> PAGE_SHIFT, VMI_PAGE_PTE | VMI_PAGE_PD);
 	vmi_ops.set_pte(pte, ptep, VMI_PAGE_PT);
 }
 
 static void vmi_set_pte_at(struct mm_struct *mm, unsigned long addr, pte_t *ptep, pte_t pte)
 {
-	vmi_check_page_type(__pa(ptep) >> PAGE_SHIFT, VMI_PAGE_PTE);
 	vmi_ops.set_pte(pte, ptep, vmi_flags_addr(mm, addr, VMI_PAGE_PT, 0));
 }
 
@@ -477,10 +352,8 @@ static void vmi_set_pmd(pmd_t *pmdp, pmd_t pmdval)
 {
 #ifdef CONFIG_X86_PAE
 	const pte_t pte = { .pte = pmdval.pmd };
-	vmi_check_page_type(__pa(pmdp) >> PAGE_SHIFT, VMI_PAGE_PMD);
 #else
 	const pte_t pte = { pmdval.pud.pgd.pgd };
-	vmi_check_page_type(__pa(pmdp) >> PAGE_SHIFT, VMI_PAGE_PGD);
 #endif
 	vmi_ops.set_pte(pte, (pte_t *)pmdp, VMI_PAGE_PD);
 }
@@ -500,31 +373,22 @@ static void vmi_set_pte_atomic(pte_t *ptep, pte_t pteval)
 	vmi_ops.update_pte(ptep, VMI_PAGE_PT);
 }
 
-static void vmi_set_pte_present(struct mm_struct *mm, unsigned long addr, pte_t *ptep, pte_t pte)
-{
-	vmi_check_page_type(__pa(ptep) >> PAGE_SHIFT, VMI_PAGE_PTE);
-	vmi_ops.set_pte(pte, ptep, vmi_flags_addr_defer(mm, addr, VMI_PAGE_PT, 1));
-}
-
 static void vmi_set_pud(pud_t *pudp, pud_t pudval)
 {
 	/* Um, eww */
 	const pte_t pte = { .pte = pudval.pgd.pgd };
-	vmi_check_page_type(__pa(pudp) >> PAGE_SHIFT, VMI_PAGE_PGD);
 	vmi_ops.set_pte(pte, (pte_t *)pudp, VMI_PAGE_PDP);
 }
 
 static void vmi_pte_clear(struct mm_struct *mm, unsigned long addr, pte_t *ptep)
 {
 	const pte_t pte = { .pte = 0 };
-	vmi_check_page_type(__pa(ptep) >> PAGE_SHIFT, VMI_PAGE_PTE);
 	vmi_ops.set_pte(pte, ptep, vmi_flags_addr(mm, addr, VMI_PAGE_PT, 0));
 }
 
 static void vmi_pmd_clear(pmd_t *pmd)
 {
 	const pte_t pte = { .pte = 0 };
-	vmi_check_page_type(__pa(pmd) >> PAGE_SHIFT, VMI_PAGE_PMD);
 	vmi_ops.set_pte(pte, (pte_t *)pmd, VMI_PAGE_PD);
 }
 #endif
@@ -555,7 +419,7 @@ vmi_startup_ipi_hook(int phys_apicid, unsigned long start_eip,
 	ap.ds = __USER_DS;
 	ap.es = __USER_DS;
 	ap.fs = __KERNEL_PERCPU;
-	ap.gs = 0;
+	ap.gs = __KERNEL_STACK_CANARY;
 
 	ap.eflags = 0;
 
@@ -576,10 +440,16 @@ vmi_startup_ipi_hook(int phys_apicid, unsigned long start_eip,
 }
 #endif
 
-static void vmi_enter_lazy_cpu(void)
+static void vmi_start_context_switch(struct task_struct *prev)
 {
-	paravirt_enter_lazy_cpu();
+	paravirt_start_context_switch(prev);
 	vmi_ops.set_lazy_mode(2);
+}
+
+static void vmi_end_context_switch(struct task_struct *next)
+{
+	vmi_ops.set_lazy_mode(0);
+	paravirt_end_context_switch(next);
 }
 
 static void vmi_enter_lazy_mmu(void)
@@ -588,10 +458,10 @@ static void vmi_enter_lazy_mmu(void)
 	vmi_ops.set_lazy_mode(1);
 }
 
-static void vmi_leave_lazy(void)
+static void vmi_leave_lazy_mmu(void)
 {
-	paravirt_leave_lazy(paravirt_get_lazy_mode());
 	vmi_ops.set_lazy_mode(0);
+	paravirt_leave_lazy_mmu();
 }
 
 static inline int __init check_vmi_rom(struct vrom_header *rom)
@@ -748,6 +618,12 @@ static inline int __init activate_vmi(void)
 	u64 reloc;
 	const struct vmi_relocation_info *rel = (struct vmi_relocation_info *)&reloc;
 
+	/*
+	 * Prevent page tables from being allocated in highmem, even if
+	 * CONFIG_HIGHPTE is enabled.
+	 */
+	__userpte_alloc_gfp &= ~__GFP_HIGHMEM;
+
 	if (call_vrom_func(vmi_rom, vmi_init) != 0) {
 		printk(KERN_ERR "VMI ROM failed to initialize!");
 		return 0;
@@ -756,7 +632,7 @@ static inline int __init activate_vmi(void)
 
 	pv_info.paravirt_enabled = 1;
 	pv_info.kernel_rpl = kernel_cs & SEGMENT_RPL_MASK;
-	pv_info.name = "vmi";
+	pv_info.name = "vmi [deprecated]";
 
 	pv_init_ops.patch = vmi_patch;
 
@@ -789,10 +665,11 @@ static inline int __init activate_vmi(void)
 	para_fill(pv_mmu_ops.write_cr2, SetCR2);
 	para_fill(pv_mmu_ops.write_cr3, SetCR3);
 	para_fill(pv_cpu_ops.write_cr4, SetCR4);
-	para_fill(pv_irq_ops.save_fl, GetInterruptMask);
-	para_fill(pv_irq_ops.restore_fl, SetInterruptMask);
-	para_fill(pv_irq_ops.irq_disable, DisableInterrupts);
-	para_fill(pv_irq_ops.irq_enable, EnableInterrupts);
+
+	para_fill(pv_irq_ops.save_fl.func, GetInterruptMask);
+	para_fill(pv_irq_ops.restore_fl.func, SetInterruptMask);
+	para_fill(pv_irq_ops.irq_disable.func, DisableInterrupts);
+	para_fill(pv_irq_ops.irq_enable.func, EnableInterrupts);
 
 	para_fill(pv_cpu_ops.wbinvd, WBINVD);
 	para_fill(pv_cpu_ops.read_tsc, RDTSC);
@@ -824,14 +701,14 @@ static inline int __init activate_vmi(void)
 	para_fill(pv_cpu_ops.set_iopl_mask, SetIOPLMask);
 	para_fill(pv_cpu_ops.io_delay, IODelay);
 
-	para_wrap(pv_cpu_ops.lazy_mode.enter, vmi_enter_lazy_cpu,
+	para_wrap(pv_cpu_ops.start_context_switch, vmi_start_context_switch,
 		  set_lazy_mode, SetLazyMode);
-	para_wrap(pv_cpu_ops.lazy_mode.leave, vmi_leave_lazy,
+	para_wrap(pv_cpu_ops.end_context_switch, vmi_end_context_switch,
 		  set_lazy_mode, SetLazyMode);
 
 	para_wrap(pv_mmu_ops.lazy_mode.enter, vmi_enter_lazy_mmu,
 		  set_lazy_mode, SetLazyMode);
-	para_wrap(pv_mmu_ops.lazy_mode.leave, vmi_leave_lazy,
+	para_wrap(pv_mmu_ops.lazy_mode.leave, vmi_leave_lazy_mmu,
 		  set_lazy_mode, SetLazyMode);
 
 	/* user and kernel flush are just handled with different flags to FlushTLB */
@@ -858,7 +735,6 @@ static inline int __init activate_vmi(void)
 		pv_mmu_ops.set_pmd = vmi_set_pmd;
 #ifdef CONFIG_X86_PAE
 		pv_mmu_ops.set_pte_atomic = vmi_set_pte_atomic;
-		pv_mmu_ops.set_pte_present = vmi_set_pte_present;
 		pv_mmu_ops.set_pud = vmi_set_pud;
 		pv_mmu_ops.pte_clear = vmi_pte_clear;
 		pv_mmu_ops.pmd_clear = vmi_pmd_clear;
@@ -881,14 +757,11 @@ static inline int __init activate_vmi(void)
 	if (vmi_ops.release_page) {
 		pv_mmu_ops.release_pte = vmi_release_pte;
 		pv_mmu_ops.release_pmd = vmi_release_pmd;
+		pv_mmu_ops.pgd_free = vmi_pgd_free;
 	}
 
 	/* Set linear is needed in all cases */
 	vmi_ops.set_linear_mapping = vmi_get_function(VMI_CALL_SetLinearMapping);
-#ifdef CONFIG_HIGHPTE
-	if (vmi_ops.set_linear_mapping)
-		pv_mmu_ops.kmap_atomic_pte = vmi_kmap_atomic_pte;
-#endif
 
 	/*
 	 * These MUST always be patched.  Don't support indirect jumps
@@ -905,8 +778,8 @@ static inline int __init activate_vmi(void)
 #endif
 
 #ifdef CONFIG_X86_LOCAL_APIC
-       para_fill(apic_ops->read, APICRead);
-       para_fill(apic_ops->write, APICWrite);
+       para_fill(apic->read, APICRead);
+       para_fill(apic->write, APICWrite);
 #endif
 
 	/*
@@ -924,15 +797,15 @@ static inline int __init activate_vmi(void)
 		vmi_timer_ops.set_alarm = vmi_get_function(VMI_CALL_SetAlarm);
 		vmi_timer_ops.cancel_alarm =
 			 vmi_get_function(VMI_CALL_CancelAlarm);
-		pv_time_ops.time_init = vmi_time_init;
-		pv_time_ops.get_wallclock = vmi_get_wallclock;
-		pv_time_ops.set_wallclock = vmi_set_wallclock;
+		x86_init.timers.timer_init = vmi_time_init;
 #ifdef CONFIG_X86_LOCAL_APIC
-		pv_apic_ops.setup_boot_clock = vmi_time_bsp_init;
-		pv_apic_ops.setup_secondary_clock = vmi_time_ap_init;
+		x86_init.timers.setup_percpu_clockev = vmi_time_bsp_init;
+		x86_cpuinit.setup_percpu_clockev = vmi_time_ap_init;
 #endif
 		pv_time_ops.sched_clock = vmi_sched_clock;
-		pv_time_ops.get_tsc_khz = vmi_tsc_khz;
+		x86_platform.calibrate_tsc = vmi_tsc_khz;
+		x86_platform.get_wallclock = vmi_get_wallclock;
+		x86_platform.set_wallclock = vmi_set_wallclock;
 
 		/* We have true wallclock functions; disable CMOS clock sync */
 		no_sync_cmos_clock = 1;
@@ -977,7 +850,7 @@ void __init vmi_init(void)
 #endif
 }
 
-void vmi_activate(void)
+void __init vmi_activate(void)
 {
 	unsigned long flags;
 

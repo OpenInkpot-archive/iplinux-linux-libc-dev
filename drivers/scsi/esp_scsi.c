@@ -1449,11 +1449,8 @@ static void esp_msgin_sdtr(struct esp *esp, struct esp_target_data *tp)
 	if (offset > 15)
 		goto do_reject;
 
-	if (esp->flags & ESP_FLAG_DISABLE_SYNC)
-		offset = 0;
-
 	if (offset) {
-		int rounded_up, one_clock;
+		int one_clock;
 
 		if (period > esp->max_period) {
 			period = offset = 0;
@@ -1463,9 +1460,7 @@ static void esp_msgin_sdtr(struct esp *esp, struct esp_target_data *tp)
 			goto do_reject;
 
 		one_clock = esp->ccycle / 1000;
-		rounded_up = (period << 2);
-		rounded_up = (rounded_up + one_clock - 1) / one_clock;
-		stp = rounded_up;
+		stp = DIV_ROUND_UP(period << 2, one_clock);
 		if (stp && esp->rev >= FAS236) {
 			if (stp >= 50)
 				stp--;
@@ -2407,12 +2402,6 @@ static int esp_slave_configure(struct scsi_device *dev)
 	struct esp_target_data *tp = &esp->target[dev->id];
 	int goal_tags, queue_depth;
 
-	if (esp->flags & ESP_FLAG_DISABLE_SYNC) {
-		/* Bypass async domain validation */
-		dev->ppr  = 0;
-		dev->sdtr = 0;
-	}
-
 	goal_tags = 0;
 
 	if (dev->tagged_supported) {
@@ -2662,7 +2651,10 @@ static void esp_set_offset(struct scsi_target *target, int offset)
 	struct esp *esp = shost_priv(host);
 	struct esp_target_data *tp = &esp->target[target->id];
 
-	tp->nego_goal_offset = offset;
+	if (esp->flags & ESP_FLAG_DISABLE_SYNC)
+		tp->nego_goal_offset = 0;
+	else
+		tp->nego_goal_offset = offset;
 	tp->flags |= ESP_TGT_CHECK_NEGO;
 }
 

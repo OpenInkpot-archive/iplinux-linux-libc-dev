@@ -37,7 +37,7 @@ extern void cpu_die(void);
 extern void smp_send_debugger_break(int cpu);
 extern void smp_message_recv(int);
 
-DECLARE_PER_CPU(unsigned int, pvr);
+DECLARE_PER_CPU(unsigned int, cpu_pvr);
 
 #ifdef CONFIG_HOTPLUG_CPU
 extern void fixup_irqs(cpumask_t map);
@@ -80,6 +80,13 @@ extern int cpu_to_core_id(int cpu);
 #define PPC_MSG_RESCHEDULE      1
 #define PPC_MSG_CALL_FUNC_SINGLE	2
 #define PPC_MSG_DEBUGGER_BREAK  3
+
+/*
+ * irq controllers that have dedicated ipis per message and don't
+ * need additional code in the action handler may use this
+ */
+extern int smp_request_message_ipi(int virq, int message);
+extern const char *smp_ipi_name[];
 
 void smp_init_iSeries(void);
 void smp_init_pSeries(void);
@@ -139,7 +146,17 @@ extern void smp_generic_take_timebase(void);
 extern struct smp_ops_t *smp_ops;
 
 extern void arch_send_call_function_single_ipi(int cpu);
-extern void arch_send_call_function_ipi(cpumask_t mask);
+extern void arch_send_call_function_ipi_mask(const struct cpumask *mask);
+
+/* Definitions relative to the secondary CPU spin loop
+ * and entry point. Not all of them exist on both 32 and
+ * 64-bit but defining them all here doesn't harm
+ */
+extern void generic_secondary_smp_init(void);
+extern void generic_secondary_thread_init(void);
+extern unsigned long __secondary_hold_spinloop;
+extern unsigned long __secondary_hold_acknowledge;
+extern char __secondary_hold;
 
 #endif /* __ASSEMBLY__ */
 

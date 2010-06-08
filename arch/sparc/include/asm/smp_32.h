@@ -29,8 +29,6 @@
  */
 
 extern unsigned char boot_cpu_id;
-extern cpumask_t phys_cpu_present_map;
-#define cpu_possible_map phys_cpu_present_map
 
 typedef void (*smpfunc_t)(unsigned long, unsigned long, unsigned long,
 		       unsigned long, unsigned long);
@@ -108,6 +106,15 @@ static inline int hard_smp4d_processor_id(void)
 	return cpuid;
 }
 
+extern inline int hard_smpleon_processor_id(void)
+{
+	int cpuid;
+	__asm__ __volatile__("rd     %%asr17,%0\n\t"
+			     "srl    %0,28,%0" :
+			     "=&r" (cpuid) : );
+	return cpuid;
+}
+
 #ifndef MODULE
 static inline int hard_smp_processor_id(void)
 {
@@ -172,7 +179,4 @@ void smp_setup_cpu_possible_map(void);
 #define smp_setup_cpu_possible_map() do { } while (0)
 
 #endif /* !(SMP) */
-
-#define NO_PROC_ID            0xFF
-
 #endif /* !(_SPARC_SMP_H) */

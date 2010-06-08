@@ -49,6 +49,7 @@
 #define E820_RESERVED_KERN        128
 
 #ifndef __ASSEMBLY__
+#include <linux/types.h>
 struct e820entry {
 	__u64 addr;	/* start of memory segment */
 	__u64 size;	/* size of memory segment */
@@ -59,6 +60,12 @@ struct e820map {
 	__u32 nr_map;
 	struct e820entry map[E820_X_MAX];
 };
+
+#define ISA_START_ADDRESS	0xa0000
+#define ISA_END_ADDRESS		0x100000
+
+#define BIOS_BEGIN		0x000a0000
+#define BIOS_END		0x00100000
 
 #ifdef __KERNEL__
 /* see comment in arch/x86/kernel/e820.c */
@@ -71,7 +78,7 @@ extern int e820_all_mapped(u64 start, u64 end, unsigned type);
 extern void e820_add_region(u64 start, u64 size, int type);
 extern void e820_print_map(char *who);
 extern int
-sanitize_e820_map(struct e820entry *biosmap, int max_nr_map, int *pnr_map);
+sanitize_e820_map(struct e820entry *biosmap, int max_nr_map, u32 *pnr_map);
 extern u64 e820_update_range(u64 start, u64 size, unsigned old_type,
 			       unsigned new_type);
 extern u64 e820_remove_range(u64 start, u64 size, unsigned old_type,
@@ -104,11 +111,8 @@ extern unsigned long end_user_pfn;
 
 extern u64 find_e820_area(u64 start, u64 end, u64 size, u64 align);
 extern u64 find_e820_area_size(u64 start, u64 *sizep, u64 align);
-extern void reserve_early(u64 start, u64 end, char *name);
-extern void reserve_early_overlap_ok(u64 start, u64 end, char *name);
-extern void free_early(u64 start, u64 end);
-extern void early_res_to_bootmem(u64 start, u64 end);
 extern u64 early_reserve_e820(u64 startt, u64 sizet, u64 align);
+#include <linux/early_res.h>
 
 extern unsigned long e820_end_of_ram_pfn(void);
 extern unsigned long e820_end_of_low_ram_pfn(void);
@@ -125,17 +129,18 @@ extern void e820_reserve_resources(void);
 extern void e820_reserve_resources_late(void);
 extern void setup_memory_map(void);
 extern char *default_machine_specific_memory_setup(void);
-extern char *machine_specific_memory_setup(void);
-extern char *memory_setup(void);
+
+/*
+ * Returns true iff the specified range [s,e) is completely contained inside
+ * the ISA region.
+ */
+static inline bool is_ISA_range(u64 s, u64 e)
+{
+	return s >= ISA_START_ADDRESS && e <= ISA_END_ADDRESS;
+}
+
 #endif /* __KERNEL__ */
 #endif /* __ASSEMBLY__ */
-
-#define ISA_START_ADDRESS	0xa0000
-#define ISA_END_ADDRESS		0x100000
-#define is_ISA_range(s, e) ((s) >= ISA_START_ADDRESS && (e) < ISA_END_ADDRESS)
-
-#define BIOS_BEGIN		0x000a0000
-#define BIOS_END		0x00100000
 
 #ifdef __KERNEL__
 #include <linux/ioport.h>

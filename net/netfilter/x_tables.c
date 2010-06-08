@@ -22,11 +22,14 @@
 #include <linux/vmalloc.h>
 #include <linux/mutex.h>
 #include <linux/mm.h>
+#include <linux/slab.h>
 #include <net/net_namespace.h>
 
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter_arp.h>
-
+#include <linux/netfilter_ipv4/ip_tables.h>
+#include <linux/netfilter_ipv6/ip6_tables.h>
+#include <linux/netfilter_arp/arp_tables.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Harald Welte <laforge@netfilter.org>");
@@ -37,7 +40,7 @@ MODULE_DESCRIPTION("{ip,ip6,arp,eb}_tables backend module");
 struct compat_delta {
 	struct compat_delta *next;
 	unsigned int offset;
-	short delta;
+	int delta;
 };
 
 struct xt_af {
@@ -273,6 +276,10 @@ static int match_revfn(u8 af, const char *name, u8 revision, int *bestp)
 				have_rev = 1;
 		}
 	}
+
+	if (af != NFPROTO_UNSPEC && !have_rev)
+		return match_revfn(NFPROTO_UNSPEC, name, revision, bestp);
+
 	return have_rev;
 }
 
@@ -289,6 +296,10 @@ static int target_revfn(u8 af, const char *name, u8 revision, int *bestp)
 				have_rev = 1;
 		}
 	}
+
+	if (af != NFPROTO_UNSPEC && !have_rev)
+		return target_revfn(NFPROTO_UNSPEC, name, revision, bestp);
+
 	return have_rev;
 }
 
@@ -321,6 +332,32 @@ int xt_find_revision(u8 af, const char *name, u8 revision, int target,
 }
 EXPORT_SYMBOL_GPL(xt_find_revision);
 
+static char *textify_hooks(char *buf, size_t size, unsigned int mask)
+{
+	static const char *const names[] = {
+		"PREROUTING", "INPUT", "FORWARD",
+		"OUTPUT", "POSTROUTING", "BROUTING",
+	};
+	unsigned int i;
+	char *p = buf;
+	bool np = false;
+	int res;
+
+	*p = '\0';
+	for (i = 0; i < ARRAY_SIZE(names); ++i) {
+		if (!(mask & (1 << i)))
+			continue;
+		res = snprintf(p, size, "%s%s", np ? "/" : "", names[i]);
+		if (res > 0) {
+			size -= res;
+			p += res;
+		}
+		np = true;
+	}
+
+	return buf;
+}
+
 int xt_check_match(struct xt_mtchk_param *par,
 		   unsigned int size, u_int8_t proto, bool inv_proto)
 {
@@ -330,26 +367,32 @@ int xt_check_match(struct xt_mtchk_param *par,
 		 * ebt_among is exempt from centralized matchsize checking
 		 * because it uses a dynamic-size data set.
 		 */
-		printk("%s_tables: %s match: invalid size %Zu != %u\n",
+		pr_err("%s_tables: %s.%u match: invalid size "
+		       "%u (kernel) != (user) %u\n",
 		       xt_prefix[par->family], par->match->name,
+		       par->match->revision,
 		       XT_ALIGN(par->match->matchsize), size);
 		return -EINVAL;
 	}
 	if (par->match->table != NULL &&
 	    strcmp(par->match->table, par->table) != 0) {
-		printk("%s_tables: %s match: only valid in %s table, not %s\n",
+		pr_err("%s_tables: %s match: only valid in %s table, not %s\n",
 		       xt_prefix[par->family], par->match->name,
 		       par->match->table, par->table);
 		return -EINVAL;
 	}
 	if (par->match->hooks && (par->hook_mask & ~par->match->hooks) != 0) {
-		printk("%s_tables: %s match: bad hook_mask %#x/%#x\n",
+		char used[64], allow[64];
+
+		pr_err("%s_tables: %s match: used from hooks %s, but only "
+		       "valid from %s\n",
 		       xt_prefix[par->family], par->match->name,
-		       par->hook_mask, par->match->hooks);
+		       textify_hooks(used, sizeof(used), par->hook_mask),
+		       textify_hooks(allow, sizeof(allow), par->match->hooks));
 		return -EINVAL;
 	}
 	if (par->match->proto && (par->match->proto != proto || inv_proto)) {
-		printk("%s_tables: %s match: only valid for protocol %u\n",
+		pr_err("%s_tables: %s match: only valid for protocol %u\n",
 		       xt_prefix[par->family], par->match->name,
 		       par->match->proto);
 		return -EINVAL;
@@ -397,10 +440,10 @@ void xt_compat_flush_offsets(u_int8_t af)
 }
 EXPORT_SYMBOL_GPL(xt_compat_flush_offsets);
 
-short xt_compat_calc_jump(u_int8_t af, unsigned int offset)
+int xt_compat_calc_jump(u_int8_t af, unsigned int offset)
 {
 	struct compat_delta *tmp;
-	short delta;
+	int delta;
 
 	for (tmp = xt[af].compat_offsets, delta = 0; tmp; tmp = tmp->next)
 		if (tmp->offset < offset)
@@ -443,8 +486,8 @@ int xt_compat_match_from_user(struct xt_entry_match *m, void **dstptr,
 }
 EXPORT_SYMBOL_GPL(xt_compat_match_from_user);
 
-int xt_compat_match_to_user(struct xt_entry_match *m, void __user **dstptr,
-			    unsigned int *size)
+int xt_compat_match_to_user(const struct xt_entry_match *m,
+			    void __user **dstptr, unsigned int *size)
 {
 	const struct xt_match *match = m->u.kernel.match;
 	struct compat_xt_entry_match __user *cm = *dstptr;
@@ -476,26 +519,32 @@ int xt_check_target(struct xt_tgchk_param *par,
 		    unsigned int size, u_int8_t proto, bool inv_proto)
 {
 	if (XT_ALIGN(par->target->targetsize) != size) {
-		printk("%s_tables: %s target: invalid size %Zu != %u\n",
+		pr_err("%s_tables: %s.%u target: invalid size "
+		       "%u (kernel) != (user) %u\n",
 		       xt_prefix[par->family], par->target->name,
+		       par->target->revision,
 		       XT_ALIGN(par->target->targetsize), size);
 		return -EINVAL;
 	}
 	if (par->target->table != NULL &&
 	    strcmp(par->target->table, par->table) != 0) {
-		printk("%s_tables: %s target: only valid in %s table, not %s\n",
+		pr_err("%s_tables: %s target: only valid in %s table, not %s\n",
 		       xt_prefix[par->family], par->target->name,
 		       par->target->table, par->table);
 		return -EINVAL;
 	}
 	if (par->target->hooks && (par->hook_mask & ~par->target->hooks) != 0) {
-		printk("%s_tables: %s target: bad hook_mask %#x/%#x\n",
+		char used[64], allow[64];
+
+		pr_err("%s_tables: %s target: used from hooks %s, but only "
+		       "usable from %s\n",
 		       xt_prefix[par->family], par->target->name,
-		       par->hook_mask, par->target->hooks);
+		       textify_hooks(used, sizeof(used), par->hook_mask),
+		       textify_hooks(allow, sizeof(allow), par->target->hooks));
 		return -EINVAL;
 	}
 	if (par->target->proto && (par->target->proto != proto || inv_proto)) {
-		printk("%s_tables: %s target: only valid for protocol %u\n",
+		pr_err("%s_tables: %s target: only valid for protocol %u\n",
 		       xt_prefix[par->family], par->target->name,
 		       par->target->proto);
 		return -EINVAL;
@@ -540,8 +589,8 @@ void xt_compat_target_from_user(struct xt_entry_target *t, void **dstptr,
 }
 EXPORT_SYMBOL_GPL(xt_compat_target_from_user);
 
-int xt_compat_target_to_user(struct xt_entry_target *t, void __user **dstptr,
-			     unsigned int *size)
+int xt_compat_target_to_user(const struct xt_entry_target *t,
+			     void __user **dstptr, unsigned int *size)
 {
 	const struct xt_target *target = t->u.kernel.target;
 	struct compat_xt_entry_target __user *ct = *dstptr;
@@ -575,7 +624,7 @@ struct xt_table_info *xt_alloc_table_info(unsigned int size)
 	int cpu;
 
 	/* Pedantry: prevent them from hitting BUG() in vmalloc.c --RR */
-	if ((SMP_ALIGN(size) >> PAGE_SHIFT) + 2 > num_physpages)
+	if ((SMP_ALIGN(size) >> PAGE_SHIFT) + 2 > totalram_pages)
 		return NULL;
 
 	newinfo = kzalloc(XT_TABLE_INFO_SZ, GFP_KERNEL);
@@ -654,44 +703,57 @@ void xt_compat_unlock(u_int8_t af)
 EXPORT_SYMBOL_GPL(xt_compat_unlock);
 #endif
 
+DEFINE_PER_CPU(struct xt_info_lock, xt_info_locks);
+EXPORT_PER_CPU_SYMBOL_GPL(xt_info_locks);
+
+
 struct xt_table_info *
 xt_replace_table(struct xt_table *table,
 	      unsigned int num_counters,
 	      struct xt_table_info *newinfo,
 	      int *error)
 {
-	struct xt_table_info *oldinfo, *private;
+	struct xt_table_info *private;
 
 	/* Do the substitution. */
-	write_lock_bh(&table->lock);
+	local_bh_disable();
 	private = table->private;
+
 	/* Check inside lock: is the old number correct? */
 	if (num_counters != private->number) {
 		duprintf("num_counters != table->private->number (%u/%u)\n",
 			 num_counters, private->number);
-		write_unlock_bh(&table->lock);
+		local_bh_enable();
 		*error = -EAGAIN;
 		return NULL;
 	}
-	oldinfo = private;
-	table->private = newinfo;
-	newinfo->initial_entries = oldinfo->initial_entries;
-	write_unlock_bh(&table->lock);
 
-	return oldinfo;
+	table->private = newinfo;
+	newinfo->initial_entries = private->initial_entries;
+
+	/*
+	 * Even though table entries have now been swapped, other CPU's
+	 * may still be using the old entries. This is okay, because
+	 * resynchronization happens because of the locking done
+	 * during the get_counters() routine.
+	 */
+	local_bh_enable();
+
+	return private;
 }
 EXPORT_SYMBOL_GPL(xt_replace_table);
 
-struct xt_table *xt_register_table(struct net *net, struct xt_table *table,
+struct xt_table *xt_register_table(struct net *net,
+				   const struct xt_table *input_table,
 				   struct xt_table_info *bootstrap,
 				   struct xt_table_info *newinfo)
 {
 	int ret;
 	struct xt_table_info *private;
-	struct xt_table *t;
+	struct xt_table *t, *table;
 
 	/* Don't add one object to multiple lists. */
-	table = kmemdup(table, sizeof(struct xt_table), GFP_KERNEL);
+	table = kmemdup(input_table, sizeof(struct xt_table), GFP_KERNEL);
 	if (!table) {
 		ret = -ENOMEM;
 		goto out;
@@ -711,7 +773,7 @@ struct xt_table *xt_register_table(struct net *net, struct xt_table *table,
 
 	/* Simplifies replace_table code. */
 	table->private = bootstrap;
-	rwlock_init(&table->lock);
+
 	if (!xt_replace_table(table, 0, newinfo, &ret))
 		goto unlock;
 
@@ -819,59 +881,143 @@ static const struct file_operations xt_table_ops = {
 	.release = seq_release_net,
 };
 
+/*
+ * Traverse state for ip{,6}_{tables,matches} for helping crossing
+ * the multi-AF mutexes.
+ */
+struct nf_mttg_trav {
+	struct list_head *head, *curr;
+	uint8_t class, nfproto;
+};
+
+enum {
+	MTTG_TRAV_INIT,
+	MTTG_TRAV_NFP_UNSPEC,
+	MTTG_TRAV_NFP_SPEC,
+	MTTG_TRAV_DONE,
+};
+
+static void *xt_mttg_seq_next(struct seq_file *seq, void *v, loff_t *ppos,
+    bool is_target)
+{
+	static const uint8_t next_class[] = {
+		[MTTG_TRAV_NFP_UNSPEC] = MTTG_TRAV_NFP_SPEC,
+		[MTTG_TRAV_NFP_SPEC]   = MTTG_TRAV_DONE,
+	};
+	struct nf_mttg_trav *trav = seq->private;
+
+	switch (trav->class) {
+	case MTTG_TRAV_INIT:
+		trav->class = MTTG_TRAV_NFP_UNSPEC;
+		mutex_lock(&xt[NFPROTO_UNSPEC].mutex);
+		trav->head = trav->curr = is_target ?
+			&xt[NFPROTO_UNSPEC].target : &xt[NFPROTO_UNSPEC].match;
+ 		break;
+	case MTTG_TRAV_NFP_UNSPEC:
+		trav->curr = trav->curr->next;
+		if (trav->curr != trav->head)
+			break;
+		mutex_unlock(&xt[NFPROTO_UNSPEC].mutex);
+		mutex_lock(&xt[trav->nfproto].mutex);
+		trav->head = trav->curr = is_target ?
+			&xt[trav->nfproto].target : &xt[trav->nfproto].match;
+		trav->class = next_class[trav->class];
+		break;
+	case MTTG_TRAV_NFP_SPEC:
+		trav->curr = trav->curr->next;
+		if (trav->curr != trav->head)
+			break;
+		/* fallthru, _stop will unlock */
+	default:
+		return NULL;
+	}
+
+	if (ppos != NULL)
+		++*ppos;
+	return trav;
+}
+
+static void *xt_mttg_seq_start(struct seq_file *seq, loff_t *pos,
+    bool is_target)
+{
+	struct nf_mttg_trav *trav = seq->private;
+	unsigned int j;
+
+	trav->class = MTTG_TRAV_INIT;
+	for (j = 0; j < *pos; ++j)
+		if (xt_mttg_seq_next(seq, NULL, NULL, is_target) == NULL)
+			return NULL;
+	return trav;
+}
+
+static void xt_mttg_seq_stop(struct seq_file *seq, void *v)
+{
+	struct nf_mttg_trav *trav = seq->private;
+
+	switch (trav->class) {
+	case MTTG_TRAV_NFP_UNSPEC:
+		mutex_unlock(&xt[NFPROTO_UNSPEC].mutex);
+		break;
+	case MTTG_TRAV_NFP_SPEC:
+		mutex_unlock(&xt[trav->nfproto].mutex);
+		break;
+	}
+}
+
 static void *xt_match_seq_start(struct seq_file *seq, loff_t *pos)
 {
-	struct proc_dir_entry *pde = (struct proc_dir_entry *)seq->private;
-	u_int16_t af = (unsigned long)pde->data;
-
-	mutex_lock(&xt[af].mutex);
-	return seq_list_start(&xt[af].match, *pos);
+	return xt_mttg_seq_start(seq, pos, false);
 }
 
-static void *xt_match_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+static void *xt_match_seq_next(struct seq_file *seq, void *v, loff_t *ppos)
 {
-	struct proc_dir_entry *pde = (struct proc_dir_entry *)seq->private;
-	u_int16_t af = (unsigned long)pde->data;
-
-	return seq_list_next(v, &xt[af].match, pos);
-}
-
-static void xt_match_seq_stop(struct seq_file *seq, void *v)
-{
-	struct proc_dir_entry *pde = seq->private;
-	u_int16_t af = (unsigned long)pde->data;
-
-	mutex_unlock(&xt[af].mutex);
+	return xt_mttg_seq_next(seq, v, ppos, false);
 }
 
 static int xt_match_seq_show(struct seq_file *seq, void *v)
 {
-	struct xt_match *match = list_entry(v, struct xt_match, list);
+	const struct nf_mttg_trav *trav = seq->private;
+	const struct xt_match *match;
 
-	if (strlen(match->name))
-		return seq_printf(seq, "%s\n", match->name);
-	else
-		return 0;
+	switch (trav->class) {
+	case MTTG_TRAV_NFP_UNSPEC:
+	case MTTG_TRAV_NFP_SPEC:
+		if (trav->curr == trav->head)
+			return 0;
+		match = list_entry(trav->curr, struct xt_match, list);
+		return (*match->name == '\0') ? 0 :
+		       seq_printf(seq, "%s\n", match->name);
+	}
+	return 0;
 }
 
 static const struct seq_operations xt_match_seq_ops = {
 	.start	= xt_match_seq_start,
 	.next	= xt_match_seq_next,
-	.stop	= xt_match_seq_stop,
+	.stop	= xt_mttg_seq_stop,
 	.show	= xt_match_seq_show,
 };
 
 static int xt_match_open(struct inode *inode, struct file *file)
 {
+	struct seq_file *seq;
+	struct nf_mttg_trav *trav;
 	int ret;
 
-	ret = seq_open(file, &xt_match_seq_ops);
-	if (!ret) {
-		struct seq_file *seq = file->private_data;
+	trav = kmalloc(sizeof(*trav), GFP_KERNEL);
+	if (trav == NULL)
+		return -ENOMEM;
 
-		seq->private = PDE(inode);
+	ret = seq_open(file, &xt_match_seq_ops);
+	if (ret < 0) {
+		kfree(trav);
+		return ret;
 	}
-	return ret;
+
+	seq = file->private_data;
+	seq->private = trav;
+	trav->nfproto = (unsigned long)PDE(inode)->data;
+	return 0;
 }
 
 static const struct file_operations xt_match_ops = {
@@ -879,62 +1025,63 @@ static const struct file_operations xt_match_ops = {
 	.open	 = xt_match_open,
 	.read	 = seq_read,
 	.llseek	 = seq_lseek,
-	.release = seq_release,
+	.release = seq_release_private,
 };
 
 static void *xt_target_seq_start(struct seq_file *seq, loff_t *pos)
 {
-	struct proc_dir_entry *pde = (struct proc_dir_entry *)seq->private;
-	u_int16_t af = (unsigned long)pde->data;
-
-	mutex_lock(&xt[af].mutex);
-	return seq_list_start(&xt[af].target, *pos);
+	return xt_mttg_seq_start(seq, pos, true);
 }
 
-static void *xt_target_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+static void *xt_target_seq_next(struct seq_file *seq, void *v, loff_t *ppos)
 {
-	struct proc_dir_entry *pde = (struct proc_dir_entry *)seq->private;
-	u_int16_t af = (unsigned long)pde->data;
-
-	return seq_list_next(v, &xt[af].target, pos);
-}
-
-static void xt_target_seq_stop(struct seq_file *seq, void *v)
-{
-	struct proc_dir_entry *pde = seq->private;
-	u_int16_t af = (unsigned long)pde->data;
-
-	mutex_unlock(&xt[af].mutex);
+	return xt_mttg_seq_next(seq, v, ppos, true);
 }
 
 static int xt_target_seq_show(struct seq_file *seq, void *v)
 {
-	struct xt_target *target = list_entry(v, struct xt_target, list);
+	const struct nf_mttg_trav *trav = seq->private;
+	const struct xt_target *target;
 
-	if (strlen(target->name))
-		return seq_printf(seq, "%s\n", target->name);
-	else
-		return 0;
+	switch (trav->class) {
+	case MTTG_TRAV_NFP_UNSPEC:
+	case MTTG_TRAV_NFP_SPEC:
+		if (trav->curr == trav->head)
+			return 0;
+		target = list_entry(trav->curr, struct xt_target, list);
+		return (*target->name == '\0') ? 0 :
+		       seq_printf(seq, "%s\n", target->name);
+	}
+	return 0;
 }
 
 static const struct seq_operations xt_target_seq_ops = {
 	.start	= xt_target_seq_start,
 	.next	= xt_target_seq_next,
-	.stop	= xt_target_seq_stop,
+	.stop	= xt_mttg_seq_stop,
 	.show	= xt_target_seq_show,
 };
 
 static int xt_target_open(struct inode *inode, struct file *file)
 {
+	struct seq_file *seq;
+	struct nf_mttg_trav *trav;
 	int ret;
 
-	ret = seq_open(file, &xt_target_seq_ops);
-	if (!ret) {
-		struct seq_file *seq = file->private_data;
+	trav = kmalloc(sizeof(*trav), GFP_KERNEL);
+	if (trav == NULL)
+		return -ENOMEM;
 
-		seq->private = PDE(inode);
+	ret = seq_open(file, &xt_target_seq_ops);
+	if (ret < 0) {
+		kfree(trav);
+		return ret;
 	}
-	return ret;
+
+	seq = file->private_data;
+	seq->private = trav;
+	trav->nfproto = (unsigned long)PDE(inode)->data;
+	return 0;
 }
 
 static const struct file_operations xt_target_ops = {
@@ -942,7 +1089,7 @@ static const struct file_operations xt_target_ops = {
 	.open	 = xt_target_open,
 	.read	 = seq_read,
 	.llseek	 = seq_lseek,
-	.release = seq_release,
+	.release = seq_release_private,
 };
 
 #define FORMAT_TABLES	"_tables_names"
@@ -950,6 +1097,60 @@ static const struct file_operations xt_target_ops = {
 #define FORMAT_TARGETS 	"_tables_targets"
 
 #endif /* CONFIG_PROC_FS */
+
+/**
+ * xt_hook_link - set up hooks for a new table
+ * @table:	table with metadata needed to set up hooks
+ * @fn:		Hook function
+ *
+ * This function will take care of creating and registering the necessary
+ * Netfilter hooks for XT tables.
+ */
+struct nf_hook_ops *xt_hook_link(const struct xt_table *table, nf_hookfn *fn)
+{
+	unsigned int hook_mask = table->valid_hooks;
+	uint8_t i, num_hooks = hweight32(hook_mask);
+	uint8_t hooknum;
+	struct nf_hook_ops *ops;
+	int ret;
+
+	ops = kmalloc(sizeof(*ops) * num_hooks, GFP_KERNEL);
+	if (ops == NULL)
+		return ERR_PTR(-ENOMEM);
+
+	for (i = 0, hooknum = 0; i < num_hooks && hook_mask != 0;
+	     hook_mask >>= 1, ++hooknum) {
+		if (!(hook_mask & 1))
+			continue;
+		ops[i].hook     = fn;
+		ops[i].owner    = table->me;
+		ops[i].pf       = table->af;
+		ops[i].hooknum  = hooknum;
+		ops[i].priority = table->priority;
+		++i;
+	}
+
+	ret = nf_register_hooks(ops, num_hooks);
+	if (ret < 0) {
+		kfree(ops);
+		return ERR_PTR(ret);
+	}
+
+	return ops;
+}
+EXPORT_SYMBOL_GPL(xt_hook_link);
+
+/**
+ * xt_hook_unlink - remove hooks for a table
+ * @ops:	nf_hook_ops array as returned by nf_hook_link
+ * @hook_mask:	the very same mask that was passed to nf_hook_link
+ */
+void xt_hook_unlink(const struct xt_table *table, struct nf_hook_ops *ops)
+{
+	nf_unregister_hooks(ops, hweight32(table->valid_hooks));
+	kfree(ops);
+}
+EXPORT_SYMBOL_GPL(xt_hook_unlink);
 
 int xt_proto_init(struct net *net, u_int8_t af)
 {
@@ -1038,7 +1239,14 @@ static struct pernet_operations xt_net_ops = {
 
 static int __init xt_init(void)
 {
-	int i, rv;
+	unsigned int i;
+	int rv;
+
+	for_each_possible_cpu(i) {
+		struct xt_info_lock *lock = &per_cpu(xt_info_locks, i);
+		spin_lock_init(&lock->lock);
+		lock->readers = 0;
+	}
 
 	xt = kmalloc(sizeof(struct xt_af) * NFPROTO_NUMPROTO, GFP_KERNEL);
 	if (!xt)

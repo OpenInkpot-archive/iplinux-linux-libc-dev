@@ -10,7 +10,9 @@
 #include <linux/io.h>
 
 #include <asm/cacheflush.h>
+#include <asm/sections.h>
 #include <asm/page.h>
+#include <asm/setup.h>
 #include <asm/mach/arch.h>
 
 #include "mm.h"
@@ -25,10 +27,10 @@ void __init reserve_node_zero(pg_data_t *pgdat)
 	 * Note that this can only be in node 0.
 	 */
 #ifdef CONFIG_XIP_KERNEL
-	reserve_bootmem_node(pgdat, __pa(&__data_start), &_end - &__data_start,
+	reserve_bootmem_node(pgdat, __pa(_data), _end - _data,
 			BOOTMEM_DEFAULT);
 #else
-	reserve_bootmem_node(pgdat, __pa(&_stext), &_end - &_stext,
+	reserve_bootmem_node(pgdat, __pa(_stext), _end - _stext,
 			BOOTMEM_DEFAULT);
 #endif
 
@@ -41,27 +43,13 @@ void __init reserve_node_zero(pg_data_t *pgdat)
 			BOOTMEM_DEFAULT);
 }
 
-static void __init sanity_check_meminfo(struct meminfo *mi)
-{
-	int i, j;
-
-	for (i = 0, j = 0; i < mi->nr_banks; i++) {
-		struct membank *mb = &mi->bank[i];
-
-		if (mb->size != 0 && mb->node < MAX_NUMNODES)
-			mi->bank[j++] = mi->bank[i];
-	}
-	mi->nr_banks = j;
-}
-
 /*
  * paging_init() sets up the page tables, initialises the zone memory
  * maps, and sets up the zero page, bad page and bad page tables.
  */
-void __init paging_init(struct meminfo *mi, struct machine_desc *mdesc)
+void __init paging_init(struct machine_desc *mdesc)
 {
-	sanity_check_meminfo(mi);
-	bootmem_init(mi);
+	bootmem_init();
 }
 
 /*
@@ -73,9 +61,18 @@ void setup_mm_for_reboot(char mode)
 
 void flush_dcache_page(struct page *page)
 {
-	__cpuc_flush_dcache_page(page_address(page));
+	__cpuc_flush_dcache_area(page_address(page), PAGE_SIZE);
 }
 EXPORT_SYMBOL(flush_dcache_page);
+
+void copy_to_user_page(struct vm_area_struct *vma, struct page *page,
+		       unsigned long uaddr, void *dst, const void *src,
+		       unsigned long len)
+{
+	memcpy(dst, src, len);
+	if (vma->vm_flags & VM_EXEC)
+		__cpuc_coherent_user_range(uaddr, uaddr + len);
+}
 
 void __iomem *__arm_ioremap_pfn(unsigned long pfn, unsigned long offset,
 				size_t size, unsigned int mtype)
@@ -86,12 +83,24 @@ void __iomem *__arm_ioremap_pfn(unsigned long pfn, unsigned long offset,
 }
 EXPORT_SYMBOL(__arm_ioremap_pfn);
 
+void __iomem *__arm_ioremap_pfn_caller(unsigned long pfn, unsigned long offset,
+			   size_t size, unsigned int mtype, void *caller)
+{
+	return __arm_ioremap_pfn(pfn, offset, size, mtype);
+}
+
 void __iomem *__arm_ioremap(unsigned long phys_addr, size_t size,
 			    unsigned int mtype)
 {
 	return (void __iomem *)phys_addr;
 }
 EXPORT_SYMBOL(__arm_ioremap);
+
+void __iomem *__arm_ioremap_caller(unsigned long phys_addr, size_t size,
+				   unsigned int mtype, void *caller)
+{
+	return __arm_ioremap(phys_addr, size, mtype);
+}
 
 void __iounmap(volatile void __iomem *addr)
 {

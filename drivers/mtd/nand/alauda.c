@@ -372,15 +372,6 @@ static int alauda_read_oob(struct mtd_info *mtd, loff_t from, void *oob)
 	return __alauda_read_page(mtd, from, ignore_buf, oob);
 }
 
-static int popcount8(u8 c)
-{
-	int ret = 0;
-
-	for ( ; c; c>>=1)
-		ret += c & 1;
-	return ret;
-}
-
 static int alauda_isbad(struct mtd_info *mtd, loff_t ofs)
 {
 	u8 oob[16];
@@ -391,7 +382,7 @@ static int alauda_isbad(struct mtd_info *mtd, loff_t ofs)
 		return err;
 
 	/* A block is marked bad if two or more bits are zero */
-	return popcount8(oob[5]) >= 7 ? 0 : 1;
+	return hweight8(oob[5]) >= 7 ? 0 : 1;
 }
 
 static int alauda_bounce_read(struct mtd_info *mtd, loff_t from, size_t len,
@@ -676,11 +667,11 @@ static int alauda_probe(struct usb_interface *interface,
 		goto error;
 
 	al->write_out = usb_sndbulkpipe(al->dev,
-			ep_wr->bEndpointAddress & USB_ENDPOINT_NUMBER_MASK);
+			usb_endpoint_num(ep_wr));
 	al->bulk_in = usb_rcvbulkpipe(al->dev,
-			ep_in->bEndpointAddress & USB_ENDPOINT_NUMBER_MASK);
+			usb_endpoint_num(ep_in));
 	al->bulk_out = usb_sndbulkpipe(al->dev,
-			ep_out->bEndpointAddress & USB_ENDPOINT_NUMBER_MASK);
+			usb_endpoint_num(ep_out));
 
 	/* second device is identical up to now */
 	memcpy(al+1, al, sizeof(*al));

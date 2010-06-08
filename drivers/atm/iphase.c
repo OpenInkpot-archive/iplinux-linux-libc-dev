@@ -54,6 +54,7 @@
 #include <linux/uio.h>  
 #include <linux/init.h>  
 #include <linux/wait.h>
+#include <linux/slab.h>
 #include <asm/system.h>  
 #include <asm/io.h>  
 #include <asm/atomic.h>  
@@ -64,7 +65,7 @@
 #include <linux/jiffies.h>
 #include "iphase.h"		  
 #include "suni.h"		  
-#define swap(x) (((x & 0xff) << 8) | ((x & 0xff00) >> 8))  
+#define swap_byte_order(x) (((x & 0xff) << 8) | ((x & 0xff00) >> 8))
 
 #define PRIV(dev) ((struct suni_priv *) dev->phy_data)
 
@@ -557,7 +558,7 @@ static int ia_cbr_setup (IADEV *dev, struct atm_vcc *vcc) {
           memcpy((caddr_t)&cbrVC,(caddr_t)TstSchedTbl,sizeof(cbrVC));
        } /* while */
        // Move this VCI number into this location of the CBR Sched table.
-       memcpy((caddr_t)TstSchedTbl, (caddr_t)&vcIndex,sizeof(TstSchedTbl));
+       memcpy((caddr_t)TstSchedTbl, (caddr_t)&vcIndex, sizeof(*TstSchedTbl));
        dev->CbrRemEntries--;
        toBeAssigned--;
    } /* while */ 
@@ -977,9 +978,7 @@ static void xdump( u_char*  cp, int  length, char*  prefix )
             else
                 pBuf += sprintf( pBuf, "." );
                 }
-        sprintf( pBuf, "\n" );
-        // SPrint(prntBuf);
-        printk(prntBuf);
+        printk("%s\n", prntBuf);
         count += col;
         pBuf = prntBuf;
     }
@@ -1134,7 +1133,7 @@ static int rx_pkt(struct atm_dev *dev)
                     IF_ERR(printk(" cause: packet time out\n");)
                 }
                 else {
-                    IF_ERR(printk(" cause: buffer over flow\n");)
+                    IF_ERR(printk(" cause: buffer overflow\n");)
                 }
 		goto out_free_desc;
 	}  
@@ -1306,7 +1305,7 @@ static void rx_dle_intr(struct atm_dev *dev)
           // get real pkt length  pwang_test
           trailer = (struct cpcs_trailer*)((u_char *)skb->data +
                                  skb->len - sizeof(*trailer));
-          length =  swap(trailer->length);
+	  length = swap_byte_order(trailer->length);
           if ((length > iadev->rx_buf_sz) || (length > 
                               (skb->len - sizeof(struct cpcs_trailer))))
           {
@@ -2864,7 +2863,7 @@ static int ia_getsockopt(struct atm_vcc *vcc, int level, int optname,
 }  
   
 static int ia_setsockopt(struct atm_vcc *vcc, int level, int optname,   
-	void __user *optval, int optlen)  
+	void __user *optval, unsigned int optlen)  
 {  
 	IF_EVENT(printk(">ia_setsockopt\n");)  
 	return -EINVAL;  
@@ -2995,7 +2994,7 @@ static int ia_pkt_tx (struct atm_vcc *vcc, struct sk_buff *skb) {
 		skb->len, PCI_DMA_TODEVICE);
 	wr_ptr->local_pkt_addr = (buf_desc_ptr->buf_start_hi << 16) | 
                                                   buf_desc_ptr->buf_start_lo;  
-	/* wr_ptr->bytes = swap(total_len);	didn't seem to affect ?? */  
+	/* wr_ptr->bytes = swap_byte_order(total_len); didn't seem to affect?? */
 	wr_ptr->bytes = skb->len;  
 
         /* hw bug - DLEs of 0x2d, 0x2e, 0x2f cause DMA lockup */

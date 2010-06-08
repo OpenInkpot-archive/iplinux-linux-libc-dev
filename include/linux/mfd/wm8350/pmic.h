@@ -13,6 +13,10 @@
 #ifndef __LINUX_MFD_WM8350_PMIC_H
 #define __LINUX_MFD_WM8350_PMIC_H
 
+#include <linux/platform_device.h>
+#include <linux/leds.h>
+#include <linux/regulator/machine.h>
+
 /*
  * Register values.
  */
@@ -662,20 +666,20 @@
 #define WM8350_ISINK_FLASH_DUR_64MS		(1 << 8)
 #define WM8350_ISINK_FLASH_DUR_96MS		(2 << 8)
 #define WM8350_ISINK_FLASH_DUR_1024MS		(3 << 8)
-#define WM8350_ISINK_FLASH_ON_INSTANT		(0 << 4)
-#define WM8350_ISINK_FLASH_ON_0_25S		(1 << 4)
-#define WM8350_ISINK_FLASH_ON_0_50S		(2 << 4)
-#define WM8350_ISINK_FLASH_ON_1_00S		(3 << 4)
-#define WM8350_ISINK_FLASH_ON_1_95S		(1 << 4)
-#define WM8350_ISINK_FLASH_ON_3_91S		(2 << 4)
-#define WM8350_ISINK_FLASH_ON_7_80S		(3 << 4)
-#define WM8350_ISINK_FLASH_OFF_INSTANT		(0 << 0)
-#define WM8350_ISINK_FLASH_OFF_0_25S		(1 << 0)
-#define WM8350_ISINK_FLASH_OFF_0_50S		(2 << 0)
-#define WM8350_ISINK_FLASH_OFF_1_00S		(3 << 0)
-#define WM8350_ISINK_FLASH_OFF_1_95S		(1 << 0)
-#define WM8350_ISINK_FLASH_OFF_3_91S		(2 << 0)
-#define WM8350_ISINK_FLASH_OFF_7_80S		(3 << 0)
+#define WM8350_ISINK_FLASH_ON_INSTANT		(0 << 0)
+#define WM8350_ISINK_FLASH_ON_0_25S		(1 << 0)
+#define WM8350_ISINK_FLASH_ON_0_50S		(2 << 0)
+#define WM8350_ISINK_FLASH_ON_1_00S		(3 << 0)
+#define WM8350_ISINK_FLASH_ON_1_95S		(1 << 0)
+#define WM8350_ISINK_FLASH_ON_3_91S		(2 << 0)
+#define WM8350_ISINK_FLASH_ON_7_80S		(3 << 0)
+#define WM8350_ISINK_FLASH_OFF_INSTANT		(0 << 4)
+#define WM8350_ISINK_FLASH_OFF_0_25S		(1 << 4)
+#define WM8350_ISINK_FLASH_OFF_0_50S		(2 << 4)
+#define WM8350_ISINK_FLASH_OFF_1_00S		(3 << 4)
+#define WM8350_ISINK_FLASH_OFF_1_95S		(1 << 4)
+#define WM8350_ISINK_FLASH_OFF_3_91S		(2 << 4)
+#define WM8350_ISINK_FLASH_OFF_7_80S		(3 << 4)
 
 /*
  * Regulator Interrupts.
@@ -700,7 +704,38 @@ struct wm8350;
 struct platform_device;
 struct regulator_init_data;
 
+/*
+ * WM8350 LED platform data
+ */
+struct wm8350_led_platform_data {
+	const char *name;
+	const char *default_trigger;
+	int max_uA;
+};
+
+struct wm8350_led {
+	struct platform_device *pdev;
+	struct mutex mutex;
+	struct work_struct work;
+	spinlock_t value_lock;
+	enum led_brightness value;
+	struct led_classdev cdev;
+	int max_uA_index;
+	int enabled;
+
+	struct regulator *isink;
+	struct regulator_consumer_supply isink_consumer;
+	struct regulator_init_data isink_init;
+	struct regulator *dcdc;
+	struct regulator_consumer_supply dcdc_consumer;
+	struct regulator_init_data dcdc_init;
+};
+
 struct wm8350_pmic {
+	/* Number of regulators of each type on this device */
+	int max_dcdc;
+	int max_isink;
+
 	/* ISINK to DCDC mapping */
 	int isink_A_dcdc;
 	int isink_B_dcdc;
@@ -713,10 +748,15 @@ struct wm8350_pmic {
 
 	/* regulator devices */
 	struct platform_device *pdev[NUM_WM8350_REGULATORS];
+
+	/* LED devices */
+	struct wm8350_led led[2];
 };
 
 int wm8350_register_regulator(struct wm8350 *wm8350, int reg,
 			      struct regulator_init_data *initdata);
+int wm8350_register_led(struct wm8350 *wm8350, int lednum, int dcdc, int isink,
+			struct wm8350_led_platform_data *pdata);
 
 /*
  * Additional DCDC control not supported via regulator API

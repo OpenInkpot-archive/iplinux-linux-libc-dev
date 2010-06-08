@@ -102,6 +102,10 @@
  *  PXA930	B0	0x69056835	0x5E643013
  *  PXA930	B1	0x69056837	0x7E643013
  *  PXA930	B2	0x69056838	0x8E643013
+ *
+ *  PXA935	A0	0x56056931	0x1E653013
+ *  PXA935	B0	0x56056936	0x6E653013
+ *  PXA935	B1	0x56056938	0x8E653013
  */
 #ifdef CONFIG_PXA25x
 #define __cpu_is_pxa210(id)				\
@@ -178,10 +182,30 @@
 #define __cpu_is_pxa930(id)				\
 	({						\
 		unsigned int _id = (id) >> 4 & 0xfff;	\
-		_id == 0x683;		\
+		_id == 0x683;				\
 	 })
 #else
 #define __cpu_is_pxa930(id)	(0)
+#endif
+
+#ifdef CONFIG_CPU_PXA935
+#define __cpu_is_pxa935(id)				\
+	({						\
+		unsigned int _id = (id) >> 4 & 0xfff;	\
+		_id == 0x693;				\
+	 })
+#else
+#define __cpu_is_pxa935(id)	(0)
+#endif
+
+#ifdef CONFIG_CPU_PXA950
+#define __cpu_is_pxa950(id)                             \
+	({                                              \
+		unsigned int _id = (id) >> 4 & 0xfff;	\
+		_id == 0x697;				\
+	 })
+#else
+#define __cpu_is_pxa950(id)	(0)
 #endif
 
 #define cpu_is_pxa210()					\
@@ -203,8 +227,6 @@
 	({						\
 		__cpu_is_pxa25x(read_cpuid_id());	\
 	})
-
-extern int cpu_is_pxa26x(void);
 
 #define cpu_is_pxa27x()					\
 	({						\
@@ -228,9 +250,19 @@ extern int cpu_is_pxa26x(void);
 
 #define cpu_is_pxa930()					\
 	({						\
-		unsigned int id = read_cpuid(CPUID_ID);	\
-		__cpu_is_pxa930(id);			\
+		__cpu_is_pxa930(read_cpuid_id());	\
 	 })
+
+#define cpu_is_pxa935()					\
+	({						\
+		__cpu_is_pxa935(read_cpuid_id());	\
+	 })
+
+#define cpu_is_pxa950()					\
+	({						\
+		__cpu_is_pxa950(read_cpuid_id());	\
+	 })
+
 
 /*
  * CPUID Core Generation Bit
@@ -249,6 +281,12 @@ extern int cpu_is_pxa26x(void);
 		_id == 0x3;				\
 	 })
 
+#define __cpu_is_pxa93x(id)				\
+	({						\
+		unsigned int _id = (id) >> 4 & 0xfff;	\
+		_id == 0x683 || _id == 0x693;		\
+	 })
+
 #define cpu_is_pxa2xx()					\
 	({						\
 		__cpu_is_pxa2xx(read_cpuid_id());	\
@@ -259,26 +297,17 @@ extern int cpu_is_pxa26x(void);
 		__cpu_is_pxa3xx(read_cpuid_id());	\
 	 })
 
-/*
- * Handy routine to set GPIO alternate functions
- */
-extern int pxa_gpio_mode( int gpio_mode );
-
-/*
- * Return GPIO level, nonzero means high, zero is low
- */
-extern int pxa_gpio_get_value(unsigned gpio);
-
-/*
- * Set output GPIO level
- */
-extern void pxa_gpio_set_value(unsigned gpio, int value);
-
+#define cpu_is_pxa93x()					\
+	({						\
+		__cpu_is_pxa93x(read_cpuid_id());	\
+	 })
 /*
  * return current memory and LCD clock frequency in units of 10kHz
  */
 extern unsigned int get_memclk_frequency_10khz(void);
 
+/* return the clock tick rate of the OS timer */
+extern unsigned long get_clock_tick_rate(void);
 #endif
 
 #if defined(CONFIG_MACH_ARMCORE) && defined(CONFIG_PCI)
@@ -286,5 +315,6 @@ extern unsigned int get_memclk_frequency_10khz(void);
 #define PCIBIOS_MIN_MEM		0
 #define pcibios_assign_all_busses()	1
 #endif
+
 
 #endif  /* _ASM_ARCH_HARDWARE_H */

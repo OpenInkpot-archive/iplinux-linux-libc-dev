@@ -20,8 +20,13 @@
 #include <linux/delay.h>
 #include <linux/platform_device.h>
 #include <linux/clk.h>
+#include <linux/gpio.h>
 #include <linux/spi/spi.h>
 #include <linux/smc91x.h>
+#include <linux/i2c.h>
+#include <linux/leds.h>
+#include <linux/mfd/da903x.h>
+#include <linux/i2c/max732x.h>
 
 #include <asm/types.h>
 #include <asm/setup.h>
@@ -34,17 +39,19 @@
 #include <asm/mach/map.h>
 #include <asm/mach/irq.h>
 
-#include <mach/pxa-regs.h>
-#include <mach/mfp-pxa300.h>
-#include <mach/gpio.h>
+#include <mach/pxa300.h>
 #include <mach/pxafb.h>
 #include <mach/ssp.h>
+#include <mach/mmc.h>
 #include <mach/pxa2xx_spi.h>
 #include <mach/pxa27x_keypad.h>
-#include <mach/pxa3xx_nand.h>
 #include <mach/littleton.h>
+#include <plat/i2c.h>
+#include <plat/pxa3xx_nand.h>
 
 #include "generic.h"
+
+#define GPIO_MMC1_CARD_DETECT	mfp_to_gpio(MFP_PIN_GPIO15)
 
 /* Littleton MFP configurations */
 static mfp_cfg_t littleton_mfp_cfg[] __initdata = {
@@ -94,6 +101,21 @@ static mfp_cfg_t littleton_mfp_cfg[] __initdata = {
 	GPIO123_KP_MKOUT_2,
 	GPIO124_KP_MKOUT_3,
 	GPIO125_KP_MKOUT_4,
+
+	/* MMC1 */
+	GPIO3_MMC1_DAT0,
+	GPIO4_MMC1_DAT1,
+	GPIO5_MMC1_DAT2,
+	GPIO6_MMC1_DAT3,
+	GPIO7_MMC1_CLK,
+	GPIO8_MMC1_CMD,
+	GPIO15_GPIO, /* card detect */
+
+	/* UART3 */
+	GPIO107_UART3_CTS,
+	GPIO108_UART3_RTS,
+	GPIO109_UART3_TXD,
+	GPIO110_UART3_RXD,
 };
 
 static struct resource smc91x_resources[] = {
@@ -175,15 +197,10 @@ static struct pxa2xx_spi_master littleton_spi_info = {
 	.num_chipselect		= 1,
 };
 
-static void littleton_tdo24m_cs(u32 cmd)
-{
-	gpio_set_value(LITTLETON_GPIO_LCD_CS, !(cmd == PXA2XX_CS_ASSERT));
-}
-
 static struct pxa2xx_spi_chip littleton_tdo24m_chip = {
 	.rx_threshold	= 1,
 	.tx_threshold	= 1,
-	.cs_control	= littleton_tdo24m_cs,
+	.gpio_cs	= LITTLETON_GPIO_LCD_CS,
 };
 
 static struct spi_board_info littleton_spi_devices[] __initdata = {
@@ -198,16 +215,6 @@ static struct spi_board_info littleton_spi_devices[] __initdata = {
 
 static void __init littleton_init_spi(void)
 {
-	int err;
-
-	err = gpio_request(LITTLETON_GPIO_LCD_CS, "LCD_CS");
-	if (err) {
-		pr_warning("failed to request GPIO for LCS CS\n");
-		return;
-	}
-
-	gpio_direction_output(LITTLETON_GPIO_LCD_CS, 1);
-
 	pxa2xx_set_spi_info(2, &littleton_spi_info);
 	spi_register_board_info(ARRAY_AND_SIZE(littleton_spi_devices));
 }
@@ -263,6 +270,23 @@ static void __init littleton_init_keypad(void)
 static inline void littleton_init_keypad(void) {}
 #endif
 
+#if defined(CONFIG_MMC_PXA) || defined(CONFIG_MMC_PXA_MODULE)
+static struct pxamci_platform_data littleton_mci_platform_data = {
+	.detect_delay		= 20,
+	.ocr_mask		= MMC_VDD_32_33 | MMC_VDD_33_34,
+	.gpio_card_detect	= GPIO_MMC1_CARD_DETECT,
+	.gpio_card_ro		= -1,
+	.gpio_power		= -1,
+};
+
+static void __init littleton_init_mmc(void)
+{
+	pxa_set_mci_info(&littleton_mci_platform_data);
+}
+#else
+static inline void littleton_init_mmc(void) {}
+#endif
+
 #if defined(CONFIG_MTD_NAND_PXA3xx) || defined(CONFIG_MTD_NAND_PXA3xx_MODULE)
 static struct mtd_partition littleton_nand_partitions[] = {
 	[0] = {
@@ -314,10 +338,90 @@ static void __init littleton_init_nand(void)
 static inline void littleton_init_nand(void) {}
 #endif /* CONFIG_MTD_NAND_PXA3xx || CONFIG_MTD_NAND_PXA3xx_MODULE */
 
+#if defined(CONFIG_I2C_PXA) || defined(CONFIG_I2C_PXA_MODULE)
+static struct led_info littleton_da9034_leds[] = {
+	[0] = {
+		.name	= "littleton:keypad1",
+		.flags	= DA9034_LED_RAMP,
+	},
+	[1] = {
+		.name	= "littleton:keypad2",
+		.flags	= DA9034_LED_RAMP,
+	},
+	[2] = {
+		.name	= "littleton:vibra",
+		.flags	= 0,
+	},
+};
+
+static struct da9034_touch_pdata littleton_da9034_touch = {
+	.x_inverted     = 1,
+	.interval_ms    = 20,
+};
+
+static struct da903x_subdev_info littleton_da9034_subdevs[] = {
+	{
+		.name		= "da903x-led",
+		.id		= DA9034_ID_LED_1,
+		.platform_data	= &littleton_da9034_leds[0],
+	}, {
+		.name		= "da903x-led",
+		.id		= DA9034_ID_LED_2,
+		.platform_data	= &littleton_da9034_leds[1],
+	}, {
+		.name		= "da903x-led",
+		.id		= DA9034_ID_VIBRA,
+		.platform_data	= &littleton_da9034_leds[2],
+	}, {
+		.name		= "da903x-backlight",
+		.id		= DA9034_ID_WLED,
+	}, {
+		.name		= "da9034-touch",
+		.id		= DA9034_ID_TOUCH,
+		.platform_data	= &littleton_da9034_touch,
+	},
+};
+
+static struct da903x_platform_data littleton_da9034_info = {
+	.num_subdevs	= ARRAY_SIZE(littleton_da9034_subdevs),
+	.subdevs	= littleton_da9034_subdevs,
+};
+
+static struct max732x_platform_data littleton_max7320_info = {
+	.gpio_base	= EXT0_GPIO_BASE,
+};
+
+static struct i2c_board_info littleton_i2c_info[] = {
+	[0] = {
+		.type		= "da9034",
+		.addr		= 0x34,
+		.platform_data	= &littleton_da9034_info,
+		.irq		= gpio_to_irq(mfp_to_gpio(MFP_PIN_GPIO18)),
+	},
+	[1] = {
+		.type		= "max7320",
+		.addr		= 0x50,
+		.platform_data	= &littleton_max7320_info,
+	},
+};
+
+static void __init littleton_init_i2c(void)
+{
+	pxa_set_i2c_info(NULL);
+	i2c_register_board_info(0, ARRAY_AND_SIZE(littleton_i2c_info));
+}
+#else
+static inline void littleton_init_i2c(void) {}
+#endif /* CONFIG_I2C_PXA || CONFIG_I2C_PXA_MODULE */
+
 static void __init littleton_init(void)
 {
 	/* initialize MFP configurations */
 	pxa3xx_mfp_config(ARRAY_AND_SIZE(littleton_mfp_cfg));
+
+	pxa_set_ffuart_info(NULL);
+	pxa_set_btuart_info(NULL);
+	pxa_set_stuart_info(NULL);
 
 	/*
 	 * Note: we depend bootloader set the correct
@@ -326,6 +430,8 @@ static void __init littleton_init(void)
 	platform_device_register(&smc91x_device);
 
 	littleton_init_spi();
+	littleton_init_i2c();
+	littleton_init_mmc();
 	littleton_init_lcd();
 	littleton_init_keypad();
 	littleton_init_nand();

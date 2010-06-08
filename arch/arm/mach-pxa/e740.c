@@ -15,6 +15,8 @@
 #include <linux/device.h>
 #include <linux/platform_device.h>
 #include <linux/fb.h>
+#include <linux/clk.h>
+#include <linux/mfd/t7l66xb.h>
 
 #include <video/w100fb.h>
 
@@ -22,13 +24,17 @@
 #include <asm/mach/arch.h>
 #include <asm/mach-types.h>
 
-#include <mach/mfp-pxa25x.h>
-#include <mach/hardware.h>
+#include <mach/pxa25x.h>
+#include <mach/eseries-gpio.h>
 #include <mach/udc.h>
+#include <mach/irda.h>
+#include <mach/irqs.h>
+#include <mach/audio.h>
 
 #include "generic.h"
 #include "eseries.h"
-
+#include "clock.h"
+#include "devices.h"
 
 /* ------------------------ e740 video support --------------------------- */
 
@@ -116,7 +122,28 @@ static unsigned long e740_pin_config[] __initdata = {
 	GPIO42_BTUART_RXD,
 	GPIO43_BTUART_TXD,
 	GPIO44_BTUART_CTS,
-	GPIO45_GPIO, /* Used by TMIO for #SUSPEND */
+
+	/* TMIO controller */
+	GPIO19_GPIO, /* t7l66xb #PCLR */
+	GPIO45_GPIO, /* t7l66xb #SUSPEND (NOT BTUART!) */
+
+	/* UDC */
+	GPIO13_GPIO,
+	GPIO3_GPIO,
+
+	/* IrDA */
+	GPIO38_GPIO | MFP_LPM_DRIVE_HIGH,
+
+	/* AC97 */
+	GPIO28_AC97_BITCLK,
+	GPIO29_AC97_SDATA_IN_0,
+	GPIO30_AC97_SDATA_OUT,
+	GPIO31_AC97_SYNC,
+
+	/* Audio power control */
+	GPIO16_GPIO,  /* AC97 codec AVDD2 supply (analogue power) */
+	GPIO40_GPIO,  /* Mic amp power */
+	GPIO41_GPIO,  /* Headphone amp power */
 
 	/* PC Card */
 	GPIO8_GPIO,   /* CD0 */
@@ -142,17 +169,46 @@ static unsigned long e740_pin_config[] __initdata = {
 	GPIO0_GPIO | WAKEUP_ON_EDGE_RISE,
 };
 
+/* -------------------- e740 t7l66xb parameters -------------------- */
+
+static struct t7l66xb_platform_data e740_t7l66xb_info = {
+	.irq_base 		= IRQ_BOARD_START,
+	.enable                 = &eseries_tmio_enable,
+	.suspend                = &eseries_tmio_suspend,
+	.resume                 = &eseries_tmio_resume,
+};
+
+static struct platform_device e740_t7l66xb_device = {
+	.name           = "t7l66xb",
+	.id             = -1,
+	.dev            = {
+		.platform_data = &e740_t7l66xb_info,
+	},
+	.num_resources = 2,
+	.resource      = eseries_tmio_resources,
+};
+
 /* ----------------------------------------------------------------------- */
 
 static struct platform_device *devices[] __initdata = {
 	&e740_fb_device,
+	&e740_t7l66xb_device,
 };
 
 static void __init e740_init(void)
 {
 	pxa2xx_mfp_config(ARRAY_AND_SIZE(e740_pin_config));
+	pxa_set_ffuart_info(NULL);
+	pxa_set_btuart_info(NULL);
+	pxa_set_stuart_info(NULL);
+	eseries_register_clks();
+	clk_add_alias("CLK_CK48M", e740_t7l66xb_device.name,
+			"UDCCLK", &pxa25x_device_udc.dev),
+	eseries_get_tmio_gpios();
 	platform_add_devices(devices, ARRAY_SIZE(devices));
 	pxa_set_udc_info(&e7xx_udc_mach_info);
+	pxa_set_ac97_info(NULL);
+	pxa_set_ficp_info(&e7xx_ficp_platform_data);
 }
 
 MACHINE_START(E740, "Toshiba e740")

@@ -212,11 +212,14 @@ static int kobject_add_internal(struct kobject *kobj)
  * @fmt: format string used to build the name
  * @vargs: vargs to format the string.
  */
-static int kobject_set_name_vargs(struct kobject *kobj, const char *fmt,
+int kobject_set_name_vargs(struct kobject *kobj, const char *fmt,
 				  va_list vargs)
 {
 	const char *old_name = kobj->name;
 	char *s;
+
+	if (kobj->name && !fmt)
+		return 0;
 
 	kobj->name = kvasprintf(GFP_KERNEL, fmt, vargs);
 	if (!kobj->name)
@@ -697,7 +700,7 @@ static ssize_t kobj_attr_store(struct kobject *kobj, struct attribute *attr,
 	return ret;
 }
 
-struct sysfs_ops kobj_sysfs_ops = {
+const struct sysfs_ops kobj_sysfs_ops = {
 	.show	= kobj_attr_show,
 	.store	= kobj_attr_store,
 };
@@ -786,15 +789,20 @@ static struct kobj_type kset_ktype = {
  * If the kset was not able to be created, NULL will be returned.
  */
 static struct kset *kset_create(const char *name,
-				struct kset_uevent_ops *uevent_ops,
+				const struct kset_uevent_ops *uevent_ops,
 				struct kobject *parent_kobj)
 {
 	struct kset *kset;
+	int retval;
 
 	kset = kzalloc(sizeof(*kset), GFP_KERNEL);
 	if (!kset)
 		return NULL;
-	kobject_set_name(&kset->kobj, name);
+	retval = kobject_set_name(&kset->kobj, name);
+	if (retval) {
+		kfree(kset);
+		return NULL;
+	}
 	kset->uevent_ops = uevent_ops;
 	kset->kobj.parent = parent_kobj;
 
@@ -824,7 +832,7 @@ static struct kset *kset_create(const char *name,
  * If the kset was not able to be created, NULL will be returned.
  */
 struct kset *kset_create_and_add(const char *name,
-				 struct kset_uevent_ops *uevent_ops,
+				 const struct kset_uevent_ops *uevent_ops,
 				 struct kobject *parent_kobj)
 {
 	struct kset *kset;

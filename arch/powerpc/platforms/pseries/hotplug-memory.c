@@ -11,9 +11,11 @@
 
 #include <linux/of.h>
 #include <linux/lmb.h>
+#include <linux/vmalloc.h>
 #include <asm/firmware.h>
 #include <asm/machdep.h>
 #include <asm/pSeries_reconfig.h>
+#include <asm/sparsemem.h>
 
 static int pseries_remove_lmb(unsigned long base, unsigned int lmb_size)
 {
@@ -53,6 +55,12 @@ static int pseries_remove_lmb(unsigned long base, unsigned int lmb_size)
 	 */
 	start = (unsigned long)__va(base);
 	ret = remove_section_mapping(start, start + lmb_size);
+
+	/* Ensure all vmalloc mappings are flushed in case they also
+	 * hit that section of memory
+	 */
+	vm_unmap_aliases();
+
 	return ret;
 }
 

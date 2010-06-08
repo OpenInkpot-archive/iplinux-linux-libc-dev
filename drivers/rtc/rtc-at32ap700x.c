@@ -11,6 +11,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 #include <linux/rtc.h>
 #include <linux/io.h>
 
@@ -205,7 +206,7 @@ static int __init at32_rtc_probe(struct platform_device *pdev)
 {
 	struct resource	*regs;
 	struct rtc_at32ap700x *rtc;
-	int irq = -1;
+	int irq;
 	int ret;
 
 	rtc = kzalloc(sizeof(struct rtc_at32ap700x), GFP_KERNEL);
@@ -222,7 +223,7 @@ static int __init at32_rtc_probe(struct platform_device *pdev)
 	}
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
+	if (irq <= 0) {
 		dev_dbg(&pdev->dev, "could not get irq\n");
 		ret = -ENXIO;
 		goto out;
@@ -256,6 +257,8 @@ static int __init at32_rtc_probe(struct platform_device *pdev)
 		goto out_iounmap;
 	}
 
+	platform_set_drvdata(pdev, rtc);
+
 	rtc->rtc = rtc_device_register(pdev->name, &pdev->dev,
 				&at32_rtc_ops, THIS_MODULE);
 	if (IS_ERR(rtc->rtc)) {
@@ -264,7 +267,6 @@ static int __init at32_rtc_probe(struct platform_device *pdev)
 		goto out_free_irq;
 	}
 
-	platform_set_drvdata(pdev, rtc);
 	device_init_wakeup(&pdev->dev, 1);
 
 	dev_info(&pdev->dev, "Atmel RTC for AT32AP700x at %08lx irq %ld\n",
@@ -273,6 +275,7 @@ static int __init at32_rtc_probe(struct platform_device *pdev)
 	return 0;
 
 out_free_irq:
+	platform_set_drvdata(pdev, NULL);
 	free_irq(irq, rtc);
 out_iounmap:
 	iounmap(rtc->regs);

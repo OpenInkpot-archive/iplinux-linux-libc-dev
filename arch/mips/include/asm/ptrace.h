@@ -48,6 +48,10 @@ struct pt_regs {
 #ifdef CONFIG_MIPS_MT_SMTC
 	unsigned long cp0_tcstatus;
 #endif /* CONFIG_MIPS_MT_SMTC */
+#ifdef CONFIG_CPU_CAVIUM_OCTEON
+	unsigned long long mpl[3];        /* MTM{0,1,2} */
+	unsigned long long mtp[3];        /* MTP{0,1,2} */
+#endif
 } __attribute__ ((aligned (8)));
 
 /* Arbitrarily choose the same ptrace numbers as used by the Sparc code. */
@@ -101,7 +105,7 @@ struct pt_watch_regs {
 	enum pt_watch_style style;
 	union {
 		struct mips32_watch_regs mips32;
-		struct mips32_watch_regs mips64;
+		struct mips64_watch_regs mips64;
 	};
 };
 
@@ -138,9 +142,9 @@ extern int ptrace_set_watch_regs(struct task_struct *child,
 
 extern asmlinkage void do_syscall_trace(struct pt_regs *regs, int entryexit);
 
-extern NORET_TYPE void die(const char *, const struct pt_regs *) ATTRIB_NORET;
+extern NORET_TYPE void die(const char *, struct pt_regs *) ATTRIB_NORET;
 
-static inline void die_if_kernel(const char *str, const struct pt_regs *regs)
+static inline void die_if_kernel(const char *str, struct pt_regs *regs)
 {
 	if (unlikely(!user_mode(regs)))
 		die(str, regs);

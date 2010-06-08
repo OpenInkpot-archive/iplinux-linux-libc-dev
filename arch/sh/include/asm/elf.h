@@ -108,15 +108,12 @@ typedef struct user_fpu_struct elf_fpregset_t;
 #define elf_check_fdpic(x)		((x)->e_flags & EF_SH_FDPIC)
 #define elf_check_const_displacement(x)	((x)->e_flags & EF_SH_PIC)
 
-#ifdef CONFIG_SUPERH32
 /*
  * Enable dump using regset.
  * This covers all of general/DSP/FPU regs.
  */
 #define CORE_DUMP_USE_REGSET
-#endif
 
-#define USE_ELF_CORE_DUMP
 #define ELF_FDPIC_CORE_EFLAGS	EF_SH_FDPIC
 #define ELF_EXEC_PAGESIZE	PAGE_SIZE
 
@@ -204,7 +201,7 @@ do {									\
 #define ARCH_HAS_SETUP_ADDITIONAL_PAGES
 struct linux_binprm;
 extern int arch_setup_additional_pages(struct linux_binprm *bprm,
-				       int executable_stack);
+				       int uses_interp);
 
 extern unsigned int vdso_enabled;
 extern void __kernel_vsyscall;
@@ -214,7 +211,9 @@ extern void __kernel_vsyscall;
 
 #define VSYSCALL_AUX_ENT					\
 	if (vdso_enabled)					\
-		NEW_AUX_ENT(AT_SYSINFO_EHDR, VDSO_BASE);
+		NEW_AUX_ENT(AT_SYSINFO_EHDR, VDSO_BASE);	\
+	else							\
+		NEW_AUX_ENT(AT_IGNORE, 0);
 #else
 #define VSYSCALL_AUX_ENT
 #endif /* CONFIG_VSYSCALL */
@@ -222,7 +221,7 @@ extern void __kernel_vsyscall;
 #ifdef CONFIG_SH_FPU
 #define FPU_AUX_ENT	NEW_AUX_ENT(AT_FPUCW, FPSCR_INIT)
 #else
-#define FPU_AUX_ENT
+#define FPU_AUX_ENT	NEW_AUX_ENT(AT_IGNORE, 0)
 #endif
 
 extern int l1i_cache_shape, l1d_cache_shape, l2_cache_shape;

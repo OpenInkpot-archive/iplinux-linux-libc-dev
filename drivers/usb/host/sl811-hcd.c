@@ -51,6 +51,7 @@
 #include <asm/irq.h>
 #include <asm/system.h>
 #include <asm/byteorder.h>
+#include <asm/unaligned.h>
 
 #include "../core/hcd.h"
 #include "sl811.h"
@@ -230,7 +231,7 @@ static void in_packet(
 	writeb(usb_pipedevice(urb->pipe), data_reg);
 
 	sl811_write(sl811, bank + SL11H_HOSTCTLREG, control);
-	ep->length = min((int)len,
+	ep->length = min_t(u32, len,
 			urb->transfer_buffer_length - urb->actual_length);
 	PACKET("IN%s/%d qh%p len%d\n", ep->nak_count ? "/retry" : "",
 			!!usb_gettoggle(urb->dev, ep->epnum, 0), ep, len);
@@ -255,7 +256,7 @@ static void out_packet(
 	buf = urb->transfer_buffer + urb->actual_length;
 	prefetch(buf);
 
-	len = min((int)ep->maxpacket,
+	len = min_t(u32, ep->maxpacket,
 			urb->transfer_buffer_length - urb->actual_length);
 
 	if (!(control & SL11H_HCTLMASK_ISOCH)
@@ -719,8 +720,12 @@ retry:
 		/* port status seems weird until after reset, so
 		 * force the reset and make khubd clean up later.
 		 */
-		sl811->port1 |= (1 << USB_PORT_FEAT_C_CONNECTION)
-				| (1 << USB_PORT_FEAT_CONNECTION);
+		if (irqstat & SL11H_INTMASK_RD)
+			sl811->port1 &= ~(1 << USB_PORT_FEAT_CONNECTION);
+		else
+			sl811->port1 |= 1 << USB_PORT_FEAT_CONNECTION;
+
+		sl811->port1 |= 1 << USB_PORT_FEAT_C_CONNECTION;
 
 	} else if (irqstat & SL11H_INTMASK_RD) {
 		if (sl811->port1 & (1 << USB_PORT_FEAT_SUSPEND)) {
@@ -1268,12 +1273,12 @@ sl811h_hub_control(
 		sl811h_hub_descriptor(sl811, (struct usb_hub_descriptor *) buf);
 		break;
 	case GetHubStatus:
-		*(__le32 *) buf = cpu_to_le32(0);
+		put_unaligned_le32(0, buf);
 		break;
 	case GetPortStatus:
 		if (wIndex != 1)
 			goto error;
-		*(__le32 *) buf = cpu_to_le32(sl811->port1);
+		put_unaligned_le32(sl811->port1, buf);
 
 #ifndef	VERBOSE
 	if (*(u16*)(buf+2))	/* only if wPortChange is interesting */

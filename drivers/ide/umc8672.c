@@ -104,21 +104,24 @@ static void umc_set_speeds(u8 speeds[])
 		speeds[0], speeds[1], speeds[2], speeds[3]);
 }
 
-static void umc_set_pio_mode(ide_drive_t *drive, const u8 pio)
+static void umc_set_pio_mode(ide_hwif_t *hwif, ide_drive_t *drive)
 {
-	ide_hwif_t *hwif = drive->hwif;
-	unsigned long flags;
+	ide_hwif_t *mate = hwif->mate;
+	unsigned long uninitialized_var(flags);
+	const u8 pio = drive->pio_mode - XFER_PIO_0;
 
 	printk("%s: setting umc8672 to PIO mode%d (speed %d)\n",
 		drive->name, pio, pio_to_umc[pio]);
-	spin_lock_irqsave(&ide_lock, flags);
-	if (hwif->mate && hwif->mate->hwgroup->handler) {
+	if (mate)
+		spin_lock_irqsave(&mate->lock, flags);
+	if (mate && mate->handler) {
 		printk(KERN_ERR "umc8672: other interface is busy: exiting tune_umc()\n");
 	} else {
 		current_speeds[drive->name[2] - 'a'] = pio_to_umc[pio];
 		umc_set_speeds(current_speeds);
 	}
-	spin_unlock_irqrestore(&ide_lock, flags);
+	if (mate)
+		spin_unlock_irqrestore(&mate->lock, flags);
 }
 
 static const struct ide_port_ops umc8672_port_ops = {
@@ -168,9 +171,9 @@ static int __init umc8672_init(void)
 		goto out;
 
 	if (umc8672_probe() == 0)
-		return 0;;
+		return 0;
 out:
-	return -ENODEV;;
+	return -ENODEV;
 }
 
 module_init(umc8672_init);

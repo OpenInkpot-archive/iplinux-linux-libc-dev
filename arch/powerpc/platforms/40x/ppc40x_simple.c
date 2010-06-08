@@ -51,7 +51,11 @@ machine_device_initcall(ppc40x_simple, ppc40x_device_probe);
  * board.c file for it rather than adding it to this list.
  */
 static char *board[] __initdata = {
-	"amcc,acadia"
+	"amcc,acadia",
+	"amcc,haleakala",
+	"amcc,kilauea",
+	"amcc,makalu",
+	"est,hotfoot"
 };
 
 static int __init ppc40x_probe(void)
@@ -61,7 +65,7 @@ static int __init ppc40x_probe(void)
 
 	for (i = 0; i < ARRAY_SIZE(board); i++) {
 		if (of_flat_dt_is_compatible(root, board[i])) {
-			ppc_pci_flags = PPC_PCI_REASSIGN_ALL_RSRC;
+			ppc_pci_set_flags(PPC_PCI_REASSIGN_ALL_RSRC);
 			return 1;
 		}
 	}

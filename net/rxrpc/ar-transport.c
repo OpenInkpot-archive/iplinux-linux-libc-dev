@@ -12,6 +12,7 @@
 #include <linux/module.h>
 #include <linux/net.h>
 #include <linux/skbuff.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 #include <net/af_rxrpc.h>
 #include "ar-internal.h"
@@ -78,10 +79,10 @@ struct rxrpc_transport *rxrpc_get_transport(struct rxrpc_local *local,
 	const char *new = "old";
 	int usage;
 
-	_enter("{%u.%u.%u.%u+%hu},{%u.%u.%u.%u+%hu},",
-	       NIPQUAD(local->srx.transport.sin.sin_addr),
+	_enter("{%pI4+%hu},{%pI4+%hu},",
+	       &local->srx.transport.sin.sin_addr,
 	       ntohs(local->srx.transport.sin.sin_port),
-	       NIPQUAD(peer->srx.transport.sin.sin_addr),
+	       &peer->srx.transport.sin.sin_addr,
 	       ntohs(peer->srx.transport.sin.sin_port));
 
 	/* search the transport list first */
@@ -149,10 +150,10 @@ struct rxrpc_transport *rxrpc_find_transport(struct rxrpc_local *local,
 {
 	struct rxrpc_transport *trans;
 
-	_enter("{%u.%u.%u.%u+%hu},{%u.%u.%u.%u+%hu},",
-	       NIPQUAD(local->srx.transport.sin.sin_addr),
+	_enter("{%pI4+%hu},{%pI4+%hu},",
+	       &local->srx.transport.sin.sin_addr,
 	       ntohs(local->srx.transport.sin.sin_port),
-	       NIPQUAD(peer->srx.transport.sin.sin_addr),
+	       &peer->srx.transport.sin.sin_addr,
 	       ntohs(peer->srx.transport.sin.sin_port));
 
 	/* search the transport list */

@@ -40,12 +40,12 @@
 #define DBG_LOW(fmt...) do { } while (0)
 #endif
 
-static DEFINE_SPINLOCK(beat_htab_lock);
+static DEFINE_RAW_SPINLOCK(beat_htab_lock);
 
 static inline unsigned int beat_read_mask(unsigned hpte_group)
 {
-	unsigned long hpte_v[5];
 	unsigned long rmask = 0;
+	u64 hpte_v[5];
 
 	beat_read_htab_entries(0, hpte_group + 0, hpte_v);
 	if (!(hpte_v[0] & HPTE_V_BOLTED))
@@ -93,8 +93,7 @@ static long beat_lpar_hpte_insert(unsigned long hpte_group,
 				  int psize, int ssize)
 {
 	unsigned long lpar_rc;
-	unsigned long slot;
-	unsigned long hpte_v, hpte_r;
+	u64 hpte_v, hpte_r, slot;
 
 	/* same as iseries */
 	if (vflags & HPTE_V_SECONDARY)
@@ -115,18 +114,18 @@ static long beat_lpar_hpte_insert(unsigned long hpte_group,
 	if (rflags & _PAGE_NO_CACHE)
 		hpte_r &= ~_PAGE_COHERENT;
 
-	spin_lock(&beat_htab_lock);
+	raw_spin_lock(&beat_htab_lock);
 	lpar_rc = beat_read_mask(hpte_group);
 	if (lpar_rc == 0) {
 		if (!(vflags & HPTE_V_BOLTED))
 			DBG_LOW(" full\n");
-		spin_unlock(&beat_htab_lock);
+		raw_spin_unlock(&beat_htab_lock);
 		return -1;
 	}
 
 	lpar_rc = beat_insert_htab_entry(0, hpte_group, lpar_rc << 48,
 		hpte_v, hpte_r, &slot);
-	spin_unlock(&beat_htab_lock);
+	raw_spin_unlock(&beat_htab_lock);
 
 	/*
 	 * Since we try and ioremap PHBs we don't own, the pte insert
@@ -153,8 +152,9 @@ static long beat_lpar_hpte_remove(unsigned long hpte_group)
 
 static unsigned long beat_lpar_hpte_getword0(unsigned long slot)
 {
-	unsigned long dword0, dword[5];
+	unsigned long dword0;
 	unsigned long lpar_rc;
+	u64 dword[5];
 
 	lpar_rc = beat_read_htab_entries(0, slot & ~3UL, dword);
 
@@ -170,7 +170,7 @@ static void beat_lpar_hptab_clear(void)
 	unsigned long size_bytes = 1UL << ppc64_pft_size;
 	unsigned long hpte_count = size_bytes >> 4;
 	int i;
-	unsigned long dummy0, dummy1;
+	u64 dummy0, dummy1;
 
 	/* TODO: Use bulk call */
 	for (i = 0; i < hpte_count; i++)
@@ -189,7 +189,8 @@ static long beat_lpar_hpte_updatepp(unsigned long slot,
 				    int psize, int ssize, int local)
 {
 	unsigned long lpar_rc;
-	unsigned long dummy0, dummy1, want_v;
+	u64 dummy0, dummy1;
+	unsigned long want_v;
 
 	want_v = hpte_encode_v(va, psize, MMU_SEGSIZE_256M);
 
@@ -197,17 +198,17 @@ static long beat_lpar_hpte_updatepp(unsigned long slot,
 		"avpnv=%016lx, slot=%016lx, psize: %d, newpp %016lx ... ",
 		want_v & HPTE_V_AVPN, slot, psize, newpp);
 
-	spin_lock(&beat_htab_lock);
+	raw_spin_lock(&beat_htab_lock);
 	dummy0 = beat_lpar_hpte_getword0(slot);
 	if ((dummy0 & ~0x7FUL) != (want_v & ~0x7FUL)) {
 		DBG_LOW("not found !\n");
-		spin_unlock(&beat_htab_lock);
+		raw_spin_unlock(&beat_htab_lock);
 		return -1;
 	}
 
 	lpar_rc = beat_write_htab_entry(0, slot, 0, newpp, 0, 7, &dummy0,
 					&dummy1);
-	spin_unlock(&beat_htab_lock);
+	raw_spin_unlock(&beat_htab_lock);
 	if (lpar_rc != 0 || dummy0 == 0) {
 		DBG_LOW("not found !\n");
 		return -1;
@@ -255,18 +256,19 @@ static void beat_lpar_hpte_updateboltedpp(unsigned long newpp,
 					  unsigned long ea,
 					  int psize, int ssize)
 {
-	unsigned long lpar_rc, slot, vsid, va, dummy0, dummy1;
+	unsigned long lpar_rc, slot, vsid, va;
+	u64 dummy0, dummy1;
 
 	vsid = get_kernel_vsid(ea, MMU_SEGSIZE_256M);
 	va = (vsid << 28) | (ea & 0x0fffffff);
 
-	spin_lock(&beat_htab_lock);
+	raw_spin_lock(&beat_htab_lock);
 	slot = beat_lpar_hpte_find(va, psize);
 	BUG_ON(slot == -1);
 
 	lpar_rc = beat_write_htab_entry(0, slot, 0, newpp, 0, 7,
 		&dummy0, &dummy1);
-	spin_unlock(&beat_htab_lock);
+	raw_spin_unlock(&beat_htab_lock);
 
 	BUG_ON(lpar_rc != 0);
 }
@@ -276,25 +278,25 @@ static void beat_lpar_hpte_invalidate(unsigned long slot, unsigned long va,
 {
 	unsigned long want_v;
 	unsigned long lpar_rc;
-	unsigned long dummy1, dummy2;
+	u64 dummy1, dummy2;
 	unsigned long flags;
 
 	DBG_LOW("    inval : slot=%lx, va=%016lx, psize: %d, local: %d\n",
 		slot, va, psize, local);
 	want_v = hpte_encode_v(va, psize, MMU_SEGSIZE_256M);
 
-	spin_lock_irqsave(&beat_htab_lock, flags);
+	raw_spin_lock_irqsave(&beat_htab_lock, flags);
 	dummy1 = beat_lpar_hpte_getword0(slot);
 
 	if ((dummy1 & ~0x7FUL) != (want_v & ~0x7FUL)) {
 		DBG_LOW("not found !\n");
-		spin_unlock_irqrestore(&beat_htab_lock, flags);
+		raw_spin_unlock_irqrestore(&beat_htab_lock, flags);
 		return;
 	}
 
 	lpar_rc = beat_write_htab_entry(0, slot, 0, 0, HPTE_V_VALID, 0,
 		&dummy1, &dummy2);
-	spin_unlock_irqrestore(&beat_htab_lock, flags);
+	raw_spin_unlock_irqrestore(&beat_htab_lock, flags);
 
 	BUG_ON(lpar_rc != 0);
 }
@@ -315,8 +317,7 @@ static long beat_lpar_hpte_insert_v3(unsigned long hpte_group,
 				  int psize, int ssize)
 {
 	unsigned long lpar_rc;
-	unsigned long slot;
-	unsigned long hpte_v, hpte_r;
+	u64 hpte_v, hpte_r, slot;
 
 	/* same as iseries */
 	if (vflags & HPTE_V_SECONDARY)

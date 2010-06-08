@@ -1,5 +1,5 @@
 /*
-	Copyright (C) 2004 - 2008 rt2x00 SourceForge Project
+	Copyright (C) 2004 - 2009 Ivo van Doorn <IvDoorn@gmail.com>
 	<http://rt2x00.serialmonkey.com>
 
 	This program is free software; you can redistribute it and/or modify
@@ -27,6 +27,7 @@
 #define RT2X00PCI_H
 
 #include <linux/io.h>
+#include <linux/pci.h>
 
 /*
  * This variable should be used with the
@@ -35,57 +36,54 @@
 #define PCI_DEVICE_DATA(__ops)	.driver_data = (kernel_ulong_t)(__ops)
 
 /*
- * Register defines.
- * Some registers require multiple attempts before success,
- * in those cases REGISTER_BUSY_COUNT attempts should be
- * taken with a REGISTER_BUSY_DELAY interval.
- */
-#define REGISTER_BUSY_COUNT	5
-#define REGISTER_BUSY_DELAY	100
-
-/*
- * Descriptor availability flags.
- * All PCI device descriptors have these 2 flags
- * with the exact same definition.
- * By storing them here we can use them inside rt2x00pci
- * for some simple entry availability checking.
- */
-#define TXD_ENTRY_OWNER_NIC	FIELD32(0x00000001)
-#define TXD_ENTRY_VALID		FIELD32(0x00000002)
-#define RXD_ENTRY_OWNER_NIC	FIELD32(0x00000001)
-
-/*
  * Register access.
  */
 static inline void rt2x00pci_register_read(struct rt2x00_dev *rt2x00dev,
-					   const unsigned long offset,
+					   const unsigned int offset,
 					   u32 *value)
 {
 	*value = readl(rt2x00dev->csr.base + offset);
 }
 
-static inline void
-rt2x00pci_register_multiread(struct rt2x00_dev *rt2x00dev,
-			     const unsigned long offset,
-			     void *value, const u16 length)
+static inline void rt2x00pci_register_multiread(struct rt2x00_dev *rt2x00dev,
+						const unsigned int offset,
+						void *value, const u32 length)
 {
 	memcpy_fromio(value, rt2x00dev->csr.base + offset, length);
 }
 
 static inline void rt2x00pci_register_write(struct rt2x00_dev *rt2x00dev,
-					    const unsigned long offset,
+					    const unsigned int offset,
 					    u32 value)
 {
 	writel(value, rt2x00dev->csr.base + offset);
 }
 
-static inline void
-rt2x00pci_register_multiwrite(struct rt2x00_dev *rt2x00dev,
-			      const unsigned long offset,
-			      const void *value, const u16 length)
+static inline void rt2x00pci_register_multiwrite(struct rt2x00_dev *rt2x00dev,
+						 const unsigned int offset,
+						 const void *value,
+						 const u32 length)
 {
 	memcpy_toio(rt2x00dev->csr.base + offset, value, length);
 }
+
+/**
+ * rt2x00pci_regbusy_read - Read from register with busy check
+ * @rt2x00dev: Device pointer, see &struct rt2x00_dev.
+ * @offset: Register offset
+ * @field: Field to check if register is busy
+ * @reg: Pointer to where register contents should be stored
+ *
+ * This function will read the given register, and checks if the
+ * register is busy. If it is, it will sleep for a couple of
+ * microseconds before reading the register again. If the register
+ * is not read after a certain timeout, this function will return
+ * FALSE.
+ */
+int rt2x00pci_regbusy_read(struct rt2x00_dev *rt2x00dev,
+			   const unsigned int offset,
+			   const struct rt2x00_field32 field,
+			   u32 *reg);
 
 /**
  * rt2x00pci_write_tx_data - Initialize data for TX operation

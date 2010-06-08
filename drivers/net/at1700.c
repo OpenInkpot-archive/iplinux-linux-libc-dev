@@ -47,7 +47,6 @@
 #include <linux/ioport.h>
 #include <linux/in.h>
 #include <linux/skbuff.h>
-#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/init.h>
 #include <linux/crc32.h>
@@ -159,7 +158,8 @@ struct net_local {
 static int at1700_probe1(struct net_device *dev, int ioaddr);
 static int read_eeprom(long ioaddr, int location);
 static int net_open(struct net_device *dev);
-static int	net_send_packet(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t net_send_packet(struct sk_buff *skb,
+				   struct net_device *dev);
 static irqreturn_t net_interrupt(int irq, void *dev_id);
 static void net_rx(struct net_device *dev);
 static int net_close(struct net_device *dev);
@@ -249,6 +249,17 @@ out:
 	return ERR_PTR(err);
 }
 
+static const struct net_device_ops at1700_netdev_ops = {
+	.ndo_open		= net_open,
+	.ndo_stop		= net_close,
+	.ndo_start_xmit 	= net_send_packet,
+	.ndo_set_multicast_list = set_rx_mode,
+	.ndo_tx_timeout 	= net_tx_timeout,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
 /* The Fujitsu datasheet suggests that the NIC be probed for by checking its
    "signature", the default bit pattern after a reset.  This *doesn't* work --
    there is no way to reset the bus interface without a complete power-cycle!
@@ -265,7 +276,6 @@ static int __init at1700_probe1(struct net_device *dev, int ioaddr)
 	unsigned int i, irq, is_fmv18x = 0, is_at1700 = 0;
 	int slot, ret = -ENODEV;
 	struct net_local *lp = netdev_priv(dev);
-	DECLARE_MAC_BUF(mac);
 
 	if (!request_region(ioaddr, AT1700_IO_EXTENT, DRV_NAME))
 		return -EBUSY;
@@ -308,7 +318,7 @@ static int __init at1700_probe1(struct net_device *dev, int ioaddr)
 				pos3 = mca_read_stored_pos( slot, 3 );
 				pos4 = mca_read_stored_pos( slot, 4 );
 
-				for (l_i = 0; l_i < 0x09; l_i++)
+				for (l_i = 0; l_i < 8; l_i++)
 					if (( pos3 & 0x07) == at1700_ioaddr_pattern[l_i])
 						break;
 				ioaddr = at1700_mca_probe_list[l_i];
@@ -339,13 +349,13 @@ static int __init at1700_probe1(struct net_device *dev, int ioaddr)
 	slot = -1;
 	/* We must check for the EEPROM-config boards first, else accessing
 	   IOCONFIG0 will move the board! */
-	if (at1700_probe_list[inb(ioaddr + IOCONFIG1) & 0x07] == ioaddr
-		&& read_eeprom(ioaddr, 4) == 0x0000
-		&& (read_eeprom(ioaddr, 5) & 0xff00) == 0xF400)
+	if (at1700_probe_list[inb(ioaddr + IOCONFIG1) & 0x07] == ioaddr &&
+	    read_eeprom(ioaddr, 4) == 0x0000 &&
+	    (read_eeprom(ioaddr, 5) & 0xff00) == 0xF400)
 		is_at1700 = 1;
-	else if (inb(ioaddr   + SAPROM    ) == 0x00
-		&& inb(ioaddr + SAPROM + 1) == 0x00
-		&& inb(ioaddr + SAPROM + 2) == 0x0e)
+	else if (inb(ioaddr + SAPROM    ) == 0x00 &&
+		 inb(ioaddr + SAPROM + 1) == 0x00 &&
+		 inb(ioaddr + SAPROM + 2) == 0x0e)
 		is_fmv18x = 1;
 	else {
 		goto err_out;
@@ -397,7 +407,7 @@ found:
 			dev->dev_addr[i] = val;
 		}
 	}
-	printk("%s", print_mac(mac, dev->dev_addr));
+	printk("%pM", dev->dev_addr);
 
 	/* The EEPROM word 12 bit 0x0400 means use regular 100 ohm 10baseT signals,
 	   rather than 150 ohm shielded twisted pair compensation.
@@ -449,13 +459,7 @@ found:
 	if (net_debug)
 		printk(version);
 
-	memset(lp, 0, sizeof(struct net_local));
-
-	dev->open		= net_open;
-	dev->stop		= net_close;
-	dev->hard_start_xmit = net_send_packet;
-	dev->set_multicast_list = &set_rx_mode;
-	dev->tx_timeout = net_tx_timeout;
+	dev->netdev_ops = &at1700_netdev_ops;
 	dev->watchdog_timeo = TX_TIMEOUT;
 
 	spin_lock_init(&lp->lock);
@@ -463,7 +467,7 @@ found:
 	lp->jumpered = is_fmv18x;
 	lp->mca_slot = slot;
 	/* Snarf the interrupt vector now. */
-	ret = request_irq(irq, &net_interrupt, 0, DRV_NAME, dev);
+	ret = request_irq(irq, net_interrupt, 0, DRV_NAME, dev);
 	if (ret) {
 		printk(KERN_ERR "AT1700 at %#3x is unusable due to a "
 		       "conflict on IRQ %d.\n",
@@ -591,7 +595,8 @@ static void net_tx_timeout (struct net_device *dev)
 }
 
 
-static int net_send_packet (struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t net_send_packet (struct sk_buff *skb,
+				    struct net_device *dev)
 {
 	struct net_local *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
@@ -639,7 +644,7 @@ static int net_send_packet (struct sk_buff *skb, struct net_device *dev)
 		netif_start_queue (dev);
 	dev_kfree_skb (skb);
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /* The typical workload of the driver:
@@ -768,7 +773,6 @@ net_rx(struct net_device *dev)
 			insw(ioaddr + DATAPORT, skb_put(skb,pkt_len), (pkt_len + 1) >> 1);
 			skb->protocol=eth_type_trans(skb, dev);
 			netif_rx(skb);
-			dev->last_rx = jiffies;
 			dev->stats.rx_packets++;
 			dev->stats.rx_bytes += pkt_len;
 		}
@@ -830,26 +834,23 @@ set_rx_mode(struct net_device *dev)
 	struct net_local *lp = netdev_priv(dev);
 	unsigned char mc_filter[8];		 /* Multicast hash filter */
 	unsigned long flags;
-	int i;
 
 	if (dev->flags & IFF_PROMISC) {
 		memset(mc_filter, 0xff, sizeof(mc_filter));
 		outb(3, ioaddr + RX_MODE);	/* Enable promiscuous mode */
-	} else if (dev->mc_count > MC_FILTERBREAK
-			   ||  (dev->flags & IFF_ALLMULTI)) {
+	} else if (netdev_mc_count(dev) > MC_FILTERBREAK ||
+			   (dev->flags & IFF_ALLMULTI)) {
 		/* Too many to filter perfectly -- accept all multicasts. */
 		memset(mc_filter, 0xff, sizeof(mc_filter));
 		outb(2, ioaddr + RX_MODE);	/* Use normal mode. */
-	} else if (dev->mc_count == 0) {
+	} else if (netdev_mc_empty(dev)) {
 		memset(mc_filter, 0x00, sizeof(mc_filter));
 		outb(1, ioaddr + RX_MODE);	/* Ignore almost all multicasts. */
 	} else {
 		struct dev_mc_list *mclist;
-		int i;
 
 		memset(mc_filter, 0, sizeof(mc_filter));
-		for (i = 0, mclist = dev->mc_list; mclist && i < dev->mc_count;
-			 i++, mclist = mclist->next) {
+		netdev_for_each_mc_addr(mclist, dev) {
 			unsigned int bit =
 				ether_crc_le(ETH_ALEN, mclist->dmi_addr) >> 26;
 			mc_filter[bit >> 3] |= (1 << bit);
@@ -859,6 +860,7 @@ set_rx_mode(struct net_device *dev)
 
 	spin_lock_irqsave (&lp->lock, flags);
 	if (memcmp(mc_filter, lp->mc_filter, sizeof(mc_filter))) {
+		int i;
 		int saved_bank = inw(ioaddr + CONFIG_0);
 		/* Switch to bank 1 and set the multicast table. */
 		outw((saved_bank & ~0x0C00) | 0x0480, ioaddr + CONFIG_0);
@@ -901,15 +903,3 @@ module_init(at1700_module_init);
 module_exit(at1700_module_exit);
 #endif /* MODULE */
 MODULE_LICENSE("GPL");
-
-
-/*
- * Local variables:
- *  compile-command: "gcc -DMODULE -D__KERNEL__ -Wall -Wstrict-prototypes -O6 -c at1700.c"
- *  alt-compile-command: "gcc -DMODVERSIONS -DMODULE -D__KERNEL__ -Wall -Wstrict-prototypes -O6 -c at1700.c"
- *  tab-width: 4
- *  c-basic-offset: 4
- *  c-indent-level: 4
- * End:
- */
-

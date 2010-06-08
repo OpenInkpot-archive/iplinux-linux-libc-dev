@@ -2,7 +2,7 @@
  *
  * Driver for Samsung SoC onboard UARTs.
  *
- * Ben Dooks, Copyright (c) 2003-2005,2008 Simtec Electronics
+ * Ben Dooks, Copyright (c) 2003-2008 Simtec Electronics
  *	http://armlinux.simtec.co.uk/
  *
  * This program is free software; you can redistribute it and/or modify
@@ -21,6 +21,10 @@ struct s3c24xx_uart_info {
 	unsigned long		tx_fifoshift;
 	unsigned long		tx_fifofull;
 
+	/* uart port features */
+
+	unsigned int		has_divslot:1;
+
 	/* clock source control */
 
 	int (*get_clksrc)(struct uart_port *, struct s3c24xx_uart_clksrc *clk);
@@ -33,12 +37,21 @@ struct s3c24xx_uart_info {
 struct s3c24xx_uart_port {
 	unsigned char			rx_claimed;
 	unsigned char			tx_claimed;
+	unsigned int			pm_level;
+	unsigned long			baudclk_rate;
+
+	unsigned int			rx_irq;
+	unsigned int			tx_irq;
 
 	struct s3c24xx_uart_info	*info;
 	struct s3c24xx_uart_clksrc	*clksrc;
 	struct clk			*clk;
 	struct clk			*baudclk;
 	struct uart_port		port;
+
+#ifdef CONFIG_CPU_FREQ
+	struct notifier_block		freq_transition;
+#endif
 };
 
 /* conversion functions */
@@ -59,22 +72,27 @@ struct s3c24xx_uart_port {
 extern int s3c24xx_serial_probe(struct platform_device *dev,
 				struct s3c24xx_uart_info *uart);
 
-extern int s3c24xx_serial_remove(struct platform_device *dev);
+extern int __devexit s3c24xx_serial_remove(struct platform_device *dev);
 
 extern int s3c24xx_serial_initconsole(struct platform_driver *drv,
-				      struct s3c24xx_uart_info *uart);
+				      struct s3c24xx_uart_info **uart);
 
 extern int s3c24xx_serial_init(struct platform_driver *drv,
 			       struct s3c24xx_uart_info *info);
 
 #ifdef CONFIG_SERIAL_SAMSUNG_CONSOLE
 
-#define s3c24xx_console_init(__drv, __inf)			\
-static int __init s3c_serial_console_init(void)			\
-{								\
-	return s3c24xx_serial_initconsole(__drv, __inf);	\
-}								\
-								\
+#define s3c24xx_console_init(__drv, __inf)				\
+static int __init s3c_serial_console_init(void)				\
+{									\
+	struct s3c24xx_uart_info *uinfo[CONFIG_SERIAL_SAMSUNG_UARTS];	\
+	int i;								\
+									\
+	for (i = 0; i < CONFIG_SERIAL_SAMSUNG_UARTS; i++)		\
+		uinfo[i] = __inf;					\
+	return s3c24xx_serial_initconsole(__drv, uinfo);		\
+}									\
+									\
 console_initcall(s3c_serial_console_init)
 
 #else

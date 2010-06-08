@@ -31,13 +31,14 @@
  * On exit we set nformats to the number of records we've actually initialized.
  */
 
-static int ide_floppy_get_format_capacities(ide_drive_t *drive, int __user *arg)
+static int ide_floppy_get_format_capacities(ide_drive_t *drive,
+					    struct ide_atapi_pc *pc,
+					    int __user *arg)
 {
 	struct ide_disk_obj *floppy = drive->driver_data;
-	struct ide_atapi_pc pc;
-	u8 header_len, desc_cnt;
 	int i, blocks, length, u_array_size, u_index;
 	int __user *argp;
+	u8 pc_buf[256], header_len, desc_cnt;
 
 	if (get_user(u_array_size, arg))
 		return -EFAULT;
@@ -45,13 +46,14 @@ static int ide_floppy_get_format_capacities(ide_drive_t *drive, int __user *arg)
 	if (u_array_size <= 0)
 		return -EINVAL;
 
-	ide_floppy_create_read_capacity_cmd(&pc);
-	if (ide_queue_pc_tail(drive, floppy->disk, &pc)) {
+	ide_floppy_create_read_capacity_cmd(pc);
+
+	if (ide_queue_pc_tail(drive, floppy->disk, pc, pc_buf, pc->req_xfer)) {
 		printk(KERN_ERR "ide-floppy: Can't get floppy parameters\n");
 		return -EIO;
 	}
 
-	header_len = pc.buf[3];
+	header_len = pc_buf[3];
 	desc_cnt = header_len / 8; /* capacity descriptor of 8 bytes */
 
 	u_index = 0;
@@ -68,8 +70,8 @@ static int ide_floppy_get_format_capacities(ide_drive_t *drive, int __user *arg)
 		if (u_index >= u_array_size)
 			break;	/* User-supplied buffer too small */
 
-		blocks = be32_to_cpup((__be32 *)&pc.buf[desc_start]);
-		length = be16_to_cpup((__be16 *)&pc.buf[desc_start + 6]);
+		blocks = be32_to_cpup((__be32 *)&pc_buf[desc_start]);
+		length = be16_to_cpup((__be16 *)&pc_buf[desc_start + 6]);
 
 		if (put_user(blocks, argp))
 			return -EFAULT;
@@ -90,50 +92,52 @@ static int ide_floppy_get_format_capacities(ide_drive_t *drive, int __user *arg)
 	return 0;
 }
 
-static void ide_floppy_create_format_unit_cmd(struct ide_atapi_pc *pc, int b,
-		int l, int flags)
+static void ide_floppy_create_format_unit_cmd(struct ide_atapi_pc *pc,
+					      u8 *buf, int b, int l,
+					      int flags)
 {
 	ide_init_pc(pc);
 	pc->c[0] = GPCMD_FORMAT_UNIT;
 	pc->c[1] = 0x17;
 
-	memset(pc->buf, 0, 12);
-	pc->buf[1] = 0xA2;
+	memset(buf, 0, 12);
+	buf[1] = 0xA2;
 	/* Default format list header, u8 1: FOV/DCRT/IMM bits set */
 
 	if (flags & 1)				/* Verify bit on... */
-		pc->buf[1] ^= 0x20;		/* ... turn off DCRT bit */
-	pc->buf[3] = 8;
+		buf[1] ^= 0x20;			/* ... turn off DCRT bit */
+	buf[3] = 8;
 
-	put_unaligned(cpu_to_be32(b), (unsigned int *)(&pc->buf[4]));
-	put_unaligned(cpu_to_be32(l), (unsigned int *)(&pc->buf[8]));
-	pc->buf_size = 12;
+	put_unaligned(cpu_to_be32(b), (unsigned int *)(&buf[4]));
+	put_unaligned(cpu_to_be32(l), (unsigned int *)(&buf[8]));
+	pc->req_xfer = 12;
 	pc->flags |= PC_FLAG_WRITING;
 }
 
-static int ide_floppy_get_sfrp_bit(ide_drive_t *drive)
+static int ide_floppy_get_sfrp_bit(ide_drive_t *drive, struct ide_atapi_pc *pc)
 {
 	struct ide_disk_obj *floppy = drive->driver_data;
-	struct ide_atapi_pc pc;
+	u8 buf[20];
 
 	drive->atapi_flags &= ~IDE_AFLAG_SRFP;
 
-	ide_floppy_create_mode_sense_cmd(&pc, IDEFLOPPY_CAPABILITIES_PAGE);
-	pc.flags |= PC_FLAG_SUPPRESS_ERROR;
+	ide_floppy_create_mode_sense_cmd(pc, IDEFLOPPY_CAPABILITIES_PAGE);
+	pc->flags |= PC_FLAG_SUPPRESS_ERROR;
 
-	if (ide_queue_pc_tail(drive, floppy->disk, &pc))
+	if (ide_queue_pc_tail(drive, floppy->disk, pc, buf, pc->req_xfer))
 		return 1;
 
-	if (pc.buf[8 + 2] & 0x40)
+	if (buf[8 + 2] & 0x40)
 		drive->atapi_flags |= IDE_AFLAG_SRFP;
 
 	return 0;
 }
 
-static int ide_floppy_format_unit(ide_drive_t *drive, int __user *arg)
+static int ide_floppy_format_unit(ide_drive_t *drive, struct ide_atapi_pc *pc,
+				  int __user *arg)
 {
 	struct ide_disk_obj *floppy = drive->driver_data;
-	struct ide_atapi_pc pc;
+	u8 buf[12];
 	int blocks, length, flags, err = 0;
 
 	if (floppy->openers > 1) {
@@ -166,10 +170,10 @@ static int ide_floppy_format_unit(ide_drive_t *drive, int __user *arg)
 		goto out;
 	}
 
-	(void)ide_floppy_get_sfrp_bit(drive);
-	ide_floppy_create_format_unit_cmd(&pc, blocks, length, flags);
+	ide_floppy_get_sfrp_bit(drive, pc);
+	ide_floppy_create_format_unit_cmd(pc, buf, blocks, length, flags);
 
-	if (ide_queue_pc_tail(drive, floppy->disk, &pc))
+	if (ide_queue_pc_tail(drive, floppy->disk, pc, buf, pc->req_xfer))
 		err = -EIO;
 
 out:
@@ -188,15 +192,18 @@ out:
  * the dsc bit, and return either 0 or 65536.
  */
 
-static int ide_floppy_get_format_progress(ide_drive_t *drive, int __user *arg)
+static int ide_floppy_get_format_progress(ide_drive_t *drive,
+					  struct ide_atapi_pc *pc,
+					  int __user *arg)
 {
 	struct ide_disk_obj *floppy = drive->driver_data;
-	struct ide_atapi_pc pc;
+	u8 sense_buf[18];
 	int progress_indication = 0x10000;
 
 	if (drive->atapi_flags & IDE_AFLAG_SRFP) {
-		ide_create_request_sense_cmd(drive, &pc);
-		if (ide_queue_pc_tail(drive, floppy->disk, &pc))
+		ide_create_request_sense_cmd(drive, pc);
+		if (ide_queue_pc_tail(drive, floppy->disk, pc, sense_buf,
+				      pc->req_xfer))
 			return -EIO;
 
 		if (floppy->sense_key == 2 &&
@@ -241,20 +248,21 @@ static int ide_floppy_lockdoor(ide_drive_t *drive, struct ide_atapi_pc *pc,
 	return 0;
 }
 
-static int ide_floppy_format_ioctl(ide_drive_t *drive, fmode_t mode,
-				   unsigned int cmd, void __user *argp)
+static int ide_floppy_format_ioctl(ide_drive_t *drive, struct ide_atapi_pc *pc,
+				   fmode_t mode, unsigned int cmd,
+				   void __user *argp)
 {
 	switch (cmd) {
 	case IDEFLOPPY_IOCTL_FORMAT_SUPPORTED:
 		return 0;
 	case IDEFLOPPY_IOCTL_FORMAT_GET_CAPACITY:
-		return ide_floppy_get_format_capacities(drive, argp);
+		return ide_floppy_get_format_capacities(drive, pc, argp);
 	case IDEFLOPPY_IOCTL_FORMAT_START:
 		if (!(mode & FMODE_WRITE))
 			return -EPERM;
-		return ide_floppy_format_unit(drive, (int __user *)argp);
+		return ide_floppy_format_unit(drive, pc, (int __user *)argp);
 	case IDEFLOPPY_IOCTL_FORMAT_GET_PROGRESS:
-		return ide_floppy_get_format_progress(drive, argp);
+		return ide_floppy_get_format_progress(drive, pc, argp);
 	default:
 		return -ENOTTY;
 	}
@@ -270,7 +278,7 @@ int ide_floppy_ioctl(ide_drive_t *drive, struct block_device *bdev,
 	if (cmd == CDROMEJECT || cmd == CDROM_LOCKDOOR)
 		return ide_floppy_lockdoor(drive, &pc, arg, cmd);
 
-	err = ide_floppy_format_ioctl(drive, mode, cmd, argp);
+	err = ide_floppy_format_ioctl(drive, &pc, mode, cmd, argp);
 	if (err != -ENOTTY)
 		return err;
 

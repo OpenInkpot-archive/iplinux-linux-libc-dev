@@ -11,12 +11,16 @@
  * The idea of this driver is based on cpint from Neale Ferguson and #CP in CMS
  */
 
+#define KMSG_COMPONENT "vmcp"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
-#include <linux/smp_lock.h>
+#include <linux/slab.h>
+#include <asm/compat.h>
 #include <asm/cpcmd.h>
 #include <asm/debug.h>
 #include <asm/uaccess.h>
@@ -25,8 +29,6 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Christian Borntraeger <borntraeger@de.ibm.com>");
 MODULE_DESCRIPTION("z/VM CP interface");
-
-#define PRINTK_HEADER "vmcp: "
 
 static debug_info_t *vmcp_debug;
 
@@ -41,13 +43,11 @@ static int vmcp_open(struct inode *inode, struct file *file)
 	if (!session)
 		return -ENOMEM;
 
-	lock_kernel();
 	session->bufsize = PAGE_SIZE;
 	session->response = NULL;
 	session->resp_size = 0;
 	mutex_init(&session->mutex);
 	file->private_data = session;
-	unlock_kernel();
 	return nonseekable_open(inode, file);
 }
 
@@ -141,21 +141,26 @@ vmcp_write(struct file *file, const char __user *buff, size_t count,
 static long vmcp_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct vmcp_session *session;
+	int __user *argp;
 	int temp;
 
 	session = (struct vmcp_session *)file->private_data;
+	if (is_compat_task())
+		argp = compat_ptr(arg);
+	else
+		argp = (int __user *)arg;
 	if (mutex_lock_interruptible(&session->mutex))
 		return -ERESTARTSYS;
 	switch (cmd) {
 	case VMCP_GETCODE:
 		temp = session->resp_code;
 		mutex_unlock(&session->mutex);
-		return put_user(temp, (int __user *)arg);
+		return put_user(temp, argp);
 	case VMCP_SETBUF:
 		free_pages((unsigned long)session->response,
 				get_order(session->bufsize));
 		session->response=NULL;
-		temp = get_user(session->bufsize, (int __user *)arg);
+		temp = get_user(session->bufsize, argp);
 		if (get_order(session->bufsize) > 8) {
 			session->bufsize = PAGE_SIZE;
 			temp = -EINVAL;
@@ -165,7 +170,7 @@ static long vmcp_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case VMCP_GETSIZE:
 		temp = session->resp_size;
 		mutex_unlock(&session->mutex);
-		return put_user(temp, (int __user *)arg);
+		return put_user(temp, argp);
 	default:
 		mutex_unlock(&session->mutex);
 		return -ENOIOCTLCMD;
@@ -193,7 +198,8 @@ static int __init vmcp_init(void)
 	int ret;
 
 	if (!MACHINE_IS_VM) {
-		PRINT_WARN("z/VM CP interface is only available under z/VM\n");
+		pr_warning("The z/VM CP interface device driver cannot be "
+			   "loaded without z/VM\n");
 		return -ENODEV;
 	}
 

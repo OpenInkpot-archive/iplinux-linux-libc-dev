@@ -1,7 +1,7 @@
 /*
  * arch/s390/kernel/head31.S
  *
- * Copyright (C) IBM Corp. 2005,2006
+ * Copyright (C) IBM Corp. 2005,2010
  *
  *   Author(s):	Hartmut Penner <hp@de.ibm.com>
  *		Martin Schwidefsky <schwidefsky@de.ibm.com>
@@ -10,47 +10,31 @@
  *
  */
 
-#
-# startup-code at 0x10000, running in absolute addressing mode
-# this is called either by the ipl loader or directly by PSW restart
-# or linload or SALIPL
-#
-	.org	0x10000
-startup:basr	%r13,0			# get base
-.LPG0:	l	%r13,0f-.LPG0(%r13)
-	b	0(%r13)
-0:	.long	startup_continue
+#include <linux/init.h>
+#include <asm/asm-offsets.h>
+#include <asm/thread_info.h>
+#include <asm/page.h>
 
-#
-# params at 10400 (setup.h)
-#
-	.org	PARMAREA
-	.long	0,0			# IPL_DEVICE
-	.long	0,0			# INITRD_START
-	.long	0,0			# INITRD_SIZE
-
-	.org	COMMAND_LINE
-	.byte	"root=/dev/ram0 ro"
-	.byte	0
-
-	.org	0x11000
-
+__HEAD
+	.globl	startup_continue
 startup_continue:
 	basr	%r13,0			# get base
-.LPG1:	mvi	__LC_AR_MODE_ID,0	# set ESA flag (mode 0)
+.LPG1:
+
+	l	%r1,.Lbase_cc-.LPG1(%r13)
+	mvc	0(8,%r1),__LC_LAST_UPDATE_CLOCK
 	lctl	%c0,%c15,.Lctl-.LPG1(%r13) # load control registers
 	l	%r12,.Lparmaddr-.LPG1(%r13) # pointer to parameter area
 					# move IPL device to lowcore
-	mvc	__LC_IPLDEV(4),IPL_DEVICE-PARMAREA(%r12)
 #
 # Setup stack
 #
 	l	%r15,.Linittu-.LPG1(%r13)
+	st	%r15,__LC_THREAD_INFO	# cache thread info in lowcore
 	mvc	__LC_CURRENT(4),__TI_task(%r15)
 	ahi	%r15,1<<(PAGE_SHIFT+THREAD_ORDER) # init_task_union+THREAD_SIZE
 	st	%r15,__LC_KERNEL_STACK	# set end of kernel stack
 	ahi	%r15,-96
-	xc	__SF_BACKCHAIN(4,%r15),__SF_BACKCHAIN(%r15) # clear backchain
 #
 # Save ipl parameters, clear bss memory, initialize storage key for kernel pages,
 # and create a kernel NSS if the SAVESYS= parm is defined
@@ -91,12 +75,14 @@ startup_continue:
 .Lduald:.rept	8
 	.long	0x80000000,0,0,0	# invalid access-list entries
 	.endr
+.Lbase_cc:
+	.long	sched_clock_base_cc
 
-	.org	0x12000
 	.globl	_ehead
 _ehead:
+
 #ifdef CONFIG_SHARED_KERNEL
-	.org	0x100000
+	.org	0x100000 - 0x11000	# head.o ends at 0x11000
 #endif
 
 #

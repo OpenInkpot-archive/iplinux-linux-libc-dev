@@ -34,16 +34,16 @@
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/io.h>
+#include <linux/slab.h>
 
 #include <asm/mach/flash.h>
-#include <mach/gpmc.h>
-#include <mach/onenand.h>
+#include <plat/gpmc.h>
+#include <plat/onenand.h>
 #include <mach/gpio.h>
-#include <mach/pm.h>
 
-#include <mach/dma.h>
+#include <plat/dma.h>
 
-#include <mach/board.h>
+#include <plat/board.h>
 
 #define DRIVER_NAME "omap2-onenand"
 
@@ -113,10 +113,24 @@ static int omap2_onenand_wait(struct mtd_info *mtd, int state)
 	unsigned long timeout;
 	u32 syscfg;
 
-	if (state == FL_RESETING) {
-		int i;
+	if (state == FL_RESETING || state == FL_PREPARING_ERASE ||
+	    state == FL_VERIFYING_ERASE) {
+		int i = 21;
+		unsigned int intr_flags = ONENAND_INT_MASTER;
 
-		for (i = 0; i < 20; i++) {
+		switch (state) {
+		case FL_RESETING:
+			intr_flags |= ONENAND_INT_RESET;
+			break;
+		case FL_PREPARING_ERASE:
+			intr_flags |= ONENAND_INT_ERASE;
+			break;
+		case FL_VERIFYING_ERASE:
+			i = 101;
+			break;
+		}
+
+		while (--i) {
 			udelay(1);
 			intr = read_reg(c, ONENAND_REG_INTERRUPT);
 			if (intr & ONENAND_INT_MASTER)
@@ -127,7 +141,7 @@ static int omap2_onenand_wait(struct mtd_info *mtd, int state)
 			wait_err("controller error", state, ctrl, intr);
 			return -EIO;
 		}
-		if (!(intr & ONENAND_INT_RESET)) {
+		if ((intr & intr_flags) != intr_flags) {
 			wait_err("timeout", state, ctrl, intr);
 			return -EIO;
 		}
@@ -149,7 +163,7 @@ static int omap2_onenand_wait(struct mtd_info *mtd, int state)
 
 		INIT_COMPLETION(c->irq_done);
 		if (c->gpio_irq) {
-			result = omap_get_gpio_datain(c->gpio_irq);
+			result = gpio_get_value(c->gpio_irq);
 			if (result == -1) {
 				ctrl = read_reg(c, ONENAND_REG_CTRL_STATUS);
 				intr = read_reg(c, ONENAND_REG_INTERRUPT);
@@ -267,7 +281,7 @@ static inline int omap2_onenand_bufferram_offset(struct mtd_info *mtd, int area)
 
 	if (ONENAND_CURRENT_BUFFERRAM(this)) {
 		if (area == ONENAND_DATARAM)
-			return mtd->writesize;
+			return this->writesize;
 		if (area == ONENAND_SPARERAM)
 			return mtd->oobsize;
 	}
@@ -292,6 +306,10 @@ static int omap3_onenand_read_bufferram(struct mtd_info *mtd, int area,
 
 	bram_offset = omap2_onenand_bufferram_offset(mtd, area) + area + offset;
 	if (bram_offset & 3 || (size_t)buf & 3 || count < 384)
+		goto out_copy;
+
+	/* panic_write() may be in an interrupt context */
+	if (in_interrupt())
 		goto out_copy;
 
 	if (buf >= high_memory) {
@@ -562,7 +580,7 @@ int omap2_onenand_rephase(void)
 				      NULL, __adjust_timing);
 }
 
-static void __devexit omap2_onenand_shutdown(struct platform_device *pdev)
+static void omap2_onenand_shutdown(struct platform_device *pdev)
 {
 	struct omap2_onenand *c = dev_get_drvdata(&pdev->dev);
 
@@ -629,14 +647,14 @@ static int __devinit omap2_onenand_probe(struct platform_device *pdev)
 	}
 
 	if (c->gpio_irq) {
-		if ((r = omap_request_gpio(c->gpio_irq)) < 0) {
+		if ((r = gpio_request(c->gpio_irq, "OneNAND irq")) < 0) {
 			dev_err(&pdev->dev,  "Failed to request GPIO%d for "
 				"OneNAND\n", c->gpio_irq);
 			goto err_iounmap;
 	}
-	omap_set_gpio_direction(c->gpio_irq, 1);
+	gpio_direction_input(c->gpio_irq);
 
-	if ((r = request_irq(OMAP_GPIO_IRQ(c->gpio_irq),
+	if ((r = request_irq(gpio_to_irq(c->gpio_irq),
 			     omap2_onenand_interrupt, IRQF_TRIGGER_RISING,
 			     pdev->dev.driver->name, c)) < 0)
 		goto err_release_gpio;
@@ -668,9 +686,11 @@ static int __devinit omap2_onenand_probe(struct platform_device *pdev)
 		 c->onenand.base);
 
 	c->pdev = pdev;
-	c->mtd.name = pdev->dev.bus_id;
+	c->mtd.name = dev_name(&pdev->dev);
 	c->mtd.priv = &c->onenand;
 	c->mtd.owner = THIS_MODULE;
+
+	c->mtd.dev.parent = &pdev->dev;
 
 	if (c->dma_channel >= 0) {
 		struct onenand_chip *this = &c->onenand;
@@ -723,10 +743,10 @@ err_release_dma:
 	if (c->dma_channel != -1)
 		omap_free_dma(c->dma_channel);
 	if (c->gpio_irq)
-		free_irq(OMAP_GPIO_IRQ(c->gpio_irq), c);
+		free_irq(gpio_to_irq(c->gpio_irq), c);
 err_release_gpio:
 	if (c->gpio_irq)
-		omap_free_gpio(c->gpio_irq);
+		gpio_free(c->gpio_irq);
 err_iounmap:
 	iounmap(c->onenand.base);
 err_release_mem_region:
@@ -760,11 +780,12 @@ static int __devexit omap2_onenand_remove(struct platform_device *pdev)
 	omap2_onenand_shutdown(pdev);
 	platform_set_drvdata(pdev, NULL);
 	if (c->gpio_irq) {
-		free_irq(OMAP_GPIO_IRQ(c->gpio_irq), c);
-		omap_free_gpio(c->gpio_irq);
+		free_irq(gpio_to_irq(c->gpio_irq), c);
+		gpio_free(c->gpio_irq);
 	}
 	iounmap(c->onenand.base);
 	release_mem_region(c->phys_base, ONENAND_IO_SIZE);
+	gpmc_cs_free(c->gpmc_cs);
 	kfree(c);
 
 	return 0;
@@ -772,7 +793,7 @@ static int __devexit omap2_onenand_remove(struct platform_device *pdev)
 
 static struct platform_driver omap2_onenand_driver = {
 	.probe		= omap2_onenand_probe,
-	.remove		= omap2_onenand_remove,
+	.remove		= __devexit_p(omap2_onenand_remove),
 	.shutdown	= omap2_onenand_shutdown,
 	.driver		= {
 		.name	= DRIVER_NAME,

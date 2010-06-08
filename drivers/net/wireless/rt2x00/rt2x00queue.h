@@ -1,5 +1,5 @@
 /*
-	Copyright (C) 2004 - 2008 rt2x00 SourceForge Project
+	Copyright (C) 2004 - 2009 Ivo van Doorn <IvDoorn@gmail.com>
 	<http://rt2x00.serialmonkey.com>
 
 	This program is free software; you can redistribute it and/or modify
@@ -29,26 +29,29 @@
 #include <linux/prefetch.h>
 
 /**
- * DOC: Entrie frame size
+ * DOC: Entry frame size
  *
  * Ralink PCI devices demand the Frame size to be a multiple of 128 bytes,
  * for USB devices this restriction does not apply, but the value of
  * 2432 makes sense since it is big enough to contain the maximum fragment
  * size according to the ieee802.11 specs.
+ * The aggregation size depends on support from the driver, but should
+ * be something around 3840 bytes.
  */
-#define DATA_FRAME_SIZE	2432
-#define MGMT_FRAME_SIZE	256
+#define DATA_FRAME_SIZE		2432
+#define MGMT_FRAME_SIZE		256
+#define AGGREGATION_SIZE	3840
 
 /**
  * DOC: Number of entries per queue
  *
- * Under normal load without fragmentation 12 entries are sufficient
+ * Under normal load without fragmentation, 12 entries are sufficient
  * without the queue being filled up to the maximum. When using fragmentation
- * and the queue threshold code we need to add some additional margins to
+ * and the queue threshold code, we need to add some additional margins to
  * make sure the queue will never (or only under extreme load) fill up
  * completely.
- * Since we don't use preallocated DMA having a large number of queue entries
- * will have only minimal impact on the memory requirements for the queue.
+ * Since we don't use preallocated DMA, having a large number of queue entries
+ * will have minimal impact on the memory requirements for the queue.
  */
 #define RX_ENTRIES	24
 #define TX_ENTRIES	24
@@ -87,13 +90,16 @@ enum data_queue_qid {
  *
  * @SKBDESC_DMA_MAPPED_RX: &skb_dma field has been mapped for RX
  * @SKBDESC_DMA_MAPPED_TX: &skb_dma field has been mapped for TX
- * @FRAME_DESC_IV_STRIPPED: Frame contained a IV/EIV provided by
+ * @SKBDESC_IV_STRIPPED: Frame contained a IV/EIV provided by
  *	mac80211 but was stripped for processing by the driver.
+ * @SKBDESC_NOT_MAC80211: Frame didn't originate from mac80211,
+ *	don't try to pass it back.
  */
 enum skb_frame_desc_flags {
 	SKBDESC_DMA_MAPPED_RX = 1 << 0,
 	SKBDESC_DMA_MAPPED_TX = 1 << 1,
-	FRAME_DESC_IV_STRIPPED = 1 << 2,
+	SKBDESC_IV_STRIPPED = 1 << 2,
+	SKBDESC_NOT_MAC80211 = 1 << 3,
 };
 
 /**
@@ -104,22 +110,25 @@ enum skb_frame_desc_flags {
  *
  * @flags: Frame flags, see &enum skb_frame_desc_flags.
  * @desc_len: Length of the frame descriptor.
+ * @tx_rate_idx: the index of the TX rate, used for TX status reporting
+ * @tx_rate_flags: the TX rate flags, used for TX status reporting
  * @desc: Pointer to descriptor part of the frame.
  *	Note that this pointer could point to something outside
  *	of the scope of the skb->data pointer.
- * @iv: IV data used during encryption/decryption.
- * @eiv: EIV data used during encryption/decryption.
+ * @iv: IV/EIV data used during encryption/decryption.
  * @skb_dma: (PCI-only) the DMA address associated with the sk buffer.
  * @entry: The entry to which this sk buffer belongs.
  */
 struct skb_frame_desc {
-	unsigned int flags;
+	u8 flags;
 
-	unsigned int desc_len;
+	u8 desc_len;
+	u8 tx_rate_idx;
+	u8 tx_rate_flags;
+
 	void *desc;
 
-	__le32 iv;
-	__le32 eiv;
+	__le32 iv[2];
 
 	dma_addr_t skb_dma;
 
@@ -142,13 +151,29 @@ static inline struct skb_frame_desc* get_skb_frame_desc(struct sk_buff *skb)
  *
  * @RXDONE_SIGNAL_PLCP: Signal field contains the plcp value.
  * @RXDONE_SIGNAL_BITRATE: Signal field contains the bitrate value.
+ * @RXDONE_SIGNAL_MCS: Signal field contains the mcs value.
  * @RXDONE_MY_BSS: Does this frame originate from device's BSS.
+ * @RXDONE_CRYPTO_IV: Driver provided IV/EIV data.
+ * @RXDONE_CRYPTO_ICV: Driver provided ICV data.
+ * @RXDONE_L2PAD: 802.11 payload has been padded to 4-byte boundary.
  */
 enum rxdone_entry_desc_flags {
-	RXDONE_SIGNAL_PLCP = 1 << 0,
-	RXDONE_SIGNAL_BITRATE = 1 << 1,
-	RXDONE_MY_BSS = 1 << 2,
+	RXDONE_SIGNAL_PLCP = BIT(0),
+	RXDONE_SIGNAL_BITRATE = BIT(1),
+	RXDONE_SIGNAL_MCS = BIT(2),
+	RXDONE_MY_BSS = BIT(3),
+	RXDONE_CRYPTO_IV = BIT(4),
+	RXDONE_CRYPTO_ICV = BIT(5),
+	RXDONE_L2PAD = BIT(6),
 };
+
+/**
+ * RXDONE_SIGNAL_MASK - Define to mask off all &rxdone_entry_desc_flags flags
+ * except for the RXDONE_SIGNAL_* flags. This is useful to convert the dev_flags
+ * from &rxdone_entry_desc to a signal value type.
+ */
+#define RXDONE_SIGNAL_MASK \
+	( RXDONE_SIGNAL_PLCP | RXDONE_SIGNAL_BITRATE | RXDONE_SIGNAL_MCS )
 
 /**
  * struct rxdone_entry_desc: RX Entry descriptor
@@ -158,27 +183,29 @@ enum rxdone_entry_desc_flags {
  * @timestamp: RX Timestamp
  * @signal: Signal of the received frame.
  * @rssi: RSSI of the received frame.
+ * @noise: Measured noise during frame reception.
  * @size: Data size of the received frame.
  * @flags: MAC80211 receive flags (See &enum mac80211_rx_flags).
  * @dev_flags: Ralink receive flags (See &enum rxdone_entry_desc_flags).
+ * @rate_mode: Rate mode (See @enum rate_modulation).
  * @cipher: Cipher type used during decryption.
  * @cipher_status: Decryption status.
- * @iv: IV data used during decryption.
- * @eiv: EIV data used during decryption.
+ * @iv: IV/EIV data used during decryption.
  * @icv: ICV data used during decryption.
  */
 struct rxdone_entry_desc {
 	u64 timestamp;
 	int signal;
 	int rssi;
+	int noise;
 	int size;
 	int flags;
 	int dev_flags;
+	u16 rate_mode;
 	u8 cipher;
 	u8 cipher_status;
 
-	__le32 iv;
-	__le32 eiv;
+	__le32 iv[2];
 	__le32 icv;
 };
 
@@ -187,6 +214,7 @@ struct rxdone_entry_desc {
  *
  * @TXDONE_UNKNOWN: Hardware could not determine success of transmission.
  * @TXDONE_SUCCESS: Frame was successfully send
+ * @TXDONE_FALLBACK: Frame was successfully send using a fallback rate.
  * @TXDONE_FAILURE: Frame was not successfully send
  * @TXDONE_EXCESSIVE_RETRY: In addition to &TXDONE_FAILURE, the
  *	frame transmission failed due to excessive retries.
@@ -194,6 +222,7 @@ struct rxdone_entry_desc {
 enum txdone_entry_desc_flags {
 	TXDONE_UNKNOWN,
 	TXDONE_SUCCESS,
+	TXDONE_FALLBACK,
 	TXDONE_FAILURE,
 	TXDONE_EXCESSIVE_RETRY,
 };
@@ -217,7 +246,6 @@ struct txdone_entry_desc {
  *
  * @ENTRY_TXD_RTS_FRAME: This frame is a RTS frame.
  * @ENTRY_TXD_CTS_FRAME: This frame is a CTS-to-self frame.
- * @ENTRY_TXD_OFDM_RATE: This frame is send out with an OFDM rate.
  * @ENTRY_TXD_GENERATE_SEQ: This frame requires sequence counter.
  * @ENTRY_TXD_FIRST_FRAGMENT: This is the first frame.
  * @ENTRY_TXD_MORE_FRAG: This frame is followed by another fragment.
@@ -229,11 +257,13 @@ struct txdone_entry_desc {
  * @ENTRY_TXD_ENCRYPT_PAIRWISE: Use pairwise key table (instead of shared).
  * @ENTRY_TXD_ENCRYPT_IV: Generate IV/EIV in hardware.
  * @ENTRY_TXD_ENCRYPT_MMIC: Generate MIC in hardware.
+ * @ENTRY_TXD_HT_AMPDU: This frame is part of an AMPDU.
+ * @ENTRY_TXD_HT_BW_40: Use 40MHz Bandwidth.
+ * @ENTRY_TXD_HT_SHORT_GI: Use short GI.
  */
 enum txentry_desc_flags {
 	ENTRY_TXD_RTS_FRAME,
 	ENTRY_TXD_CTS_FRAME,
-	ENTRY_TXD_OFDM_RATE,
 	ENTRY_TXD_GENERATE_SEQ,
 	ENTRY_TXD_FIRST_FRAGMENT,
 	ENTRY_TXD_MORE_FRAG,
@@ -245,6 +275,9 @@ enum txentry_desc_flags {
 	ENTRY_TXD_ENCRYPT_PAIRWISE,
 	ENTRY_TXD_ENCRYPT_IV,
 	ENTRY_TXD_ENCRYPT_MMIC,
+	ENTRY_TXD_HT_AMPDU,
+	ENTRY_TXD_HT_BW_40,
+	ENTRY_TXD_HT_SHORT_GI,
 };
 
 /**
@@ -254,10 +287,17 @@ enum txentry_desc_flags {
  *
  * @flags: Descriptor flags (See &enum queue_entry_flags).
  * @queue: Queue identification (See &enum data_queue_qid).
+ * @header_length: Length of 802.11 header.
+ * @l2pad: Amount of padding to align 802.11 payload to 4-byte boundrary.
  * @length_high: PLCP length high word.
  * @length_low: PLCP length low word.
  * @signal: PLCP signal.
  * @service: PLCP service.
+ * @msc: MCS.
+ * @stbc: STBC.
+ * @ba_size: BA size.
+ * @rate_mode: Rate mode (See @enum rate_modulation).
+ * @mpdu_density: MDPU density.
  * @retry_limit: Max number of retries.
  * @aifs: AIFS value.
  * @ifs: IFS value.
@@ -266,16 +306,26 @@ enum txentry_desc_flags {
  * @cipher: Cipher type used for encryption.
  * @key_idx: Key index used for encryption.
  * @iv_offset: Position where IV should be inserted by hardware.
+ * @iv_len: Length of IV data.
  */
 struct txentry_desc {
 	unsigned long flags;
 
 	enum data_queue_qid queue;
 
+	u16 header_length;
+	u16 l2pad;
+
 	u16 length_high;
 	u16 length_low;
 	u16 signal;
 	u16 service;
+
+	u16 mcs;
+	u16 stbc;
+	u16 ba_size;
+	u16 rate_mode;
+	u16 mpdu_density;
 
 	short retry_limit;
 	short aifs;
@@ -286,6 +336,7 @@ struct txentry_desc {
 	enum cipher cipher;
 	u16 key_idx;
 	u16 iv_offset;
+	u16 iv_len;
 };
 
 /**
@@ -375,6 +426,8 @@ enum queue_index {
  * @cw_max: The cw max value for outgoing frames (field ignored in RX queue).
  * @data_size: Maximum data size for the frames in this queue.
  * @desc_size: Hardware descriptor size for the data in this queue.
+ * @usb_endpoint: Device endpoint used for communication (USB only)
+ * @usb_maxpacket: Max packet size for given endpoint (USB only)
  */
 struct data_queue {
 	struct rt2x00_dev *rt2x00dev;
@@ -396,6 +449,9 @@ struct data_queue {
 
 	unsigned short data_size;
 	unsigned short desc_size;
+
+	unsigned short usb_endpoint;
+	unsigned short usb_maxpacket;
 };
 
 /**
@@ -439,6 +495,19 @@ struct data_queue_desc {
 	&(__dev)->tx[(__dev)->ops->tx_queues]
 
 /**
+ * queue_next - Return pointer to next queue in list (HELPER MACRO).
+ * @__queue: Current queue for which we need the next queue
+ *
+ * Using the current queue address we take the address directly
+ * after the queue to take the next queue. Note that this macro
+ * should be used carefully since it does not protect against
+ * moving past the end of the list. (See macros &queue_end and
+ * &tx_queue_end for determining the end of the queue).
+ */
+#define queue_next(__queue) \
+	&(__queue)[1]
+
+/**
  * queue_loop - Loop through the queues within a specific range (HELPER MACRO).
  * @__entry: Pointer where the current queue entry will be stored in.
  * @__start: Start queue pointer.
@@ -448,8 +517,8 @@ struct data_queue_desc {
  */
 #define queue_loop(__entry, __start, __end)			\
 	for ((__entry) = (__start);				\
-	     prefetch(&(__entry)[1]), (__entry) != (__end);	\
-	     (__entry) = &(__entry)[1])
+	     prefetch(queue_next(__entry)), (__entry) != (__end);\
+	     (__entry) = queue_next(__entry))
 
 /**
  * queue_for_each - Loop through all queues

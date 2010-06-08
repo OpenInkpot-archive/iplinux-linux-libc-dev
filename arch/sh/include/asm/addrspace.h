@@ -28,9 +28,6 @@
 /* Returns the privileged segment base of a given address  */
 #define PXSEG(a)	(((unsigned long)(a)) & 0xe0000000)
 
-/* Returns the physical address of a PnSEG (n=1,2) address   */
-#define PHYSADDR(a)	(((unsigned long)(a)) & 0x1fffffff)
-
 #ifdef CONFIG_29BIT
 /*
  * Map an address to a certain privileged segment
@@ -43,11 +40,30 @@
 	((__typeof__(a))(((unsigned long)(a) & 0x1fffffff) | P3SEG))
 #define P4SEGADDR(a)	\
 	((__typeof__(a))(((unsigned long)(a) & 0x1fffffff) | P4SEG))
-#endif /* 29BIT */
+#else
+/*
+ * These will never work in 32-bit, don't even bother.
+ */
+#define P1SEGADDR(a)	__futile_remapping_attempt
+#define P2SEGADDR(a)	__futile_remapping_attempt
+#define P3SEGADDR(a)	__futile_remapping_attempt
+#define P4SEGADDR(a)	__futile_remapping_attempt
+#endif
 #endif /* P1SEG */
 
 /* Check if an address can be reached in 29 bits */
 #define IS_29BIT(a)	(((unsigned long)(a)) < 0x20000000)
+
+#ifdef CONFIG_SH_STORE_QUEUES
+/*
+ * This is a special case for the SH-4 store queues, as pages for this
+ * space still need to be faulted in before it's possible to flush the
+ * store queue cache for writeout to the remapped region.
+ */
+#define P3_ADDR_MAX		(P4SEG_STORE_QUE + 0x04000000)
+#else
+#define P3_ADDR_MAX		P4SEG
+#endif
 
 #endif /* __KERNEL__ */
 #endif /* __ASM_SH_ADDRSPACE_H */

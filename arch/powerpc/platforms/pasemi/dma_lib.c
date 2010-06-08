@@ -21,6 +21,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/slab.h>
 #include <linux/of.h>
 
 #include <asm/pasemi_dma.h>
@@ -509,7 +510,7 @@ fallback:
  */
 int pasemi_dma_init(void)
 {
-	static spinlock_t init_lock = SPIN_LOCK_UNLOCKED;
+	static DEFINE_SPINLOCK(init_lock);
 	struct pci_dev *iob_pdev;
 	struct pci_dev *pdev;
 	struct resource res;

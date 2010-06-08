@@ -19,7 +19,7 @@
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
 
-#define CAN_VERSION "20081130"
+#define CAN_VERSION "20090105"
 
 /* increment this number each time you change some user-space interface */
 #define CAN_ABI_VERSION "8"
@@ -32,14 +32,12 @@
  * struct can_proto - CAN protocol structure
  * @type:       type argument in socket() syscall, e.g. SOCK_DGRAM.
  * @protocol:   protocol number in socket() syscall.
- * @capability: capability needed to open the socket, or -1 for no restriction.
  * @ops:        pointer to struct proto_ops for sock->ops.
  * @prot:       pointer to struct proto structure.
  */
 struct can_proto {
 	int              type;
 	int              protocol;
-	int              capability;
 	struct proto_ops *ops;
 	struct proto     *prot;
 };

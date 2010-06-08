@@ -5,6 +5,7 @@
  * Author(s): Cornelia Huck <cornelia.huck@de.ibm.com>
  *	      Martin Schwidefsky <schwidefsky@de.ibm.com>
  *	      Ralph Wuerthner <rwuerthn@de.ibm.com>
+ *	      Felix Beck <felix.beck@de.ibm.com>
  *
  * Adjunct processor bus header file.
  *
@@ -67,7 +68,8 @@ struct ap_queue_status {
 	unsigned int queue_empty	: 1;
 	unsigned int replies_waiting	: 1;
 	unsigned int queue_full		: 1;
-	unsigned int pad1		: 5;
+	unsigned int pad1		: 4;
+	unsigned int int_enabled	: 1;
 	unsigned int response_code	: 8;
 	unsigned int pad2		: 16;
 };
@@ -78,11 +80,14 @@ struct ap_queue_status {
 #define AP_RESPONSE_DECONFIGURED	0x03
 #define AP_RESPONSE_CHECKSTOPPED	0x04
 #define AP_RESPONSE_BUSY		0x05
+#define AP_RESPONSE_INVALID_ADDRESS	0x06
+#define AP_RESPONSE_OTHERWISE_CHANGED	0x07
 #define AP_RESPONSE_Q_FULL		0x10
 #define AP_RESPONSE_NO_PENDING_REPLY	0x10
 #define AP_RESPONSE_INDEX_TOO_BIG	0x11
 #define AP_RESPONSE_NO_FIRST_PART	0x13
 #define AP_RESPONSE_MESSAGE_TOO_BIG	0x15
+#define AP_RESPONSE_REQ_FAC_NOT_INST	0x16
 
 /*
  * Known device types
@@ -92,8 +97,8 @@ struct ap_queue_status {
 #define AP_DEVICE_TYPE_PCIXCC	5
 #define AP_DEVICE_TYPE_CEX2A	6
 #define AP_DEVICE_TYPE_CEX2C	7
-#define AP_DEVICE_TYPE_CEX2A2	8
-#define AP_DEVICE_TYPE_CEX2C2	9
+#define AP_DEVICE_TYPE_CEX3A	8
+#define AP_DEVICE_TYPE_CEX3C	9
 
 /*
  * AP reset flag states
@@ -157,11 +162,24 @@ struct ap_message {
 	size_t length;			/* Message length. */
 
 	void *private;			/* ap driver private pointer. */
+	unsigned int special:1;		/* Used for special commands. */
 };
 
 #define AP_DEVICE(dt)					\
 	.dev_type=(dt),					\
 	.match_flags=AP_DEVICE_ID_MATCH_DEVICE_TYPE,
+
+/**
+ * ap_init_message() - Initialize ap_message.
+ * Initialize a message before using. Otherwise this might result in
+ * unexpected behaviour.
+ */
+static inline void ap_init_message(struct ap_message *ap_msg)
+{
+	ap_msg->psmid = 0;
+	ap_msg->length = 0;
+	ap_msg->special = 0;
+}
 
 /*
  * Note: don't use ap_send/ap_recv after using ap_queue_message

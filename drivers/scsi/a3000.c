@@ -1,5 +1,6 @@
 #include <linux/types.h>
 #include <linux/mm.h>
+#include <linux/slab.h>
 #include <linux/blkdev.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
@@ -24,6 +25,8 @@
 #define HDATA(ptr) ((struct WD33C93_hostdata *)((ptr)->hostdata))
 
 static struct Scsi_Host *a3000_host = NULL;
+
+static int a3000_release(struct Scsi_Host *instance);
 
 static irqreturn_t a3000_intr (int irq, void *dummy)
 {
@@ -157,7 +160,7 @@ static void dma_stop(struct Scsi_Host *instance, struct scsi_cmnd *SCpnt,
     }
 }
 
-int __init a3000_detect(struct scsi_host_template *tpnt)
+static int __init a3000_detect(struct scsi_host_template *tpnt)
 {
     wd33c93_regs regs;
 
@@ -232,7 +235,7 @@ static struct scsi_host_template driver_template = {
 
 #include "scsi_module.c"
 
-int a3000_release(struct Scsi_Host *instance)
+static int a3000_release(struct Scsi_Host *instance)
 {
     wd33c93_release();
     DMA(instance)->CNTR = 0;

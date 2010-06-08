@@ -28,8 +28,10 @@
  */
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/sched.h>
 #include <linux/init.h>
 #include <linux/videodev.h>
+#include <linux/gfp.h>
 #include <media/v4l2-common.h>
 #include <media/v4l2-ioctl.h>
 #include <asm/uaccess.h>
@@ -117,7 +119,7 @@ static int ptable_alloc(void)
 	memset(meye.mchip_ptable, 0, sizeof(meye.mchip_ptable));
 
 	/* give only 32 bit DMA addresses */
-	if (dma_set_mask(&meye.mchip_dev->dev, DMA_32BIT_MASK))
+	if (dma_set_mask(&meye.mchip_dev->dev, DMA_BIT_MASK(32)))
 		return -1;
 
 	meye.mchip_ptable_toc = dma_alloc_coherent(&meye.mchip_dev->dev,
@@ -799,8 +801,8 @@ again:
 		return IRQ_HANDLED;
 
 	if (meye.mchip_mode == MCHIP_HIC_MODE_CONT_OUT) {
-		if (kfifo_get(meye.grabq, (unsigned char *)&reqnr,
-			      sizeof(int)) != sizeof(int)) {
+		if (kfifo_out_locked(&meye.grabq, (unsigned char *)&reqnr,
+			      sizeof(int), &meye.grabq_lock) != sizeof(int)) {
 			mchip_free_frame();
 			return IRQ_HANDLED;
 		}
@@ -810,7 +812,8 @@ again:
 		meye.grab_buffer[reqnr].state = MEYE_BUF_DONE;
 		do_gettimeofday(&meye.grab_buffer[reqnr].timestamp);
 		meye.grab_buffer[reqnr].sequence = sequence++;
-		kfifo_put(meye.doneq, (unsigned char *)&reqnr, sizeof(int));
+		kfifo_in_locked(&meye.doneq, (unsigned char *)&reqnr,
+				sizeof(int), &meye.doneq_lock);
 		wake_up_interruptible(&meye.proc_list);
 	} else {
 		int size;
@@ -819,8 +822,8 @@ again:
 			mchip_free_frame();
 			goto again;
 		}
-		if (kfifo_get(meye.grabq, (unsigned char *)&reqnr,
-			      sizeof(int)) != sizeof(int)) {
+		if (kfifo_out_locked(&meye.grabq, (unsigned char *)&reqnr,
+			      sizeof(int), &meye.grabq_lock) != sizeof(int)) {
 			mchip_free_frame();
 			goto again;
 		}
@@ -830,7 +833,8 @@ again:
 		meye.grab_buffer[reqnr].state = MEYE_BUF_DONE;
 		do_gettimeofday(&meye.grab_buffer[reqnr].timestamp);
 		meye.grab_buffer[reqnr].sequence = sequence++;
-		kfifo_put(meye.doneq, (unsigned char *)&reqnr, sizeof(int));
+		kfifo_in_locked(&meye.doneq, (unsigned char *)&reqnr,
+				sizeof(int), &meye.doneq_lock);
 		wake_up_interruptible(&meye.proc_list);
 	}
 	mchip_free_frame();
@@ -841,7 +845,7 @@ again:
 /* video4linux integration                                                  */
 /****************************************************************************/
 
-static int meye_open(struct inode *inode, struct file *file)
+static int meye_open(struct file *file)
 {
 	int i;
 
@@ -858,12 +862,12 @@ static int meye_open(struct inode *inode, struct file *file)
 
 	for (i = 0; i < MEYE_MAX_BUFNBRS; i++)
 		meye.grab_buffer[i].state = MEYE_BUF_UNUSED;
-	kfifo_reset(meye.grabq);
-	kfifo_reset(meye.doneq);
+	kfifo_reset(&meye.grabq);
+	kfifo_reset(&meye.doneq);
 	return 0;
 }
 
-static int meye_release(struct inode *inode, struct file *file)
+static int meye_release(struct file *file)
 {
 	mchip_hic_stop();
 	mchip_dma_free();
@@ -932,7 +936,8 @@ static int meyeioc_qbuf_capt(int *nb)
 		mchip_cont_compression_start();
 
 	meye.grab_buffer[*nb].state = MEYE_BUF_USING;
-	kfifo_put(meye.grabq, (unsigned char *)nb, sizeof(int));
+	kfifo_in_locked(&meye.grabq, (unsigned char *)nb, sizeof(int),
+			 &meye.grabq_lock);
 	mutex_unlock(&meye.lock);
 
 	return 0;
@@ -964,7 +969,9 @@ static int meyeioc_sync(struct file *file, void *fh, int *i)
 		/* fall through */
 	case MEYE_BUF_DONE:
 		meye.grab_buffer[*i].state = MEYE_BUF_UNUSED;
-		kfifo_get(meye.doneq, (unsigned char *)&unused, sizeof(int));
+		if (kfifo_out_locked(&meye.doneq, (unsigned char *)&unused,
+				sizeof(int), &meye.doneq_lock) != sizeof(int))
+					break;
 	}
 	*i = meye.grab_buffer[*i].size;
 	mutex_unlock(&meye.lock);
@@ -1017,7 +1024,6 @@ static int meyeioc_stilljcapt(int *len)
 static int vidioc_querycap(struct file *file, void *fh,
 				struct v4l2_capability *cap)
 {
-	memset(cap, 0, sizeof(*cap));
 	strcpy(cap->driver, "meye");
 	strcpy(cap->card, "meye");
 	sprintf(cap->bus_info, "PCI:%s", pci_name(meye.mchip_dev));
@@ -1036,8 +1042,6 @@ static int vidioc_enum_input(struct file *file, void *fh, struct v4l2_input *i)
 	if (i->index != 0)
 		return -EINVAL;
 
-	memset(i, 0, sizeof(*i));
-	i->index = 0;
 	strcpy(i->name, "Camera");
 	i->type = V4L2_INPUT_TYPE_CAMERA;
 
@@ -1259,22 +1263,13 @@ static int vidioc_enum_fmt_vid_cap(struct file *file, void *fh,
 	if (f->index > 1)
 		return -EINVAL;
 
-	if (f->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
-		return -EINVAL;
-
 	if (f->index == 0) {
 		/* standard YUV 422 capture */
-		memset(f, 0, sizeof(*f));
-		f->index = 0;
-		f->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		f->flags = 0;
 		strcpy(f->description, "YUV422");
 		f->pixelformat = V4L2_PIX_FMT_YUYV;
 	} else {
 		/* compressed MJPEG capture */
-		memset(f, 0, sizeof(*f));
-		f->index = 1;
-		f->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		f->flags = V4L2_FMT_FLAG_COMPRESSED;
 		strcpy(f->description, "MJPEG");
 		f->pixelformat = V4L2_PIX_FMT_MJPEG;
@@ -1286,9 +1281,6 @@ static int vidioc_enum_fmt_vid_cap(struct file *file, void *fh,
 static int vidioc_try_fmt_vid_cap(struct file *file, void *fh,
 				struct v4l2_format *f)
 {
-	if (f->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
-		return -EINVAL;
-
 	if (f->fmt.pix.pixelformat != V4L2_PIX_FMT_YUYV &&
 	    f->fmt.pix.pixelformat != V4L2_PIX_FMT_MJPEG)
 		return -EINVAL;
@@ -1319,12 +1311,6 @@ static int vidioc_try_fmt_vid_cap(struct file *file, void *fh,
 static int vidioc_g_fmt_vid_cap(struct file *file, void *fh,
 				    struct v4l2_format *f)
 {
-	if (f->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
-		return -EINVAL;
-
-	memset(&f->fmt.pix, 0, sizeof(struct v4l2_pix_format));
-	f->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-
 	switch (meye.mchip_mode) {
 	case MCHIP_HIC_MODE_CONT_OUT:
 	default:
@@ -1341,8 +1327,6 @@ static int vidioc_g_fmt_vid_cap(struct file *file, void *fh,
 	f->fmt.pix.bytesperline = f->fmt.pix.width * 2;
 	f->fmt.pix.sizeimage = f->fmt.pix.height *
 			       f->fmt.pix.bytesperline;
-	f->fmt.pix.colorspace = 0;
-	f->fmt.pix.priv = 0;
 
 	return 0;
 }
@@ -1350,9 +1334,6 @@ static int vidioc_g_fmt_vid_cap(struct file *file, void *fh,
 static int vidioc_s_fmt_vid_cap(struct file *file, void *fh,
 				    struct v4l2_format *f)
 {
-	if (f->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
-		return -EINVAL;
-
 	if (f->fmt.pix.pixelformat != V4L2_PIX_FMT_YUYV &&
 	    f->fmt.pix.pixelformat != V4L2_PIX_FMT_MJPEG)
 		return -EINVAL;
@@ -1398,9 +1379,6 @@ static int vidioc_reqbufs(struct file *file, void *fh,
 {
 	int i;
 
-	if (req->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
-		return -EINVAL;
-
 	if (req->memory != V4L2_MEMORY_MMAP)
 		return -EINVAL;
 
@@ -1441,15 +1419,11 @@ static int vidioc_reqbufs(struct file *file, void *fh,
 
 static int vidioc_querybuf(struct file *file, void *fh, struct v4l2_buffer *buf)
 {
-	int index = buf->index;
+	unsigned int index = buf->index;
 
-	if (index < 0 || index >= gbuffers)
+	if (index >= gbuffers)
 		return -EINVAL;
 
-	memset(buf, 0, sizeof(*buf));
-
-	buf->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	buf->index = index;
 	buf->bytesused = meye.grab_buffer[index].size;
 	buf->flags = V4L2_BUF_FLAG_MAPPED;
 
@@ -1471,13 +1445,10 @@ static int vidioc_querybuf(struct file *file, void *fh, struct v4l2_buffer *buf)
 
 static int vidioc_qbuf(struct file *file, void *fh, struct v4l2_buffer *buf)
 {
-	if (buf->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
-		return -EINVAL;
-
 	if (buf->memory != V4L2_MEMORY_MMAP)
 		return -EINVAL;
 
-	if (buf->index < 0 || buf->index >= gbuffers)
+	if (buf->index >= gbuffers)
 		return -EINVAL;
 
 	if (meye.grab_buffer[buf->index].state != MEYE_BUF_UNUSED)
@@ -1487,7 +1458,8 @@ static int vidioc_qbuf(struct file *file, void *fh, struct v4l2_buffer *buf)
 	buf->flags |= V4L2_BUF_FLAG_QUEUED;
 	buf->flags &= ~V4L2_BUF_FLAG_DONE;
 	meye.grab_buffer[buf->index].state = MEYE_BUF_USING;
-	kfifo_put(meye.grabq, (unsigned char *)&buf->index, sizeof(int));
+	kfifo_in_locked(&meye.grabq, (unsigned char *)&buf->index,
+			sizeof(int), &meye.grabq_lock);
 	mutex_unlock(&meye.lock);
 
 	return 0;
@@ -1497,27 +1469,24 @@ static int vidioc_dqbuf(struct file *file, void *fh, struct v4l2_buffer *buf)
 {
 	int reqnr;
 
-	if (buf->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
-		return -EINVAL;
-
 	if (buf->memory != V4L2_MEMORY_MMAP)
 		return -EINVAL;
 
 	mutex_lock(&meye.lock);
 
-	if (kfifo_len(meye.doneq) == 0 && file->f_flags & O_NONBLOCK) {
+	if (kfifo_len(&meye.doneq) == 0 && file->f_flags & O_NONBLOCK) {
 		mutex_unlock(&meye.lock);
 		return -EAGAIN;
 	}
 
 	if (wait_event_interruptible(meye.proc_list,
-				     kfifo_len(meye.doneq) != 0) < 0) {
+				     kfifo_len(&meye.doneq) != 0) < 0) {
 		mutex_unlock(&meye.lock);
 		return -EINTR;
 	}
 
-	if (!kfifo_get(meye.doneq, (unsigned char *)&reqnr,
-		       sizeof(int))) {
+	if (!kfifo_out_locked(&meye.doneq, (unsigned char *)&reqnr,
+		       sizeof(int), &meye.doneq_lock)) {
 		mutex_unlock(&meye.lock);
 		return -EBUSY;
 	}
@@ -1567,8 +1536,8 @@ static int vidioc_streamoff(struct file *file, void *fh, enum v4l2_buf_type i)
 {
 	mutex_lock(&meye.lock);
 	mchip_hic_stop();
-	kfifo_reset(meye.grabq);
-	kfifo_reset(meye.doneq);
+	kfifo_reset(&meye.grabq);
+	kfifo_reset(&meye.doneq);
 
 	for (i = 0; i < MEYE_MAX_BUFNBRS; i++)
 		meye.grab_buffer[i].state = MEYE_BUF_UNUSED;
@@ -1577,7 +1546,7 @@ static int vidioc_streamoff(struct file *file, void *fh, enum v4l2_buf_type i)
 	return 0;
 }
 
-static int vidioc_default(struct file *file, void *fh, int cmd, void *arg)
+static long vidioc_default(struct file *file, void *fh, int cmd, void *arg)
 {
 	switch (cmd) {
 	case MEYEIOC_G_PARAMS:
@@ -1610,7 +1579,7 @@ static unsigned int meye_poll(struct file *file, poll_table *wait)
 
 	mutex_lock(&meye.lock);
 	poll_wait(file, &meye.proc_list, wait);
-	if (kfifo_len(meye.doneq))
+	if (kfifo_len(&meye.doneq))
 		res = POLLIN | POLLRDNORM;
 	mutex_unlock(&meye.lock);
 	return res;
@@ -1628,7 +1597,7 @@ static void meye_vm_close(struct vm_area_struct *vma)
 	meye.vma_use_count[idx]--;
 }
 
-static struct vm_operations_struct meye_vm_ops = {
+static const struct vm_operations_struct meye_vm_ops = {
 	.open		= meye_vm_open,
 	.close		= meye_vm_close,
 };
@@ -1684,17 +1653,13 @@ static int meye_mmap(struct file *file, struct vm_area_struct *vma)
 	return 0;
 }
 
-static const struct file_operations meye_fops = {
+static const struct v4l2_file_operations meye_fops = {
 	.owner		= THIS_MODULE,
 	.open		= meye_open,
 	.release	= meye_release,
 	.mmap		= meye_mmap,
 	.ioctl		= video_ioctl2,
-#ifdef CONFIG_COMPAT
-	.compat_ioctl	= v4l_compat_ioctl32,
-#endif
 	.poll		= meye_poll,
-	.llseek		= no_llseek,
 };
 
 static const struct v4l2_ioctl_ops meye_ioctl_ops = {
@@ -1723,7 +1688,6 @@ static struct video_device meye_template = {
 	.fops		= &meye_fops,
 	.ioctl_ops 	= &meye_ioctl_ops,
 	.release	= video_device_release,
-	.minor		= -1,
 };
 
 #ifdef CONFIG_PM
@@ -1788,16 +1752,14 @@ static int __devinit meye_probe(struct pci_dev *pcidev,
 	}
 
 	spin_lock_init(&meye.grabq_lock);
-	meye.grabq = kfifo_alloc(sizeof(int) * MEYE_MAX_BUFNBRS, GFP_KERNEL,
-				 &meye.grabq_lock);
-	if (IS_ERR(meye.grabq)) {
+	if (kfifo_alloc(&meye.grabq, sizeof(int) * MEYE_MAX_BUFNBRS,
+				GFP_KERNEL)) {
 		printk(KERN_ERR "meye: fifo allocation failed\n");
 		goto outkfifoalloc1;
 	}
 	spin_lock_init(&meye.doneq_lock);
-	meye.doneq = kfifo_alloc(sizeof(int) * MEYE_MAX_BUFNBRS, GFP_KERNEL,
-				 &meye.doneq_lock);
-	if (IS_ERR(meye.doneq)) {
+	if (kfifo_alloc(&meye.doneq, sizeof(int) * MEYE_MAX_BUFNBRS,
+				GFP_KERNEL)) {
 		printk(KERN_ERR "meye: fifo allocation failed\n");
 		goto outkfifoalloc2;
 	}
@@ -1911,9 +1873,9 @@ outregions:
 outenabledev:
 	sony_pic_camera_command(SONY_PIC_COMMAND_SETCAMERA, 0);
 outsonypienable:
-	kfifo_free(meye.doneq);
+	kfifo_free(&meye.doneq);
 outkfifoalloc2:
-	kfifo_free(meye.grabq);
+	kfifo_free(&meye.grabq);
 outkfifoalloc1:
 	vfree(meye.grab_temp);
 outvmalloc:
@@ -1944,8 +1906,8 @@ static void __devexit meye_remove(struct pci_dev *pcidev)
 
 	sony_pic_camera_command(SONY_PIC_COMMAND_SETCAMERA, 0);
 
-	kfifo_free(meye.doneq);
-	kfifo_free(meye.grabq);
+	kfifo_free(&meye.doneq);
+	kfifo_free(&meye.grabq);
 
 	vfree(meye.grab_temp);
 
@@ -1958,8 +1920,7 @@ static void __devexit meye_remove(struct pci_dev *pcidev)
 }
 
 static struct pci_device_id meye_pci_tbl[] = {
-	{ PCI_VENDOR_ID_KAWASAKI, PCI_DEVICE_ID_MCHIP_KL5A72002,
-	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ PCI_VDEVICE(KAWASAKI, PCI_DEVICE_ID_MCHIP_KL5A72002), 0 },
 	{ }
 };
 

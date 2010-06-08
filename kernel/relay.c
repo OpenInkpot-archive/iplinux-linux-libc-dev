@@ -60,7 +60,7 @@ static int relay_buf_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 /*
  * vm_ops for relay file mappings.
  */
-static struct vm_operations_struct relay_file_mmap_ops = {
+static const struct vm_operations_struct relay_file_mmap_ops = {
 	.fault = relay_buf_fault,
 	.close = relay_file_mmap_close,
 };
@@ -663,8 +663,10 @@ int relay_late_setup_files(struct rchan *chan,
 
 	mutex_lock(&relay_channels_mutex);
 	/* Is chan already set up? */
-	if (unlikely(chan->has_base_filename))
+	if (unlikely(chan->has_base_filename)) {
+		mutex_unlock(&relay_channels_mutex);
 		return -EEXIST;
+	}
 	chan->has_base_filename = 1;
 	chan->parent = parent;
 	curr_cpu = get_cpu();
@@ -675,9 +677,7 @@ int relay_late_setup_files(struct rchan *chan,
 	 */
 	for_each_online_cpu(i) {
 		if (unlikely(!chan->buf[i])) {
-			printk(KERN_ERR "relay_late_setup_files: CPU %u "
-					"has no buffer, it must have!\n", i);
-			BUG();
+			WARN_ONCE(1, KERN_ERR "CPU has no buffer!\n");
 			err = -EINVAL;
 			break;
 		}
@@ -748,7 +748,7 @@ size_t relay_switch_subbuf(struct rchan_buf *buf, size_t length)
 			 * from the scheduler (trying to re-grab
 			 * rq->lock), so defer it.
 			 */
-			__mod_timer(&buf->timer, jiffies + 1);
+			mod_timer(&buf->timer, jiffies + 1);
 	}
 
 	old = buf->data;
@@ -795,13 +795,15 @@ void relay_subbufs_consumed(struct rchan *chan,
 	if (!chan)
 		return;
 
-	if (cpu >= NR_CPUS || !chan->buf[cpu])
+	if (cpu >= NR_CPUS || !chan->buf[cpu] ||
+					subbufs_consumed > chan->n_subbufs)
 		return;
 
 	buf = chan->buf[cpu];
-	buf->subbufs_consumed += subbufs_consumed;
-	if (buf->subbufs_consumed > buf->subbufs_produced)
+	if (subbufs_consumed > buf->subbufs_produced - buf->subbufs_consumed)
 		buf->subbufs_consumed = buf->subbufs_produced;
+	else
+		buf->subbufs_consumed += subbufs_consumed;
 }
 EXPORT_SYMBOL_GPL(relay_subbufs_consumed);
 
@@ -1196,7 +1198,7 @@ static void relay_pipe_buf_release(struct pipe_inode_info *pipe,
 	relay_consume_bytes(rbuf, buf->private);
 }
 
-static struct pipe_buf_operations relay_pipe_buf_ops = {
+static const struct pipe_buf_operations relay_pipe_buf_ops = {
 	.can_merge = 0,
 	.map = generic_pipe_buf_map,
 	.unmap = generic_pipe_buf_unmap,
@@ -1213,14 +1215,14 @@ static void relay_page_release(struct splice_pipe_desc *spd, unsigned int i)
 /*
  *	subbuf_splice_actor - splice up to one subbuf's worth of data
  */
-static int subbuf_splice_actor(struct file *in,
+static ssize_t subbuf_splice_actor(struct file *in,
 			       loff_t *ppos,
 			       struct pipe_inode_info *pipe,
 			       size_t len,
 			       unsigned int flags,
 			       int *nonpad_ret)
 {
-	unsigned int pidx, poff, total_len, subbuf_pages, nr_pages, ret;
+	unsigned int pidx, poff, total_len, subbuf_pages, nr_pages;
 	struct rchan_buf *rbuf = in->private_data;
 	unsigned int subbuf_size = rbuf->chan->subbuf_size;
 	uint64_t pos = (uint64_t) *ppos;
@@ -1239,6 +1241,7 @@ static int subbuf_splice_actor(struct file *in,
 		.ops = &relay_pipe_buf_ops,
 		.spd_release = relay_page_release,
 	};
+	ssize_t ret;
 
 	if (rbuf->subbufs_produced == rbuf->subbufs_consumed)
 		return 0;

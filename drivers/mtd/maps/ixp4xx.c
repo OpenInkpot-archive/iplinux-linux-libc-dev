@@ -201,7 +201,7 @@ static int ixp4xx_flash_probe(struct platform_device *dev)
 		err = -ENOMEM;
 		goto Error;
 	}
-	memzero(info, sizeof(struct ixp4xx_flash_info));
+	memset(info, 0, sizeof(struct ixp4xx_flash_info));
 
 	platform_set_drvdata(dev, info);
 
@@ -210,7 +210,7 @@ static int ixp4xx_flash_probe(struct platform_device *dev)
 	 * not attempt to do a direct access on us.
 	 */
 	info->map.phys = NO_XIP;
-	info->map.size = dev->resource->end - dev->resource->start + 1;
+	info->map.size = resource_size(dev->resource);
 
 	/*
 	 * We only support 16-bit accesses for now. If and when
@@ -218,13 +218,13 @@ static int ixp4xx_flash_probe(struct platform_device *dev)
 	 * handle that.
 	 */
 	info->map.bankwidth = 2;
-	info->map.name = dev->dev.bus_id;
+	info->map.name = dev_name(&dev->dev);
 	info->map.read = ixp4xx_read16,
 	info->map.write = ixp4xx_probe_write16,
 	info->map.copy_from = ixp4xx_copy_from,
 
 	info->res = request_mem_region(dev->resource->start,
-			dev->resource->end - dev->resource->start + 1,
+			resource_size(dev->resource),
 			"IXP4XXFlash");
 	if (!info->res) {
 		printk(KERN_ERR "IXP4XXFlash: Could not reserve memory region\n");
@@ -233,7 +233,7 @@ static int ixp4xx_flash_probe(struct platform_device *dev)
 	}
 
 	info->map.virt = ioremap(dev->resource->start,
-				 dev->resource->end - dev->resource->start + 1);
+				 resource_size(dev->resource));
 	if (!info->map.virt) {
 		printk(KERN_ERR "IXP4XXFlash: Failed to ioremap region\n");
 		err = -EIO;

@@ -27,14 +27,14 @@ static void tcp_diag_get_info(struct sock *sk, struct inet_diag_msg *r,
 		r->idiag_rqueue = sk->sk_ack_backlog;
 		r->idiag_wqueue = sk->sk_max_ack_backlog;
 	} else {
-		r->idiag_rqueue = tp->rcv_nxt - tp->copied_seq;
+		r->idiag_rqueue = max_t(int, tp->rcv_nxt - tp->copied_seq, 0);
 		r->idiag_wqueue = tp->write_seq - tp->snd_una;
 	}
 	if (info != NULL)
 		tcp_get_info(sk, info);
 }
 
-static struct inet_diag_handler tcp_diag_handler = {
+static const struct inet_diag_handler tcp_diag_handler = {
 	.idiag_hashinfo	 = &tcp_hashinfo,
 	.idiag_get_info	 = tcp_diag_get_info,
 	.idiag_type	 = TCPDIAG_GETSOCK,

@@ -9,6 +9,7 @@
  *
  */
 
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/netfilter.h>
@@ -23,7 +24,7 @@ int xfrm4_extract_input(struct xfrm_state *x, struct sk_buff *skb)
 
 static inline int xfrm4_rcv_encap_finish(struct sk_buff *skb)
 {
-	if (skb->dst == NULL) {
+	if (skb_dst(skb) == NULL) {
 		const struct iphdr *iph = ip_hdr(skb);
 
 		if (ip_route_input(skb, iph->daddr, iph->saddr, iph->tos,
@@ -78,7 +79,6 @@ int xfrm4_udp_encap_rcv(struct sock *sk, struct sk_buff *skb)
 	struct udphdr *uh;
 	struct iphdr *iph;
 	int iphlen, len;
-	int ret;
 
 	__u8 *udpdata;
 	__be32 *udpdata32;
@@ -152,8 +152,7 @@ int xfrm4_udp_encap_rcv(struct sock *sk, struct sk_buff *skb)
 	skb_reset_transport_header(skb);
 
 	/* process ESP */
-	ret = xfrm4_rcv_encap(skb, IPPROTO_ESP, 0, encap_type);
-	return ret;
+	return xfrm4_rcv_encap(skb, IPPROTO_ESP, 0, encap_type);
 
 drop:
 	kfree_skb(skb);

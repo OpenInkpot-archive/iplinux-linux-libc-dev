@@ -13,14 +13,12 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/platform_device.h>
 #include <mach/hardware.h>
 #include <asm/mach-types.h>
 
 #include <mach/ssp.h>
-#include <mach/pxa-regs.h>
 #include <mach/pxa2xx-gpio.h>
 #include <mach/regs-ssp.h>
 #include "sharpsl.h"
@@ -205,7 +203,7 @@ void __init corgi_ssp_set_machinfo(struct corgissp_machinfo *machinfo)
 	ssp_machinfo = machinfo;
 }
 
-static int __init corgi_ssp_probe(struct platform_device *dev)
+static int __devinit corgi_ssp_probe(struct platform_device *dev)
 {
 	int ret;
 

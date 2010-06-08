@@ -10,7 +10,7 @@
  See the WWW-page: http://www.uni-mainz.de/~langm000/linux.html for latest
  updates, info and ADF-files for adapters supported by this driver.
 
- Alan Cox <alan@redhat.com>
+ Alan Cox <alan@lxorguk.ukuu.org.uk>
  Updated for Linux 2.5.45 to use the new error handler, cleaned up the
  lock macros and did a few unavoidable locking tweaks, plus one locking
  fix in the irq and completion path.
@@ -2336,7 +2336,7 @@ static int option_setup(char *str)
 	char *cur = str;
 	int i = 1;
 
-	while (cur && isdigit(*cur) && i <= IM_MAX_HOSTS) {
+	while (cur && isdigit(*cur) && i < IM_MAX_HOSTS) {
 		ints[i++] = simple_strtoul(cur, NULL, 0);
 		if ((cur = strchr(cur, ',')) != NULL)
 			cur++;

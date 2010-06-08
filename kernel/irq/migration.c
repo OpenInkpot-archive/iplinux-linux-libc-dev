@@ -1,10 +1,12 @@
 
 #include <linux/irq.h>
+#include <linux/interrupt.h>
+
+#include "internals.h"
 
 void move_masked_irq(int irq)
 {
 	struct irq_desc *desc = irq_to_desc(irq);
-	cpumask_t tmp;
 
 	if (likely(!(desc->status & IRQ_MOVE_PENDING)))
 		return;
@@ -19,15 +21,13 @@ void move_masked_irq(int irq)
 
 	desc->status &= ~IRQ_MOVE_PENDING;
 
-	if (unlikely(cpus_empty(desc->pending_mask)))
+	if (unlikely(cpumask_empty(desc->pending_mask)))
 		return;
 
 	if (!desc->chip->set_affinity)
 		return;
 
-	assert_spin_locked(&desc->lock);
-
-	cpus_and(tmp, desc->pending_mask, cpu_online_map);
+	assert_raw_spin_locked(&desc->lock);
 
 	/*
 	 * If there was a valid mask to work with, please
@@ -41,10 +41,14 @@ void move_masked_irq(int irq)
 	 * For correct operation this depends on the caller
 	 * masking the irqs.
 	 */
-	if (likely(!cpus_empty(tmp))) {
-		desc->chip->set_affinity(irq,tmp);
-	}
-	cpus_clear(desc->pending_mask);
+	if (likely(cpumask_any_and(desc->pending_mask, cpu_online_mask)
+		   < nr_cpu_ids))
+		if (!desc->chip->set_affinity(irq, desc->pending_mask)) {
+			cpumask_copy(desc->affinity, desc->pending_mask);
+			irq_set_thread_affinity(desc);
+		}
+
+	cpumask_clear(desc->pending_mask);
 }
 
 void move_native_irq(int irq)

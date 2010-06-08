@@ -13,29 +13,7 @@
 
 static inline void __delay(unsigned long loops)
 {
-	if (ANOMALY_05000312) {
-		/* Interrupted loads to loop registers -> bad */
-		unsigned long tmp;
-		__asm__ __volatile__(
-			"[--SP] = LC0;"
-			"[--SP] = LT0;"
-			"[--SP] = LB0;"
-			"LSETUP (1f,1f) LC0 = %1;"
-			"1: NOP;"
-			/* We take advantage of the fact that LC0 is 0 at
-			 * the end of the loop.  Otherwise we'd need some
-			 * NOPs after the CLI here.
-			 */
-			"CLI %0;"
-			"LB0 = [SP++];"
-			"LT0 = [SP++];"
-			"LC0 = [SP++];"
-			"STI %0;"
-			: "=d" (tmp)
-			: "a" (loops)
-		);
-	} else
-		__asm__ __volatile__ (
+__asm__ __volatile__ (
 			"LSETUP(1f, 1f) LC0 = %0;"
 			"1: NOP;"
 			:
@@ -47,16 +25,27 @@ static inline void __delay(unsigned long loops)
 #include <linux/param.h>	/* needed for HZ */
 
 /*
- * Use only for very small delays ( < 1 msec).  Should probably use a
- * lookup table, really, as the multiplications take much too long with
- * short delays.  This is a "reasonable" implementation, though (and the
- * first constant multiplications gets optimized away if the delay is
- * a constant)
+ * close approximation borrowed from m68knommu to avoid 64-bit math
  */
-static inline void udelay(unsigned long usecs)
+
+#define	HZSCALE		(268435456 / (1000000/HZ))
+
+static inline unsigned long __to_delay(unsigned long scale)
 {
 	extern unsigned long loops_per_jiffy;
-	__delay(usecs * loops_per_jiffy / (1000000 / HZ));
+	return (((scale * HZSCALE) >> 11) * (loops_per_jiffy >> 11)) >> 6;
 }
+
+static inline void udelay(unsigned long usecs)
+{
+	__delay(__to_delay(usecs));
+}
+
+static inline void ndelay(unsigned long nsecs)
+{
+	__delay(__to_delay(1) * nsecs / 1000);
+}
+
+#define ndelay ndelay
 
 #endif

@@ -22,6 +22,7 @@
 #include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
 #include <linux/list.h>
@@ -205,8 +206,8 @@ static const struct file_operations signalfd_fops = {
 	.read		= signalfd_read,
 };
 
-asmlinkage long sys_signalfd4(int ufd, sigset_t __user *user_mask,
-			      size_t sizemask, int flags)
+SYSCALL_DEFINE4(signalfd4, int, ufd, sigset_t __user *, user_mask,
+		size_t, sizemask, int, flags)
 {
 	sigset_t sigmask;
 	struct signalfd_ctx *ctx;
@@ -236,7 +237,7 @@ asmlinkage long sys_signalfd4(int ufd, sigset_t __user *user_mask,
 		 * anon_inode_getfd() will install the fd.
 		 */
 		ufd = anon_inode_getfd("[signalfd]", &signalfd_fops, ctx,
-				       flags & (O_CLOEXEC | O_NONBLOCK));
+				       O_RDWR | (flags & (O_CLOEXEC | O_NONBLOCK)));
 		if (ufd < 0)
 			kfree(ctx);
 	} else {
@@ -259,8 +260,8 @@ asmlinkage long sys_signalfd4(int ufd, sigset_t __user *user_mask,
 	return ufd;
 }
 
-asmlinkage long sys_signalfd(int ufd, sigset_t __user *user_mask,
-			     size_t sizemask)
+SYSCALL_DEFINE3(signalfd, int, ufd, sigset_t __user *, user_mask,
+		size_t, sizemask)
 {
 	return sys_signalfd4(ufd, user_mask, sizemask, 0);
 }

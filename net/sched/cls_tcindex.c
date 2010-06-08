@@ -9,15 +9,10 @@
 #include <linux/kernel.h>
 #include <linux/skbuff.h>
 #include <linux/errno.h>
+#include <linux/slab.h>
 #include <net/act_api.h>
 #include <net/netlink.h>
 #include <net/pkt_cls.h>
-
-
-/*
- * Not quite sure if we need all the xchgs Alexey uses when accessing things.
- * Can always add them later ... :)
- */
 
 /*
  * Passing parameters to the root seems to be done more awkwardly than really

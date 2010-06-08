@@ -109,7 +109,7 @@ static struct flash_platform_data pleb_flash_data = {
 
 static void __init pleb_init(void)
 {
-	sa11x0_set_flash_data(&pleb_flash_data, pleb_flash_resources,
+	sa11x0_register_mtd(&pleb_flash_data, pleb_flash_resources,
 			      ARRAY_SIZE(pleb_flash_resources));
 
 
@@ -122,12 +122,12 @@ static void __init pleb_map_io(void)
 	sa1100_map_io();
 
 	sa1100_register_uart(0, 3);
-        sa1100_register_uart(1, 1);
+	sa1100_register_uart(1, 1);
 
-        GAFR |= (GPIO_UART_TXD | GPIO_UART_RXD);
-        GPDR |= GPIO_UART_TXD;
-        GPDR &= ~GPIO_UART_RXD;
-        PPAR |= PPAR_UPR;
+	GAFR |= (GPIO_UART_TXD | GPIO_UART_RXD);
+	GPDR |= GPIO_UART_TXD;
+	GPDR &= ~GPIO_UART_RXD;
+	PPAR |= PPAR_UPR;
 
 	/*
 	 * Fix expansion memory timing for network card

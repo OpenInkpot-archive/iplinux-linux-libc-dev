@@ -31,7 +31,7 @@ enum {
 };
 
 void smp_message_recv(unsigned int msg);
-void smp_timer_broadcast(cpumask_t mask);
+void smp_timer_broadcast(const struct cpumask *mask);
 
 void local_timer_interrupt(void);
 void local_timer_setup(unsigned int cpu);
@@ -43,7 +43,7 @@ void plat_start_cpu(unsigned int cpu, unsigned long entry_point);
 void plat_send_ipi(unsigned int cpu, unsigned int message);
 
 void arch_send_call_function_single_ipi(int cpu);
-void arch_send_call_function_ipi(cpumask_t mask);
+extern void arch_send_call_function_ipi_mask(const struct cpumask *mask);
 
 #else
 

@@ -450,7 +450,6 @@
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/slab.h>
 #include <linux/pci.h>
 #include <linux/eisa.h>
 #include <linux/delay.h>
@@ -467,6 +466,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/moduleparam.h>
 #include <linux/bitops.h>
+#include <linux/gfp.h>
 
 #include <asm/io.h>
 #include <asm/dma.h>
@@ -479,7 +479,8 @@
 
 #include "de4x5.h"
 
-static char version[] __devinitdata = "de4x5.c:V0.546 2001/02/22 davies@maniac.ultranet.com\n";
+static const char version[] __devinitconst =
+	KERN_INFO "de4x5.c:V0.546 2001/02/22 davies@maniac.ultranet.com\n";
 
 #define c_char const char
 
@@ -894,7 +895,8 @@ static struct {
 ** Public Functions
 */
 static int     de4x5_open(struct net_device *dev);
-static int     de4x5_queue_pkt(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t de4x5_queue_pkt(struct sk_buff *skb,
+					 struct net_device *dev);
 static irqreturn_t de4x5_interrupt(int irq, void *dev_id);
 static int     de4x5_close(struct net_device *dev);
 static struct  net_device_stats *de4x5_get_stats(struct net_device *dev);
@@ -1077,6 +1079,18 @@ static int (*dc_infoblock[])(struct net_device *dev, u_char, u_char *) = {
     mdelay(2);                           /* Wait for 2ms */\
 }
 
+static const struct net_device_ops de4x5_netdev_ops = {
+    .ndo_open		= de4x5_open,
+    .ndo_stop		= de4x5_close,
+    .ndo_start_xmit	= de4x5_queue_pkt,
+    .ndo_get_stats	= de4x5_get_stats,
+    .ndo_set_multicast_list = set_multicast_list,
+    .ndo_do_ioctl	= de4x5_ioctl,
+    .ndo_change_mtu	= eth_change_mtu,
+    .ndo_set_mac_address= eth_mac_addr,
+    .ndo_validate_addr	= eth_validate_addr,
+};
+
 
 static int __devinit
 de4x5_hw_init(struct net_device *dev, u_long iobase, struct device *gendev)
@@ -1085,9 +1099,8 @@ de4x5_hw_init(struct net_device *dev, u_long iobase, struct device *gendev)
     struct de4x5_private *lp = netdev_priv(dev);
     struct pci_dev *pdev = NULL;
     int i, status=0;
-    DECLARE_MAC_BUF(mac);
 
-    gendev->driver_data = dev;
+    dev_set_drvdata(gendev, dev);
 
     /* Ensure we're not sleeping */
     if (lp->bus == EISA) {
@@ -1119,10 +1132,10 @@ de4x5_hw_init(struct net_device *dev, u_long iobase, struct device *gendev)
     }
 
     dev->base_addr = iobase;
-    printk ("%s: %s at 0x%04lx", gendev->bus_id, name, iobase);
+    printk ("%s: %s at 0x%04lx", dev_name(gendev), name, iobase);
 
     status = get_hw_addr(dev);
-    printk(", h/w address %s\n", print_mac(mac, dev->dev_addr));
+    printk(", h/w address %pM\n", dev->dev_addr);
 
     if (status != 0) {
 	printk("      which has an Ethernet PROM CRC error.\n");
@@ -1154,7 +1167,7 @@ de4x5_hw_init(struct net_device *dev, u_long iobase, struct device *gendev)
             }
         }
 	lp->fdx = lp->params.fdx;
-	sprintf(lp->adapter_name,"%s (%s)", name, gendev->bus_id);
+	sprintf(lp->adapter_name,"%s (%s)", name, dev_name(gendev));
 
 	lp->dma_size = (NUM_RX_DESC + NUM_TX_DESC) * sizeof(struct de4x5_desc);
 #if defined(__alpha__) || defined(__powerpc__) || defined(CONFIG_SPARC) || defined(DE4X5_DO_MEMCPY)
@@ -1259,13 +1272,7 @@ de4x5_hw_init(struct net_device *dev, u_long iobase, struct device *gendev)
 
     /* The DE4X5-specific entries in the device structure. */
     SET_NETDEV_DEV(dev, gendev);
-    dev->open = &de4x5_open;
-    dev->hard_start_xmit = &de4x5_queue_pkt;
-    dev->stop = &de4x5_close;
-    dev->get_stats = &de4x5_get_stats;
-    dev->set_multicast_list = &set_multicast_list;
-    dev->do_ioctl = &de4x5_ioctl;
-
+    dev->netdev_ops = &de4x5_netdev_ops;
     dev->mem_start = 0;
 
     /* Fill in the generic fields of the device structure. */
@@ -1450,18 +1457,16 @@ de4x5_sw_reset(struct net_device *dev)
 /*
 ** Writes a socket buffer address to the next available transmit descriptor.
 */
-static int
+static netdev_tx_t
 de4x5_queue_pkt(struct sk_buff *skb, struct net_device *dev)
 {
     struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
-    int status = 0;
     u_long flags = 0;
 
     netif_stop_queue(dev);
-    if (!lp->tx_enable) {                   /* Cannot send for now */
-	return -1;
-    }
+    if (!lp->tx_enable)                   /* Cannot send for now */
+	return NETDEV_TX_LOCKED;
 
     /*
     ** Clean out the TX ring asynchronously to interrupts - sometimes the
@@ -1474,7 +1479,7 @@ de4x5_queue_pkt(struct sk_buff *skb, struct net_device *dev)
 
     /* Test if cache is already locked - requeue skb if so */
     if (test_and_set_bit(0, (void *)&lp->cache.lock) && !lp->interrupt)
-	return -1;
+	return NETDEV_TX_LOCKED;
 
     /* Transmit descriptor ring full or stale skb */
     if (netif_queue_stopped(dev) || (u_long) lp->tx_skb[lp->tx_new] > 1) {
@@ -1515,7 +1520,7 @@ de4x5_queue_pkt(struct sk_buff *skb, struct net_device *dev)
 
     lp->cache.lock = 0;
 
-    return status;
+    return NETDEV_TX_OK;
 }
 
 /*
@@ -1647,7 +1652,6 @@ de4x5_rx(struct net_device *dev)
 		    netif_rx(skb);
 
 		    /* Update stats */
-		    dev->last_rx = jiffies;
 		    lp->stats.rx_packets++;
  		    lp->stats.rx_bytes += pkt_len;
 		}
@@ -1947,9 +1951,9 @@ static void
 SetMulticastFilter(struct net_device *dev)
 {
     struct de4x5_private *lp = netdev_priv(dev);
-    struct dev_mc_list *dmi=dev->mc_list;
+    struct dev_mc_list *dmi;
     u_long iobase = dev->base_addr;
-    int i, j, bit, byte;
+    int i, bit, byte;
     u16 hashcode;
     u32 omr, crc;
     char *pa;
@@ -1959,12 +1963,11 @@ SetMulticastFilter(struct net_device *dev)
     omr &= ~(OMR_PR | OMR_PM);
     pa = build_setup_frame(dev, ALL);        /* Build the basic frame */
 
-    if ((dev->flags & IFF_ALLMULTI) || (dev->mc_count > 14)) {
+    if ((dev->flags & IFF_ALLMULTI) || (netdev_mc_count(dev) > 14)) {
 	omr |= OMR_PM;                       /* Pass all multicasts */
     } else if (lp->setup_f == HASH_PERF) {   /* Hash Filtering */
-	for (i=0;i<dev->mc_count;i++) {      /* for each address in the list */
-	    addrs=dmi->dmi_addr;
-	    dmi=dmi->next;
+	netdev_for_each_mc_addr(dmi, dev) {
+	    addrs = dmi->dmi_addr;
 	    if ((*addrs & 0x01) == 1) {      /* multicast address? */
 		crc = ether_crc_le(ETH_ALEN, addrs);
 		hashcode = crc & HASH_BITS;  /* hashcode is 9 LSb of CRC */
@@ -1980,9 +1983,8 @@ SetMulticastFilter(struct net_device *dev)
 	    }
 	}
     } else {                                 /* Perfect filtering */
-	for (j=0; j<dev->mc_count; j++) {
-	    addrs=dmi->dmi_addr;
-	    dmi=dmi->next;
+	netdev_for_each_mc_addr(dmi, dev) {
+	    addrs = dmi->dmi_addr;
 	    for (i=0; i<ETH_ALEN; i++) {
 		*(pa + (i&1)) = *addrs++;
 		if (i & 0x01) pa += 4;
@@ -2089,7 +2091,7 @@ static int __devexit de4x5_eisa_remove (struct device *device)
 	struct net_device *dev;
 	u_long iobase;
 
-	dev = device->driver_data;
+	dev = dev_get_drvdata(device);
 	iobase = dev->base_addr;
 
 	unregister_netdev (dev);
@@ -2333,7 +2335,7 @@ static void __devexit de4x5_pci_remove (struct pci_dev *pdev)
 	struct net_device *dev;
 	u_long iobase;
 
-	dev = pdev->dev.driver_data;
+	dev = dev_get_drvdata(&pdev->dev);
 	iobase = dev->base_addr;
 
 	unregister_netdev (dev);
@@ -3937,8 +3939,8 @@ PCI_signature(char *name, struct de4x5_private *lp)
 	strcpy(name, "DE434/5");
 	return status;
     } else {                           /* Search for a DEC name in the SROM */
-	int i = *((char *)&lp->srom + 19) * 3;
-	strncpy(name, (char *)&lp->srom + 26 + i, 8);
+	int tmp = *((char *)&lp->srom + 19) * 3;
+	strncpy(name, (char *)&lp->srom + 26 + tmp, 8);
     }
     name[8] = '\0';
     for (i=0; i<siglen; i++) {
@@ -5054,7 +5056,7 @@ mii_get_phy(struct net_device *dev)
 	if ((id == 0) || (id == 65535)) continue;  /* Valid ID? */
 	for (j=0; j<limit; j++) {                  /* Search PHY table */
 	    if (id != phy_info[j].id) continue;    /* ID match? */
-	    for (k=0; lp->phy[k].id && (k < DE4X5_MAX_PHY); k++);
+	    for (k=0; k < DE4X5_MAX_PHY && lp->phy[k].id; k++);
 	    if (k < DE4X5_MAX_PHY) {
 		memcpy((char *)&lp->phy[k],
 		       (char *)&phy_info[j], sizeof(struct phy_table));
@@ -5067,7 +5069,7 @@ mii_get_phy(struct net_device *dev)
 	    break;
 	}
 	if ((j == limit) && (i < DE4X5_MAX_MII)) {
-	    for (k=0; lp->phy[k].id && (k < DE4X5_MAX_PHY); k++);
+	    for (k=0; k < DE4X5_MAX_PHY && lp->phy[k].id; k++);
 	    lp->phy[k].addr = i;
 	    lp->phy[k].id = id;
 	    lp->phy[k].spd.reg = GENERIC_REG;      /* ANLPA register         */
@@ -5086,7 +5088,7 @@ mii_get_phy(struct net_device *dev)
   purgatory:
     lp->active = 0;
     if (lp->phy[0].id) {                           /* Reset the PHY devices */
-	for (k=0; lp->phy[k].id && (k < DE4X5_MAX_PHY); k++) { /*For each PHY*/
+	for (k=0; k < DE4X5_MAX_PHY && lp->phy[k].id; k++) { /*For each PHY*/
 	    mii_wr(MII_CR_RST, MII_CR, lp->phy[k].addr, DE4X5_MII);
 	    while (mii_rd(MII_CR, lp->phy[k].addr, DE4X5_MII) & MII_CR_RST);
 
@@ -5401,7 +5403,6 @@ static void
 de4x5_dbg_srom(struct de4x5_srom *p)
 {
     int i;
-    DECLARE_MAC_BUF(mac);
 
     if (de4x5_debug & DEBUG_SROM) {
 	printk("Sub-system Vendor ID: %04x\n", *((u_short *)p->sub_vendor_id));
@@ -5410,7 +5411,7 @@ de4x5_dbg_srom(struct de4x5_srom *p)
 	printk("SROM version:         %02x\n", (u_char)(p->version));
 	printk("# controllers:        %02x\n", (u_char)(p->num_controllers));
 
-	printk("Hardware Address:     %s\n", print_mac(mac, p->ieee_addr));
+	printk("Hardware Address:     %pM\n", p->ieee_addr);
 	printk("CRC checksum:         %04x\n", (u_short)(p->chksum));
 	for (i=0; i<64; i++) {
 	    printk("%3d %04x\n", i<<1, (u_short)*((u_short *)p+i));
@@ -5424,12 +5425,10 @@ static void
 de4x5_dbg_rx(struct sk_buff *skb, int len)
 {
     int i, j;
-    DECLARE_MAC_BUF(mac);
-    DECLARE_MAC_BUF(mac2);
 
     if (de4x5_debug & DEBUG_RX) {
-	printk("R: %s <- %s len/SAP:%02x%02x [%d]\n",
-	       print_mac(mac, skb->data), print_mac(mac2, &skb->data[6]),
+	printk("R: %pM <- %pM len/SAP:%02x%02x [%d]\n",
+	       skb->data, &skb->data[6],
 	       (u_char)skb->data[12],
 	       (u_char)skb->data[13],
 	       len);

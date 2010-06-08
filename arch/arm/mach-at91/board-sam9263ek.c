@@ -46,7 +46,9 @@
 #include <mach/board.h>
 #include <mach/gpio.h>
 #include <mach/at91sam9_smc.h>
+#include <mach/at91_shdwc.h>
 
+#include "sam9_smc.h"
 #include "generic.h"
 
 
@@ -55,7 +57,7 @@ static void __init ek_map_io(void)
 	/* Initialize processor: 16.367 MHz crystal */
 	at91sam9263_initialize(16367660);
 
-	/* DGBU on ttyS0. (Rx & Tx only) */
+	/* DBGU on ttyS0. (Rx & Tx only) */
 	at91_register_uart(0, 0, 0);
 
 	/* USART0 on ttyS1. (Rx, Tx, RTS, CTS) */
@@ -203,6 +205,38 @@ static struct atmel_nand_data __initdata ek_nand_data = {
 #endif
 };
 
+static struct sam9_smc_config __initdata ek_nand_smc_config = {
+	.ncs_read_setup		= 0,
+	.nrd_setup		= 1,
+	.ncs_write_setup	= 0,
+	.nwe_setup		= 1,
+
+	.ncs_read_pulse		= 3,
+	.nrd_pulse		= 3,
+	.ncs_write_pulse	= 3,
+	.nwe_pulse		= 3,
+
+	.read_cycle		= 5,
+	.write_cycle		= 5,
+
+	.mode			= AT91_SMC_READMODE | AT91_SMC_WRITEMODE | AT91_SMC_EXNWMODE_DISABLE,
+	.tdf_cycles		= 2,
+};
+
+static void __init ek_add_device_nand(void)
+{
+	/* setup bus-width (8 or 16) */
+	if (ek_nand_data.bus_width_16)
+		ek_nand_smc_config.mode |= AT91_SMC_DBW_16;
+	else
+		ek_nand_smc_config.mode |= AT91_SMC_DBW_8;
+
+	/* configure chip-select 3 (NAND) */
+	sam9_smc_configure(3, &ek_nand_smc_config);
+
+	at91_add_device_nand(&ek_nand_data);
+}
+
 
 /*
  * I2C devices
@@ -330,9 +364,9 @@ static void __init ek_add_device_buttons(void) {}
 
 /*
  * AC97
+ * reset_pin is not connected: NRST
  */
-static struct atmel_ac97_data ek_ac97_data = {
-	.reset_pin	= AT91_PIN_PA13,
+static struct ac97c_platform_data ek_ac97_data = {
 };
 
 
@@ -366,6 +400,23 @@ static struct gpio_led ek_pwm_led[] = {
 	}
 };
 
+/*
+ * CAN
+ */
+static void sam9263ek_transceiver_switch(int on)
+{
+	if (on) {
+		at91_set_gpio_output(AT91_PIN_PA18, 1); /* CANRXEN */
+		at91_set_gpio_output(AT91_PIN_PA19, 0); /* CANRS */
+	} else {
+		at91_set_gpio_output(AT91_PIN_PA18, 0); /* CANRXEN */
+		at91_set_gpio_output(AT91_PIN_PA19, 1); /* CANRS */
+	}
+}
+
+static struct at91_can_data ek_can_data = {
+	.transceiver_switch = sam9263ek_transceiver_switch,
+};
 
 static void __init ek_board_init(void)
 {
@@ -385,7 +436,7 @@ static void __init ek_board_init(void)
 	/* Ethernet */
 	at91_add_device_eth(&ek_macb_data);
 	/* NAND */
-	at91_add_device_nand(&ek_nand_data);
+	ek_add_device_nand();
 	/* I2C */
 	at91_add_device_i2c(ek_i2c_devices, ARRAY_SIZE(ek_i2c_devices));
 	/* LCD Controller */
@@ -397,6 +448,8 @@ static void __init ek_board_init(void)
 	/* LEDs */
 	at91_gpio_leds(ek_leds, ARRAY_SIZE(ek_leds));
 	at91_pwm_leds(ek_pwm_led, ARRAY_SIZE(ek_pwm_led));
+	/* CAN */
+	at91_add_device_can(&ek_can_data);
 }
 
 MACHINE_START(AT91SAM9263EK, "Atmel AT91SAM9263-EK")

@@ -38,7 +38,7 @@ static int dccp_write_timeout(struct sock *sk)
 
 	if (sk->sk_state == DCCP_REQUESTING || sk->sk_state == DCCP_PARTOPEN) {
 		if (icsk->icsk_retransmits != 0)
-			dst_negative_advice(&sk->sk_dst_cache);
+			dst_negative_advice(&sk->sk_dst_cache, sk);
 		retry_until = icsk->icsk_syn_retries ?
 			    : sysctl_dccp_request_retries;
 	} else {
@@ -63,7 +63,7 @@ static int dccp_write_timeout(struct sock *sk)
 			   Golden words :-).
 		   */
 
-			dst_negative_advice(&sk->sk_dst_cache);
+			dst_negative_advice(&sk->sk_dst_cache, sk);
 		}
 
 		retry_until = sysctl_dccp_retries2;
@@ -86,17 +86,6 @@ static int dccp_write_timeout(struct sock *sk)
 static void dccp_retransmit_timer(struct sock *sk)
 {
 	struct inet_connection_sock *icsk = inet_csk(sk);
-
-	/* retransmit timer is used for feature negotiation throughout
-	 * connection.  In this case, no packet is re-transmitted, but rather an
-	 * ack is generated and pending changes are placed into its options.
-	 */
-	if (sk->sk_send_head == NULL) {
-		dccp_pr_debug("feat negotiation retransmit timeout %p\n", sk);
-		if (sk->sk_state == DCCP_OPEN)
-			dccp_send_ack(sk);
-		goto backoff;
-	}
 
 	/*
 	 * More than than 4MSL (8 minutes) has passed, a RESET(aborted) was
@@ -126,7 +115,6 @@ static void dccp_retransmit_timer(struct sock *sk)
 		return;
 	}
 
-backoff:
 	icsk->icsk_backoff++;
 
 	icsk->icsk_rto = min(icsk->icsk_rto << 1, DCCP_RTO_MAX);

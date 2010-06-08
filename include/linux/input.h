@@ -16,7 +16,7 @@
 #include <sys/time.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
-#include <asm/types.h>
+#include <linux/types.h>
 #endif
 
 /*
@@ -53,14 +53,15 @@ struct input_absinfo {
 	__s32 maximum;
 	__s32 fuzz;
 	__s32 flat;
+	__s32 resolution;
 };
 
 #define EVIOCGVERSION		_IOR('E', 0x01, int)			/* get driver version */
 #define EVIOCGID		_IOR('E', 0x02, struct input_id)	/* get device ID */
-#define EVIOCGREP		_IOR('E', 0x03, int[2])			/* get repeat settings */
-#define EVIOCSREP		_IOW('E', 0x03, int[2])			/* set repeat settings */
-#define EVIOCGKEYCODE		_IOR('E', 0x04, int[2])			/* get keycode */
-#define EVIOCSKEYCODE		_IOW('E', 0x04, int[2])			/* set keycode */
+#define EVIOCGREP		_IOR('E', 0x03, unsigned int[2])	/* get repeat settings */
+#define EVIOCSREP		_IOW('E', 0x03, unsigned int[2])	/* set repeat settings */
+#define EVIOCGKEYCODE		_IOR('E', 0x04, unsigned int[2])	/* get keycode */
+#define EVIOCSKEYCODE		_IOW('E', 0x04, unsigned int[2])	/* set keycode */
 
 #define EVIOCGNAME(len)		_IOC(_IOC_READ, 'E', 0x06, len)		/* get device name */
 #define EVIOCGPHYS(len)		_IOC(_IOC_READ, 'E', 0x07, len)		/* get physical location */
@@ -106,6 +107,7 @@ struct input_absinfo {
 
 #define SYN_REPORT		0
 #define SYN_CONFIG		1
+#define SYN_MT_REPORT		2
 
 /*
  * Keys and buttons
@@ -374,8 +376,9 @@ struct input_absinfo {
 #define KEY_DISPLAY_OFF		245	/* display device to off state */
 
 #define KEY_WIMAX		246
+#define KEY_RFKILL		247	/* Key that controls all radios */
 
-/* Range 248 - 255 is reserved for special needs of AT keyboard driver */
+/* Code 255 is reserved for special needs of AT keyboard driver */
 
 #define BTN_MISC		0x100
 #define BTN_0			0x100
@@ -445,6 +448,7 @@ struct input_absinfo {
 #define BTN_STYLUS2		0x14c
 #define BTN_TOOL_DOUBLETAP	0x14d
 #define BTN_TOOL_TRIPLETAP	0x14e
+#define BTN_TOOL_QUADTAP	0x14f	/* Four fingers on trackpad */
 
 #define BTN_WHEEL		0x150
 #define BTN_GEAR_DOWN		0x150
@@ -592,6 +596,51 @@ struct input_absinfo {
 #define KEY_NUMERIC_STAR	0x20a
 #define KEY_NUMERIC_POUND	0x20b
 
+#define KEY_CAMERA_FOCUS	0x210
+#define KEY_WPS_BUTTON		0x211	/* WiFi Protected Setup key */
+
+#define BTN_TRIGGER_HAPPY		0x2c0
+#define BTN_TRIGGER_HAPPY1		0x2c0
+#define BTN_TRIGGER_HAPPY2		0x2c1
+#define BTN_TRIGGER_HAPPY3		0x2c2
+#define BTN_TRIGGER_HAPPY4		0x2c3
+#define BTN_TRIGGER_HAPPY5		0x2c4
+#define BTN_TRIGGER_HAPPY6		0x2c5
+#define BTN_TRIGGER_HAPPY7		0x2c6
+#define BTN_TRIGGER_HAPPY8		0x2c7
+#define BTN_TRIGGER_HAPPY9		0x2c8
+#define BTN_TRIGGER_HAPPY10		0x2c9
+#define BTN_TRIGGER_HAPPY11		0x2ca
+#define BTN_TRIGGER_HAPPY12		0x2cb
+#define BTN_TRIGGER_HAPPY13		0x2cc
+#define BTN_TRIGGER_HAPPY14		0x2cd
+#define BTN_TRIGGER_HAPPY15		0x2ce
+#define BTN_TRIGGER_HAPPY16		0x2cf
+#define BTN_TRIGGER_HAPPY17		0x2d0
+#define BTN_TRIGGER_HAPPY18		0x2d1
+#define BTN_TRIGGER_HAPPY19		0x2d2
+#define BTN_TRIGGER_HAPPY20		0x2d3
+#define BTN_TRIGGER_HAPPY21		0x2d4
+#define BTN_TRIGGER_HAPPY22		0x2d5
+#define BTN_TRIGGER_HAPPY23		0x2d6
+#define BTN_TRIGGER_HAPPY24		0x2d7
+#define BTN_TRIGGER_HAPPY25		0x2d8
+#define BTN_TRIGGER_HAPPY26		0x2d9
+#define BTN_TRIGGER_HAPPY27		0x2da
+#define BTN_TRIGGER_HAPPY28		0x2db
+#define BTN_TRIGGER_HAPPY29		0x2dc
+#define BTN_TRIGGER_HAPPY30		0x2dd
+#define BTN_TRIGGER_HAPPY31		0x2de
+#define BTN_TRIGGER_HAPPY32		0x2df
+#define BTN_TRIGGER_HAPPY33		0x2e0
+#define BTN_TRIGGER_HAPPY34		0x2e1
+#define BTN_TRIGGER_HAPPY35		0x2e2
+#define BTN_TRIGGER_HAPPY36		0x2e3
+#define BTN_TRIGGER_HAPPY37		0x2e4
+#define BTN_TRIGGER_HAPPY38		0x2e5
+#define BTN_TRIGGER_HAPPY39		0x2e6
+#define BTN_TRIGGER_HAPPY40		0x2e7
+
 /* We avoid low common keys in module aliases so they don't get huge. */
 #define KEY_MIN_INTERESTING	KEY_MUTE
 #define KEY_MAX			0x2ff
@@ -644,6 +693,19 @@ struct input_absinfo {
 #define ABS_TOOL_WIDTH		0x1c
 #define ABS_VOLUME		0x20
 #define ABS_MISC		0x28
+
+#define ABS_MT_TOUCH_MAJOR	0x30	/* Major axis of touching ellipse */
+#define ABS_MT_TOUCH_MINOR	0x31	/* Minor axis (omit if circular) */
+#define ABS_MT_WIDTH_MAJOR	0x32	/* Major axis of approaching ellipse */
+#define ABS_MT_WIDTH_MINOR	0x33	/* Minor axis (omit if circular) */
+#define ABS_MT_ORIENTATION	0x34	/* Ellipse orientation */
+#define ABS_MT_POSITION_X	0x35	/* Center X ellipse position */
+#define ABS_MT_POSITION_Y	0x36	/* Center Y ellipse position */
+#define ABS_MT_TOOL_TYPE	0x37	/* Type of touching device */
+#define ABS_MT_BLOB_ID		0x38	/* Group a set of packets as a blob */
+#define ABS_MT_TRACKING_ID	0x39	/* Unique ID of initiated contact */
+#define ABS_MT_PRESSURE		0x3a	/* Pressure on contact area */
+
 #define ABS_MAX			0x3f
 #define ABS_CNT			(ABS_MAX+1)
 
@@ -659,6 +721,12 @@ struct input_absinfo {
 #define SW_RADIO		SW_RFKILL_ALL	/* deprecated */
 #define SW_MICROPHONE_INSERT	0x04  /* set = inserted */
 #define SW_DOCK			0x05  /* set = plugged into dock */
+#define SW_LINEOUT_INSERT	0x06  /* set = inserted */
+#define SW_JACK_PHYSICAL_INSERT 0x07  /* set = mechanical switch set */
+#define SW_VIDEOOUT_INSERT	0x08  /* set = inserted */
+#define SW_CAMERA_LENS_COVER	0x09  /* set = lens covered */
+#define SW_KEYPAD_SLIDE		0x0a  /* set = keypad slide out */
+#define SW_FRONT_PROXIMITY	0x0b  /* set = front proximity sensor active */
 #define SW_MAX			0x0f
 #define SW_CNT			(SW_MAX+1)
 
@@ -738,6 +806,12 @@ struct input_absinfo {
 #define BUS_HOST		0x19
 #define BUS_GSC			0x1A
 #define BUS_ATARI		0x1B
+
+/*
+ * MT_TOOL types
+ */
+#define MT_TOOL_FINGER		0
+#define MT_TOOL_PEN		1
 
 /*
  * Values describing the status of a force-feedback effect
@@ -866,7 +940,7 @@ struct ff_periodic_effect {
 	struct ff_envelope envelope;
 
 	__u32 custom_len;
-	__s16 *custom_data;
+	__s16 __user *custom_data;
 };
 
 /**
@@ -992,9 +1066,12 @@ struct ff_effect {
  * @keycodesize: size of elements in keycode table
  * @keycode: map of scancodes to keycodes for this device
  * @setkeycode: optional method to alter current keymap, used to implement
- *	sparse keymaps. If not supplied default mechanism will be used
+ *	sparse keymaps. If not supplied default mechanism will be used.
+ *	The method is being called while holding event_lock and thus must
+ *	not sleep
  * @getkeycode: optional method to retrieve current keymap. If not supplied
- *	default mechanism will be used
+ *	default mechanism will be used. The method is being called while
+ *	holding event_lock and thus must not sleep
  * @ff: force feedback structure associated with the device if device
  *	supports force feedback effects
  * @repeat_key: stores key code of the last key pressed; used to implement
@@ -1011,6 +1088,7 @@ struct ff_effect {
  * @absmin: minimum values for events coming from absolute axes
  * @absfuzz: describes noisiness for axes
  * @absflat: size of the center flat position (used by joydev)
+ * @absres: resolution used for events coming form absolute axes
  * @open: this method is called when the very first user calls
  *	input_open_device(). The driver must prepare the device
  *	to start generating events (start polling thread,
@@ -1064,8 +1142,10 @@ struct input_dev {
 	unsigned int keycodemax;
 	unsigned int keycodesize;
 	void *keycode;
-	int (*setkeycode)(struct input_dev *dev, int scancode, int keycode);
-	int (*getkeycode)(struct input_dev *dev, int scancode, int *keycode);
+	int (*setkeycode)(struct input_dev *dev,
+			  unsigned int scancode, unsigned int keycode);
+	int (*getkeycode)(struct input_dev *dev,
+			  unsigned int scancode, unsigned int *keycode);
 
 	struct ff_device *ff;
 
@@ -1086,6 +1166,7 @@ struct input_dev {
 	int absmin[ABS_MAX + 1];
 	int absfuzz[ABS_MAX + 1];
 	int absflat[ABS_MAX + 1];
+	int absres[ABS_MAX + 1];
 
 	int (*open)(struct input_dev *dev);
 	void (*close)(struct input_dev *dev);
@@ -1098,7 +1179,7 @@ struct input_dev {
 	struct mutex mutex;
 
 	unsigned int users;
-	int going_away;
+	bool going_away;
 
 	struct device dev;
 
@@ -1164,6 +1245,10 @@ struct input_handle;
  * @event: event handler. This method is being called by input core with
  *	interrupts disabled and dev->event_lock spinlock held and so
  *	it may not sleep
+ * @filter: similar to @event; separates normal event handlers from
+ *	"filters".
+ * @match: called after comparing device's id with handler's id_table
+ *	to perform fine-grained matching between device and handler
  * @connect: called when attaching a handler to an input device
  * @disconnect: disconnects a handler from input device
  * @start: starts handler for given handle. This function is called by
@@ -1175,8 +1260,6 @@ struct input_handle;
  * @name: name of the handler, to be shown in /proc/bus/input/handlers
  * @id_table: pointer to a table of input_device_ids this driver can
  *	handle
- * @blacklist: pointer to a table of input_device_ids this driver should
- *	ignore even if they match @id_table
  * @h_list: list of input handles associated with the handler
  * @node: for placing the driver onto input_handler_list
  *
@@ -1184,6 +1267,11 @@ struct input_handle;
  * are likely several handlers attached to any given input device at the
  * same time. All of them will get their copy of input event generated by
  * the device.
+ *
+ * The very same structure is used to implement input filters. Input core
+ * allows filters to run first and will not pass event to regular handlers
+ * if any of the filters indicate that the event should be filtered (by
+ * returning %true from their filter() method).
  *
  * Note that input core serializes calls to connect() and disconnect()
  * methods.
@@ -1193,6 +1281,8 @@ struct input_handler {
 	void *private;
 
 	void (*event)(struct input_handle *handle, unsigned int type, unsigned int code, int value);
+	bool (*filter)(struct input_handle *handle, unsigned int type, unsigned int code, int value);
+	bool (*match)(struct input_handler *handler, struct input_dev *dev);
 	int (*connect)(struct input_handler *handler, struct input_dev *dev, const struct input_device_id *id);
 	void (*disconnect)(struct input_handle *handle);
 	void (*start)(struct input_handle *handle);
@@ -1202,7 +1292,6 @@ struct input_handler {
 	const char *name;
 
 	const struct input_device_id *id_table;
-	const struct input_device_id *blacklist;
 
 	struct list_head	h_list;
 	struct list_head	node;
@@ -1264,6 +1353,9 @@ void input_unregister_device(struct input_dev *);
 int __must_check input_register_handler(struct input_handler *);
 void input_unregister_handler(struct input_handler *);
 
+int input_handler_for_each_handle(struct input_handler *, void *data,
+				  int (*fn)(struct input_handle *, void *));
+
 int input_register_handle(struct input_handle *);
 void input_unregister_handle(struct input_handle *);
 
@@ -1308,6 +1400,11 @@ static inline void input_sync(struct input_dev *dev)
 	input_event(dev, EV_SYN, SYN_REPORT, 0);
 }
 
+static inline void input_mt_sync(struct input_dev *dev)
+{
+	input_event(dev, EV_SYN, SYN_MT_REPORT, 0);
+}
+
 void input_set_capability(struct input_dev *dev, unsigned int type, unsigned int code);
 
 static inline void input_set_abs_params(struct input_dev *dev, int axis, int min, int max, int fuzz, int flat)
@@ -1320,8 +1417,10 @@ static inline void input_set_abs_params(struct input_dev *dev, int axis, int min
 	dev->absbit[BIT_WORD(axis)] |= BIT_MASK(axis);
 }
 
-int input_get_keycode(struct input_dev *dev, int scancode, int *keycode);
-int input_set_keycode(struct input_dev *dev, int scancode, int keycode);
+int input_get_keycode(struct input_dev *dev,
+		      unsigned int scancode, unsigned int *keycode);
+int input_set_keycode(struct input_dev *dev,
+		      unsigned int scancode, unsigned int keycode);
 
 extern struct class input_class;
 
@@ -1347,6 +1446,10 @@ extern struct class input_class;
  * methods; erase() is optional. set_gain() and set_autocenter() need
  * only be implemented if driver sets up FF_GAIN and FF_AUTOCENTER
  * bits.
+ *
+ * Note that playback(), set_gain() and set_autocenter() are called with
+ * dev->event_lock spinlock held and interrupts off and thus may not
+ * sleep.
  */
 struct ff_device {
 	int (*upload)(struct input_dev *dev, struct ff_effect *effect,

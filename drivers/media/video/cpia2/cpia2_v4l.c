@@ -26,7 +26,7 @@
  *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  *  Stripped of 2.4 stuff ready for main kernel submit by
- *		Alan Cox <alan@redhat.com>
+ *		Alan Cox <alan@lxorguk.ukuu.org.uk>
  ****************************************************************************/
 
 #include <linux/version.h>
@@ -37,16 +37,12 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/init.h>
+#include <linux/videodev.h>
+#include <linux/stringify.h>
 #include <media/v4l2-ioctl.h>
 
 #include "cpia2.h"
 #include "cpia2dev.h"
-
-
-//#define _CPIA2_DEBUG_
-
-#define MAKE_STRING_1(x)	#x
-#define MAKE_STRING(x)	MAKE_STRING_1(x)
 
 static int video_nr = -1;
 module_param(video_nr, int, 0);
@@ -59,26 +55,26 @@ MODULE_PARM_DESC(buffer_size, "Size for each frame buffer in bytes (default 68k)
 static int num_buffers = 3;
 module_param(num_buffers, int, 0);
 MODULE_PARM_DESC(num_buffers, "Number of frame buffers (1-"
-		 MAKE_STRING(VIDEO_MAX_FRAME) ", default 3)");
+		 __stringify(VIDEO_MAX_FRAME) ", default 3)");
 
 static int alternate = DEFAULT_ALT;
 module_param(alternate, int, 0);
-MODULE_PARM_DESC(alternate, "USB Alternate (" MAKE_STRING(USBIF_ISO_1) "-"
-		 MAKE_STRING(USBIF_ISO_6) ", default "
-		 MAKE_STRING(DEFAULT_ALT) ")");
+MODULE_PARM_DESC(alternate, "USB Alternate (" __stringify(USBIF_ISO_1) "-"
+		 __stringify(USBIF_ISO_6) ", default "
+		 __stringify(DEFAULT_ALT) ")");
 
 static int flicker_freq = 60;
 module_param(flicker_freq, int, 0);
-MODULE_PARM_DESC(flicker_freq, "Flicker frequency (" MAKE_STRING(50) "or"
-		 MAKE_STRING(60) ", default "
-		 MAKE_STRING(60) ")");
+MODULE_PARM_DESC(flicker_freq, "Flicker frequency (" __stringify(50) "or"
+		 __stringify(60) ", default "
+		 __stringify(60) ")");
 
 static int flicker_mode = NEVER_FLICKER;
 module_param(flicker_mode, int, 0);
 MODULE_PARM_DESC(flicker_mode,
-		 "Flicker supression (" MAKE_STRING(NEVER_FLICKER) "or"
-		 MAKE_STRING(ANTI_FLICKER_ON) ", default "
-		 MAKE_STRING(NEVER_FLICKER) ")");
+		 "Flicker supression (" __stringify(NEVER_FLICKER) "or"
+		 __stringify(ANTI_FLICKER_ON) ", default "
+		 __stringify(NEVER_FLICKER) ")");
 
 MODULE_AUTHOR("Steve Miller (STMicroelectronics) <steve.miller@st.com>");
 MODULE_DESCRIPTION("V4L-driver for STMicroelectronics CPiA2 based cameras");
@@ -239,7 +235,7 @@ static struct v4l2_queryctrl controls[] = {
  *  cpia2_open
  *
  *****************************************************************************/
-static int cpia2_open(struct inode *inode, struct file *file)
+static int cpia2_open(struct file *file)
 {
 	struct camera_data *cam = video_drvdata(file);
 	int retval = 0;
@@ -302,7 +298,7 @@ err_return:
  *  cpia2_close
  *
  *****************************************************************************/
-static int cpia2_close(struct inode *inode, struct file *file)
+static int cpia2_close(struct file *file)
 {
 	struct video_device *dev = video_devdata(file);
 	struct camera_data *cam = video_get_drvdata(dev);
@@ -1063,7 +1059,7 @@ static int ioctl_querymenu(void *arg,struct camera_data *cam)
 
 	switch(m->id) {
 	case CPIA2_CID_FLICKER_MODE:
-		if(m->index < 0 || m->index >= NUM_FLICKER_CONTROLS)
+		if (m->index >= NUM_FLICKER_CONTROLS)
 			return -EINVAL;
 
 		strcpy(m->name, flicker_controls[m->index].name);
@@ -1081,14 +1077,14 @@ static int ioctl_querymenu(void *arg,struct camera_data *cam)
 					maximum = i;
 			}
 		}
-		if(m->index < 0 || m->index > maximum)
+		if (m->index > maximum)
 			return -EINVAL;
 
 		strcpy(m->name, framerate_controls[m->index].name);
 		break;
 	    }
 	case CPIA2_CID_LIGHTS:
-		if(m->index < 0 || m->index >= NUM_LIGHTS_CONTROLS)
+		if (m->index >= NUM_LIGHTS_CONTROLS)
 			return -EINVAL;
 
 		strcpy(m->name, lights_controls[m->index].name);
@@ -1572,11 +1568,10 @@ static int ioctl_dqbuf(void *arg,struct camera_data *cam, struct file *file)
  *  cpia2_ioctl
  *
  *****************************************************************************/
-static int cpia2_do_ioctl(struct inode *inode, struct file *file,
-			  unsigned int ioctl_nr, void *arg)
+static long cpia2_do_ioctl(struct file *file, unsigned int cmd, void *arg)
 {
 	struct camera_data *cam = video_drvdata(file);
-	int retval = 0;
+	long retval = 0;
 
 	if (!cam)
 		return -ENOTTY;
@@ -1591,7 +1586,7 @@ static int cpia2_do_ioctl(struct inode *inode, struct file *file,
 	}
 
 	/* Priority check */
-	switch (ioctl_nr) {
+	switch (cmd) {
 	case VIDIOCSWIN:
 	case VIDIOCMCAPTURE:
 	case VIDIOC_S_FMT:
@@ -1618,7 +1613,7 @@ static int cpia2_do_ioctl(struct inode *inode, struct file *file,
 		break;
 	}
 
-	switch (ioctl_nr) {
+	switch (cmd) {
 	case VIDIOCGCAP:	/* query capabilities */
 		retval = ioctl_cap_query(arg, cam);
 		break;
@@ -1683,7 +1678,7 @@ static int cpia2_do_ioctl(struct inode *inode, struct file *file,
 	case VIDIOC_ENUMINPUT:
 	case VIDIOC_G_INPUT:
 	case VIDIOC_S_INPUT:
-		retval = ioctl_input(ioctl_nr, arg,cam);
+		retval = ioctl_input(cmd, arg, cam);
 		break;
 
 	case VIDIOC_ENUM_FMT:
@@ -1842,10 +1837,10 @@ static int cpia2_do_ioctl(struct inode *inode, struct file *file,
 	return retval;
 }
 
-static int cpia2_ioctl(struct inode *inode, struct file *file,
-		       unsigned int ioctl_nr, unsigned long iarg)
+static long cpia2_ioctl(struct file *file,
+		       unsigned int cmd, unsigned long arg)
 {
-	return video_usercopy(inode, file, ioctl_nr, iarg, cpia2_do_ioctl);
+	return video_usercopy(file, cmd, arg, cpia2_do_ioctl);
 }
 
 /******************************************************************************
@@ -1913,24 +1908,19 @@ static void reset_camera_struct_v4l(struct camera_data *cam)
 /***
  * The v4l video device structure initialized for this device
  ***/
-static const struct file_operations fops_template = {
+static const struct v4l2_file_operations fops_template = {
 	.owner		= THIS_MODULE,
 	.open		= cpia2_open,
 	.release	= cpia2_close,
 	.read		= cpia2_v4l_read,
 	.poll		= cpia2_v4l_poll,
 	.ioctl		= cpia2_ioctl,
-	.llseek		= no_llseek,
-#ifdef CONFIG_COMPAT
-	.compat_ioctl	= v4l_compat_ioctl32,
-#endif
 	.mmap		= cpia2_mmap,
 };
 
 static struct video_device cpia2_template = {
 	/* I could not find any place for the old .initialize initializer?? */
 	.name=		"CPiA2 Camera",
-	.minor=		-1,
 	.fops=		&fops_template,
 	.release=	video_device_release,
 };
@@ -1971,9 +1961,9 @@ void cpia2_unregister_camera(struct camera_data *cam)
 	if (!cam->open_count) {
 		video_unregister_device(cam->vdev);
 	} else {
-		LOG("/dev/video%d removed while open, "
-		    "deferring video_unregister_device\n",
-		    cam->vdev->num);
+		LOG("%s removed while open, deferring "
+		    "video_unregister_device\n",
+		    video_device_node_name(cam->vdev));
 	}
 }
 

@@ -14,20 +14,22 @@
 #include <linux/init.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
+#include <linux/slab.h>
 
 #include <mach/hardware.h>
 #include <asm/mach-types.h>
 #include <asm/mach/map.h>
 
-#include <mach/tc.h>
-#include <mach/control.h>
-#include <mach/board.h>
-#include <mach/mmc.h>
-#include <mach/mux.h>
+#include <plat/tc.h>
+#include <plat/control.h>
+#include <plat/board.h>
+#include <plat/mmc.h>
+#include <plat/mux.h>
 #include <mach/gpio.h>
-#include <mach/menelaus.h>
-#include <mach/mcbsp.h>
-#include <mach/dsp_common.h>
+#include <plat/menelaus.h>
+#include <plat/mcbsp.h>
+#include <plat/dsp_common.h>
+#include <plat/omap44xx.h>
 
 #if	defined(CONFIG_OMAP_DSP) || defined(CONFIG_OMAP_DSP_MODULE)
 
@@ -113,17 +115,17 @@ static void omap_init_kp(void)
 		omap_cfg_reg(E19_1610_KBR4);
 		omap_cfg_reg(N19_1610_KBR5);
 	} else if (machine_is_omap_perseus2() || machine_is_omap_fsample()) {
-		omap_cfg_reg(E2_730_KBR0);
-		omap_cfg_reg(J7_730_KBR1);
-		omap_cfg_reg(E1_730_KBR2);
-		omap_cfg_reg(F3_730_KBR3);
-		omap_cfg_reg(D2_730_KBR4);
+		omap_cfg_reg(E2_7XX_KBR0);
+		omap_cfg_reg(J7_7XX_KBR1);
+		omap_cfg_reg(E1_7XX_KBR2);
+		omap_cfg_reg(F3_7XX_KBR3);
+		omap_cfg_reg(D2_7XX_KBR4);
 
-		omap_cfg_reg(C2_730_KBC0);
-		omap_cfg_reg(D3_730_KBC1);
-		omap_cfg_reg(E4_730_KBC2);
-		omap_cfg_reg(F4_730_KBC3);
-		omap_cfg_reg(E3_730_KBC4);
+		omap_cfg_reg(C2_7XX_KBC0);
+		omap_cfg_reg(D3_7XX_KBC1);
+		omap_cfg_reg(E4_7XX_KBC2);
+		omap_cfg_reg(F4_7XX_KBC3);
+		omap_cfg_reg(E3_7XX_KBC4);
 	} else if (machine_is_omap_h4()) {
 		omap_cfg_reg(T19_24XX_KBR0);
 		omap_cfg_reg(R19_24XX_KBR1);
@@ -192,202 +194,120 @@ void omap_mcbsp_register_board_cfg(struct omap_mcbsp_platform_data *config,
 
 /*-------------------------------------------------------------------------*/
 
-#if	defined(CONFIG_MMC_OMAP) || defined(CONFIG_MMC_OMAP_MODULE) || \
+#if defined(CONFIG_SND_OMAP_SOC_MCPDM) || \
+		defined(CONFIG_SND_OMAP_SOC_MCPDM_MODULE)
+
+static struct resource mcpdm_resources[] = {
+	{
+		.name		= "mcpdm_mem",
+		.start		= OMAP44XX_MCPDM_BASE,
+		.end		= OMAP44XX_MCPDM_BASE + SZ_4K,
+		.flags		= IORESOURCE_MEM,
+	},
+	{
+		.name		= "mcpdm_irq",
+		.start		= OMAP44XX_IRQ_MCPDM,
+		.end		= OMAP44XX_IRQ_MCPDM,
+		.flags		= IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device omap_mcpdm_device = {
+	.name		= "omap-mcpdm",
+	.id		= -1,
+	.num_resources	= ARRAY_SIZE(mcpdm_resources),
+	.resource	= mcpdm_resources,
+};
+
+static void omap_init_mcpdm(void)
+{
+	(void) platform_device_register(&omap_mcpdm_device);
+}
+#else
+static inline void omap_init_mcpdm(void) {}
+#endif
+
+/*-------------------------------------------------------------------------*/
+
+#if defined(CONFIG_MMC_OMAP) || defined(CONFIG_MMC_OMAP_MODULE) || \
 	defined(CONFIG_MMC_OMAP_HS) || defined(CONFIG_MMC_OMAP_HS_MODULE)
 
-#if defined(CONFIG_ARCH_OMAP24XX) || defined(CONFIG_ARCH_OMAP34XX)
-#define	OMAP_MMC1_BASE		0x4809c000
-#define	OMAP_MMC1_END		(OMAP_MMC1_BASE + 0x1fc)
-#define	OMAP_MMC1_INT		INT_24XX_MMC_IRQ
+#define OMAP_MMC_NR_RES		2
 
-#define	OMAP_MMC2_BASE		0x480b4000
-#define	OMAP_MMC2_END		(OMAP_MMC2_BASE + 0x1fc)
-#define	OMAP_MMC2_INT		INT_24XX_MMC2_IRQ
+/*
+ * Register MMC devices. Called from mach-omap1 and mach-omap2 device init.
+ */
+int __init omap_mmc_add(const char *name, int id, unsigned long base,
+				unsigned long size, unsigned int irq,
+				struct omap_mmc_platform_data *data)
+{
+	struct platform_device *pdev;
+	struct resource res[OMAP_MMC_NR_RES];
+	int ret;
 
-#else
+	pdev = platform_device_alloc(name, id);
+	if (!pdev)
+		return -ENOMEM;
 
-#define	OMAP_MMC1_BASE		0xfffb7800
-#define	OMAP_MMC1_END		(OMAP_MMC1_BASE + 0x7f)
-#define OMAP_MMC1_INT		INT_MMC
+	memset(res, 0, OMAP_MMC_NR_RES * sizeof(struct resource));
+	res[0].start = base;
+	res[0].end = base + size - 1;
+	res[0].flags = IORESOURCE_MEM;
+	res[1].start = res[1].end = irq;
+	res[1].flags = IORESOURCE_IRQ;
 
-#define	OMAP_MMC2_BASE		0xfffb7c00	/* omap16xx only */
-#define	OMAP_MMC2_END		(OMAP_MMC2_BASE + 0x7f)
-#define	OMAP_MMC2_INT		INT_1610_MMC2
+	ret = platform_device_add_resources(pdev, res, ARRAY_SIZE(res));
+	if (ret == 0)
+		ret = platform_device_add_data(pdev, data, sizeof(*data));
+	if (ret)
+		goto fail;
+
+	ret = platform_device_add(pdev);
+	if (ret)
+		goto fail;
+
+	/* return device handle to board setup code */
+	data->dev = &pdev->dev;
+	return 0;
+
+fail:
+	platform_device_put(pdev);
+	return ret;
+}
 
 #endif
 
-static struct omap_mmc_platform_data mmc1_data;
+/*-------------------------------------------------------------------------*/
 
-static u64 mmc1_dmamask = 0xffffffff;
+#if defined(CONFIG_HW_RANDOM_OMAP) || defined(CONFIG_HW_RANDOM_OMAP_MODULE)
 
-static struct resource mmc1_resources[] = {
+#ifdef CONFIG_ARCH_OMAP2
+#define	OMAP_RNG_BASE		0x480A0000
+#else
+#define	OMAP_RNG_BASE		0xfffe5000
+#endif
+
+static struct resource rng_resources[] = {
 	{
-		.start		= OMAP_MMC1_BASE,
-		.end		= OMAP_MMC1_END,
+		.start		= OMAP_RNG_BASE,
+		.end		= OMAP_RNG_BASE + 0x4f,
 		.flags		= IORESOURCE_MEM,
 	},
-	{
-		.start		= OMAP_MMC1_INT,
-		.flags		= IORESOURCE_IRQ,
-	},
 };
 
-static struct platform_device mmc_omap_device1 = {
-	.name		= "mmci-omap",
-	.id		= 1,
-	.dev = {
-		.dma_mask	= &mmc1_dmamask,
-		.platform_data	= &mmc1_data,
-	},
-	.num_resources	= ARRAY_SIZE(mmc1_resources),
-	.resource	= mmc1_resources,
+static struct platform_device omap_rng_device = {
+	.name		= "omap_rng",
+	.id		= -1,
+	.num_resources	= ARRAY_SIZE(rng_resources),
+	.resource	= rng_resources,
 };
 
-#if defined(CONFIG_ARCH_OMAP16XX) || defined(CONFIG_ARCH_OMAP2430) || \
-	defined(CONFIG_ARCH_OMAP34XX)
-
-static struct omap_mmc_platform_data mmc2_data;
-
-static u64 mmc2_dmamask = 0xffffffff;
-
-static struct resource mmc2_resources[] = {
-	{
-		.start		= OMAP_MMC2_BASE,
-		.end		= OMAP_MMC2_END,
-		.flags		= IORESOURCE_MEM,
-	},
-	{
-		.start		= OMAP_MMC2_INT,
-		.flags		= IORESOURCE_IRQ,
-	},
-};
-
-static struct platform_device mmc_omap_device2 = {
-	.name		= "mmci-omap",
-	.id		= 2,
-	.dev = {
-		.dma_mask	= &mmc2_dmamask,
-		.platform_data	= &mmc2_data,
-	},
-	.num_resources	= ARRAY_SIZE(mmc2_resources),
-	.resource	= mmc2_resources,
-};
-#endif
-
-static inline void omap_init_mmc_conf(const struct omap_mmc_config *mmc_conf)
+static void omap_init_rng(void)
 {
-	if (cpu_is_omap2430() || cpu_is_omap34xx())
-		return;
-
-	if (mmc_conf->mmc[0].enabled) {
-		if (cpu_is_omap24xx()) {
-			omap_cfg_reg(H18_24XX_MMC_CMD);
-			omap_cfg_reg(H15_24XX_MMC_CLKI);
-			omap_cfg_reg(G19_24XX_MMC_CLKO);
-			omap_cfg_reg(F20_24XX_MMC_DAT0);
-			omap_cfg_reg(F19_24XX_MMC_DAT_DIR0);
-			omap_cfg_reg(G18_24XX_MMC_CMD_DIR);
-		} else {
-			omap_cfg_reg(MMC_CMD);
-			omap_cfg_reg(MMC_CLK);
-			omap_cfg_reg(MMC_DAT0);
-			if (cpu_is_omap1710()) {
-				omap_cfg_reg(M15_1710_MMC_CLKI);
-				omap_cfg_reg(P19_1710_MMC_CMDDIR);
-				omap_cfg_reg(P20_1710_MMC_DATDIR0);
-			}
-		}
-		if (mmc_conf->mmc[0].wire4) {
-			if (cpu_is_omap24xx()) {
-				omap_cfg_reg(H14_24XX_MMC_DAT1);
-				omap_cfg_reg(E19_24XX_MMC_DAT2);
-				omap_cfg_reg(D19_24XX_MMC_DAT3);
-				omap_cfg_reg(E20_24XX_MMC_DAT_DIR1);
-				omap_cfg_reg(F18_24XX_MMC_DAT_DIR2);
-				omap_cfg_reg(E18_24XX_MMC_DAT_DIR3);
-			} else {
-				omap_cfg_reg(MMC_DAT1);
-				/* NOTE:  DAT2 can be on W10 (here) or M15 */
-				if (!mmc_conf->mmc[0].nomux)
-					omap_cfg_reg(MMC_DAT2);
-				omap_cfg_reg(MMC_DAT3);
-			}
-		}
-	}
-
-#ifdef	CONFIG_ARCH_OMAP16XX
-	/* block 2 is on newer chips, and has many pinout options */
-	if (mmc_conf->mmc[1].enabled) {
-		if (!mmc_conf->mmc[1].nomux) {
-			omap_cfg_reg(Y8_1610_MMC2_CMD);
-			omap_cfg_reg(Y10_1610_MMC2_CLK);
-			omap_cfg_reg(R18_1610_MMC2_CLKIN);
-			omap_cfg_reg(W8_1610_MMC2_DAT0);
-			if (mmc_conf->mmc[1].wire4) {
-				omap_cfg_reg(V8_1610_MMC2_DAT1);
-				omap_cfg_reg(W15_1610_MMC2_DAT2);
-				omap_cfg_reg(R10_1610_MMC2_DAT3);
-			}
-
-			/* These are needed for the level shifter */
-			omap_cfg_reg(V9_1610_MMC2_CMDDIR);
-			omap_cfg_reg(V5_1610_MMC2_DATDIR0);
-			omap_cfg_reg(W19_1610_MMC2_DATDIR1);
-		}
-
-		/* Feedback clock must be set on OMAP-1710 MMC2 */
-		if (cpu_is_omap1710())
-			omap_writel(omap_readl(MOD_CONF_CTRL_1) | (1 << 24),
-				     MOD_CONF_CTRL_1);
-	}
-#endif
+	(void) platform_device_register(&omap_rng_device);
 }
-
-static void __init omap_init_mmc(void)
-{
-	const struct omap_mmc_config	*mmc_conf;
-
-	/* NOTE:  assumes MMC was never (wrongly) enabled */
-	mmc_conf = omap_get_config(OMAP_TAG_MMC, struct omap_mmc_config);
-	if (!mmc_conf)
-		return;
-
-	omap_init_mmc_conf(mmc_conf);
-
-	if (mmc_conf->mmc[0].enabled) {
-		mmc1_data.conf = mmc_conf->mmc[0];
-		(void) platform_device_register(&mmc_omap_device1);
-	}
-
-#if defined(CONFIG_ARCH_OMAP16XX) || defined(CONFIG_ARCH_OMAP2430) || \
-	defined(CONFIG_ARCH_OMAP34XX)
-	if (mmc_conf->mmc[1].enabled) {
-		mmc2_data.conf = mmc_conf->mmc[1];
-		(void) platform_device_register(&mmc_omap_device2);
-	}
-#endif
-}
-
-void omap_set_mmc_info(int host, const struct omap_mmc_platform_data *info)
-{
-	switch (host) {
-	case 1:
-		mmc1_data = *info;
-		break;
-#if defined(CONFIG_ARCH_OMAP16XX) || defined(CONFIG_ARCH_OMAP2430) || \
-	defined(CONFIG_ARCH_OMAP34XX)
-	case 2:
-		mmc2_data = *info;
-		break;
-#endif
-	default:
-		BUG();
-	}
-}
-
 #else
-static inline void omap_init_mmc(void) {}
-void omap_set_mmc_info(int host, const struct omap_mmc_platform_data *info) {}
+static inline void omap_init_rng(void) {}
 #endif
 
 /*-------------------------------------------------------------------------*/
@@ -461,6 +381,8 @@ static void omap_init_wdt(void)
 		wdt_resources[0].start = 0x49016000; /* WDT2 */
 	else if (cpu_is_omap343x())
 		wdt_resources[0].start = 0x48314000; /* WDT2 */
+	else if (cpu_is_omap44xx())
+		wdt_resources[0].start = 0x4a314000;
 	else
 		return;
 
@@ -470,39 +392,6 @@ static void omap_init_wdt(void)
 }
 #else
 static inline void omap_init_wdt(void) {}
-#endif
-
-/*-------------------------------------------------------------------------*/
-
-#if defined(CONFIG_HW_RANDOM_OMAP) || defined(CONFIG_HW_RANDOM_OMAP_MODULE)
-
-#ifdef CONFIG_ARCH_OMAP24XX
-#define	OMAP_RNG_BASE		0x480A0000
-#else
-#define	OMAP_RNG_BASE		0xfffe5000
-#endif
-
-static struct resource rng_resources[] = {
-	{
-		.start		= OMAP_RNG_BASE,
-		.end		= OMAP_RNG_BASE + 0x4f,
-		.flags		= IORESOURCE_MEM,
-	},
-};
-
-static struct platform_device omap_rng_device = {
-	.name	   = "omap_rng",
-	.id	     = -1,
-	.num_resources	= ARRAY_SIZE(rng_resources),
-	.resource	= rng_resources,
-};
-
-static void omap_init_rng(void)
-{
-	(void) platform_device_register(&omap_rng_device);
-}
-#else
-static inline void omap_init_rng(void) {}
 #endif
 
 /*
@@ -532,10 +421,10 @@ static int __init omap_init_devices(void)
 	 */
 	omap_init_dsp();
 	omap_init_kp();
-	omap_init_mmc();
+	omap_init_rng();
+	omap_init_mcpdm();
 	omap_init_uwire();
 	omap_init_wdt();
-	omap_init_rng();
 	return 0;
 }
 arch_initcall(omap_init_devices);

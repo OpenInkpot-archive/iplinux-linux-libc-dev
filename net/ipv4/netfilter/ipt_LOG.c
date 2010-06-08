@@ -54,8 +54,8 @@ static void dump_packet(const struct nf_loginfo *info,
 	/* Important fields:
 	 * TOS, len, DF/MF, fragment offset, TTL, src, dst, options. */
 	/* Max length: 40 "SRC=255.255.255.255 DST=255.255.255.255 " */
-	printk("SRC=%u.%u.%u.%u DST=%u.%u.%u.%u ",
-	       NIPQUAD(ih->saddr), NIPQUAD(ih->daddr));
+	printk("SRC=%pI4 DST=%pI4 ",
+	       &ih->saddr, &ih->daddr);
 
 	/* Max length: 46 "LEN=65535 TOS=0xFF PREC=0xFF TTL=255 ID=65535 " */
 	printk("LEN=%u TOS=0x%02X PREC=0x%02X TTL=%u ID=%u ",
@@ -74,8 +74,8 @@ static void dump_packet(const struct nf_loginfo *info,
 	if (ntohs(ih->frag_off) & IP_OFFSET)
 		printk("FRAG:%u ", ntohs(ih->frag_off) & IP_OFFSET);
 
-	if ((logflags & IPT_LOG_IPOPT)
-	    && ih->ihl * 4 > sizeof(struct iphdr)) {
+	if ((logflags & IPT_LOG_IPOPT) &&
+	    ih->ihl * 4 > sizeof(struct iphdr)) {
 		const unsigned char *op;
 		unsigned char _opt[4 * 15 - sizeof(struct iphdr)];
 		unsigned int i, optsize;
@@ -146,8 +146,8 @@ static void dump_packet(const struct nf_loginfo *info,
 		/* Max length: 11 "URGP=65535 " */
 		printk("URGP=%u ", ntohs(th->urg_ptr));
 
-		if ((logflags & IPT_LOG_TCPOPT)
-		    && th->doff * 4 > sizeof(struct tcphdr)) {
+		if ((logflags & IPT_LOG_TCPOPT) &&
+		    th->doff * 4 > sizeof(struct tcphdr)) {
 			unsigned char _opt[4 * 15 - sizeof(struct tcphdr)];
 			const unsigned char *op;
 			unsigned int i, optsize;
@@ -238,9 +238,9 @@ static void dump_packet(const struct nf_loginfo *info,
 		printk("TYPE=%u CODE=%u ", ich->type, ich->code);
 
 		/* Max length: 25 "INCOMPLETE [65535 bytes] " */
-		if (ich->type <= NR_ICMP_TYPES
-		    && required_len[ich->type]
-		    && skb->len-iphoff-ih->ihl*4 < required_len[ich->type]) {
+		if (ich->type <= NR_ICMP_TYPES &&
+		    required_len[ich->type] &&
+		    skb->len-iphoff-ih->ihl*4 < required_len[ich->type]) {
 			printk("INCOMPLETE [%u bytes] ",
 			       skb->len - iphoff - ih->ihl*4);
 			break;
@@ -262,8 +262,7 @@ static void dump_packet(const struct nf_loginfo *info,
 			break;
 		case ICMP_REDIRECT:
 			/* Max length: 24 "GATEWAY=255.255.255.255 " */
-			printk("GATEWAY=%u.%u.%u.%u ",
-			       NIPQUAD(ich->un.gateway));
+			printk("GATEWAY=%pI4 ", &ich->un.gateway);
 			/* Fall through */
 		case ICMP_DEST_UNREACH:
 		case ICMP_SOURCE_QUENCH:
@@ -277,8 +276,8 @@ static void dump_packet(const struct nf_loginfo *info,
 			}
 
 			/* Max length: 10 "MTU=65535 " */
-			if (ich->type == ICMP_DEST_UNREACH
-			    && ich->code == ICMP_FRAG_NEEDED)
+			if (ich->type == ICMP_DEST_UNREACH &&
+			    ich->code == ICMP_FRAG_NEEDED)
 				printk("MTU=%u ", ntohs(ich->un.frag.mtu));
 		}
 		break;
@@ -340,8 +339,8 @@ static void dump_packet(const struct nf_loginfo *info,
 		read_lock_bh(&skb->sk->sk_callback_lock);
 		if (skb->sk->sk_socket && skb->sk->sk_socket->file)
 			printk("UID=%u GID=%u ",
-				skb->sk->sk_socket->file->f_uid,
-				skb->sk->sk_socket->file->f_gid);
+				skb->sk->sk_socket->file->f_cred->fsuid,
+				skb->sk->sk_socket->file->f_cred->fsgid);
 		read_unlock_bh(&skb->sk->sk_callback_lock);
 	}
 
@@ -408,8 +407,8 @@ ipt_log_packet(u_int8_t pf,
 	if (in && !out) {
 		/* MAC logging for input chain only. */
 		printk("MAC=");
-		if (skb->dev && skb->dev->hard_header_len
-		    && skb->mac_header != skb->network_header) {
+		if (skb->dev && skb->dev->hard_header_len &&
+		    skb->mac_header != skb->network_header) {
 			int i;
 			const unsigned char *p = skb_mac_header(skb);
 			for (i = 0; i < skb->dev->hard_header_len; i++,p++)
@@ -465,7 +464,7 @@ static struct xt_target log_tg_reg __read_mostly = {
 	.me		= THIS_MODULE,
 };
 
-static const struct nf_logger ipt_log_logger ={
+static struct nf_logger ipt_log_logger __read_mostly = {
 	.name		= "ipt_LOG",
 	.logfn		= &ipt_log_packet,
 	.me		= THIS_MODULE,

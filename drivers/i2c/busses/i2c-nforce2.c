@@ -31,10 +31,14 @@
     nForce3 250Gb MCP		00E4
     nForce4 MCP			0052
     nForce4 MCP-04		0034
-    nForce4 MCP51		0264
-    nForce4 MCP55		0368
+    nForce MCP51		0264
+    nForce MCP55		0368
     nForce MCP61		03EB
     nForce MCP65		0446
+    nForce MCP67		0542
+    nForce MCP73		07D8
+    nForce MCP78S		0752
+    nForce MCP79		0AA2
 
     This driver supports the 2 SMBuses that are included in the MCP of the
     nForce2/3/4/5xx chipsets.
@@ -52,6 +56,7 @@
 #include <linux/delay.h>
 #include <linux/dmi.h>
 #include <linux/acpi.h>
+#include <linux/slab.h>
 #include <asm/io.h>
 
 MODULE_LICENSE("GPL");
@@ -169,7 +174,7 @@ static int nforce2_check_status(struct i2c_adapter *adap)
 		temp = inb_p(NVIDIA_SMB_STS);
 	} while ((!temp) && (timeout++ < MAX_TIMEOUT));
 
-	if (timeout >= MAX_TIMEOUT) {
+	if (timeout > MAX_TIMEOUT) {
 		dev_dbg(&adap->dev, "SMBus Timeout!\n");
 		if (smbus->can_abort)
 			nforce2_abort(adap);
@@ -304,7 +309,7 @@ static struct i2c_algorithm smbus_algorithm = {
 };
 
 
-static struct pci_device_id nforce2_ids[] = {
+static const struct pci_device_id nforce2_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE2_SMBUS) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE2S_SMBUS) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE3_SMBUS) },
@@ -315,6 +320,10 @@ static struct pci_device_id nforce2_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP55_SMBUS) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP61_SMBUS) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP65_SMBUS) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP67_SMBUS) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP73_SMBUS) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP78S_SMBUS) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP79_SMBUS) },
 	{ 0 }
 };
 
@@ -355,7 +364,6 @@ static int __devinit nforce2_probe_smb (struct pci_dev *dev, int bar,
 		return -EBUSY;
 	}
 	smbus->adapter.owner = THIS_MODULE;
-	smbus->adapter.id = I2C_HW_SMBUS_NFORCE2;
 	smbus->adapter.class = I2C_CLASS_HWMON | I2C_CLASS_SPD;
 	smbus->adapter.algo = &smbus_algorithm;
 	smbus->adapter.algo_data = smbus;

@@ -14,7 +14,7 @@
 #ifndef __ASMARM_SETUP_H
 #define __ASMARM_SETUP_H
 
-#include <asm/types.h>
+#include <linux/types.h>
 
 #define COMMAND_LINE_SIZE 1024
 
@@ -201,7 +201,8 @@ static struct tagtable __tagtable_##fn __tag = { tag, fn }
 struct membank {
 	unsigned long start;
 	unsigned long size;
-	int           node;
+	unsigned short node;
+	unsigned short highmem;
 };
 
 struct meminfo {
@@ -209,9 +210,11 @@ struct meminfo {
 	struct membank bank[NR_BANKS];
 };
 
+extern struct meminfo meminfo;
+
 #define for_each_nodebank(iter,mi,no)			\
-	for (iter = 0; iter < mi->nr_banks; iter++)	\
-		if (mi->bank[iter].node == no)
+	for (iter = 0; iter < (mi)->nr_banks; iter++)	\
+		if ((mi)->bank[iter].node == no)
 
 #define bank_pfn_start(bank)	__phys_to_pfn((bank)->start)
 #define bank_pfn_end(bank)	__phys_to_pfn((bank)->start + (bank)->size)
@@ -219,18 +222,6 @@ struct meminfo {
 #define bank_phys_start(bank)	(bank)->start
 #define bank_phys_end(bank)	((bank)->start + (bank)->size)
 #define bank_phys_size(bank)	(bank)->size
-
-/*
- * Early command line parameters.
- */
-struct early_params {
-	const char *arg;
-	void (*fn)(char **p);
-};
-
-#define __early_param(name,fn)					\
-static struct early_params __early_##fn __used			\
-__attribute__((__section__(".early_param.init"))) = { name, fn }
 
 #endif  /*  __KERNEL__  */
 

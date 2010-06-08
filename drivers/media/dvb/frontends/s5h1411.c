@@ -844,7 +844,7 @@ struct dvb_frontend *s5h1411_attach(const struct s5h1411_config *config,
 	u16 reg;
 
 	/* allocate memory for the internal state */
-	state = kmalloc(sizeof(struct s5h1411_state), GFP_KERNEL);
+	state = kzalloc(sizeof(struct s5h1411_state), GFP_KERNEL);
 	if (state == NULL)
 		goto error;
 
@@ -873,6 +873,9 @@ struct dvb_frontend *s5h1411_attach(const struct s5h1411_config *config,
 
 	/* Note: Leaving the I2C gate open here. */
 	s5h1411_writereg(state, S5H1411_I2C_TOP_ADDR, 0xf5, 1);
+
+	/* Put the device into low-power mode until first use */
+	s5h1411_set_powerstate(&state->frontend, 1);
 
 	return &state->frontend;
 

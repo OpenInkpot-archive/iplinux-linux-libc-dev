@@ -108,14 +108,13 @@ int ei_debug = 1;
 /* Index to functions. */
 static void ei_tx_intr(struct net_device *dev);
 static void ei_tx_err(struct net_device *dev);
-static void ei_tx_timeout(struct net_device *dev);
+void ei_tx_timeout(struct net_device *dev);
 static void ei_receive(struct net_device *dev);
 static void ei_rx_overrun(struct net_device *dev);
 
 /* Routines generic to NS8390-based boards. */
 static void NS8390_trigger_send(struct net_device *dev, unsigned int length,
 								int start_page);
-static void set_multicast_list(struct net_device *dev);
 static void do_set_multicast_list(struct net_device *dev);
 static void __NS8390_init(struct net_device *dev, int startp);
 
@@ -206,10 +205,6 @@ static int __ei_open(struct net_device *dev)
 	unsigned long flags;
 	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
 
-	/* The card I/O part of the driver (e.g. 3c503) can hook a Tx timeout
-	    wrapper that does e.g. media check & then calls ei_tx_timeout. */
-	if (dev->tx_timeout == NULL)
-		 dev->tx_timeout = ei_tx_timeout;
 	if (dev->watchdog_timeo <= 0)
 		 dev->watchdog_timeo = TX_TIMEOUT;
 
@@ -258,7 +253,7 @@ static int __ei_close(struct net_device *dev)
  * completed (or failed) - i.e. never posted a Tx related interrupt.
  */
 
-static void ei_tx_timeout(struct net_device *dev)
+static void __ei_tx_timeout(struct net_device *dev)
 {
 	unsigned long e8390_base = dev->base_addr;
 	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
@@ -304,7 +299,8 @@ static void ei_tx_timeout(struct net_device *dev)
  * Sends a packet to an 8390 network device.
  */
 
-static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t __ei_start_xmit(struct sk_buff *skb,
+				   struct net_device *dev)
 {
 	unsigned long e8390_base = dev->base_addr;
 	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
@@ -375,7 +371,7 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		spin_unlock(&ei_local->page_lock);
 		enable_irq_lockdep_irqrestore(dev->irq, &flags);
 		dev->stats.tx_errors++;
-		return 1;
+		return NETDEV_TX_BUSY;
 	}
 
 	/*
@@ -419,7 +415,7 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	dev_kfree_skb (skb);
 	dev->stats.tx_bytes += send_length;
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /**
@@ -468,8 +464,8 @@ static irqreturn_t __ei_interrupt(int irq, void *dev_id)
 			   ei_inb_p(e8390_base + EN0_ISR));
 
 	/* !!Assumption!! -- we stay in page 0.	 Don't break this. */
-	while ((interrupts = ei_inb_p(e8390_base + EN0_ISR)) != 0
-		   && ++nr_serviced < MAX_SERVICE)
+	while ((interrupts = ei_inb_p(e8390_base + EN0_ISR)) != 0 &&
+	       ++nr_serviced < MAX_SERVICE)
 	{
 		if (!netif_running(dev)) {
 			printk(KERN_WARNING "%s: interrupt from stopped card\n", dev->name);
@@ -725,10 +721,10 @@ static void ei_receive(struct net_device *dev)
 		/* Check for bogosity warned by 3c503 book: the status byte is never
 		   written.  This happened a lot during testing! This code should be
 		   cleaned up someday. */
-		if (rx_frame.next != next_frame
-			&& rx_frame.next != next_frame + 1
-			&& rx_frame.next != next_frame - num_rx_pages
-			&& rx_frame.next != next_frame + 1 - num_rx_pages) {
+		if (rx_frame.next != next_frame &&
+		    rx_frame.next != next_frame + 1 &&
+		    rx_frame.next != next_frame - num_rx_pages &&
+		    rx_frame.next != next_frame + 1 - num_rx_pages) {
 			ei_local->current_page = rxing_page;
 			ei_outb(ei_local->current_page-1, e8390_base+EN0_BOUNDARY);
 			dev->stats.rx_errors++;
@@ -764,7 +760,6 @@ static void ei_receive(struct net_device *dev)
 				ei_block_input(dev, pkt_len, skb, current_offset + sizeof(rx_frame));
 				skb->protocol=eth_type_trans(skb,dev);
 				netif_rx(skb);
-				dev->last_rx = jiffies;
 				dev->stats.rx_packets++;
 				dev->stats.rx_bytes += pkt_len;
 				if (pkt_stat & ENRSR_PHY)
@@ -883,7 +878,7 @@ static void ei_rx_overrun(struct net_device *dev)
  *	Collect the stats. This is called unlocked and from several contexts.
  */
 
-static struct net_device_stats *get_stats(struct net_device *dev)
+static struct net_device_stats *__ei_get_stats(struct net_device *dev)
 {
 	unsigned long ioaddr = dev->base_addr;
 	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
@@ -912,15 +907,8 @@ static inline void make_mc_bits(u8 *bits, struct net_device *dev)
 {
 	struct dev_mc_list *dmi;
 
-	for (dmi=dev->mc_list; dmi; dmi=dmi->next)
-	{
-		u32 crc;
-		if (dmi->dmi_addrlen != ETH_ALEN)
-		{
-			printk(KERN_INFO "%s: invalid multicast address length given.\n", dev->name);
-			continue;
-		}
-		crc = ether_crc(ETH_ALEN, dmi->dmi_addr);
+	netdev_for_each_mc_addr(dmi, dev) {
+		u32 crc = ether_crc(ETH_ALEN, dmi->dmi_addr);
 		/*
 		 * The 8390 uses the 6 most significant bits of the
 		 * CRC to index the multicast table.
@@ -946,7 +934,7 @@ static void do_set_multicast_list(struct net_device *dev)
 	if (!(dev->flags&(IFF_PROMISC|IFF_ALLMULTI)))
 	{
 		memset(ei_local->mcfilter, 0, 8);
-		if (dev->mc_list)
+		if (!netdev_mc_empty(dev))
 			make_mc_bits(ei_local->mcfilter, dev);
 	}
 	else
@@ -980,7 +968,7 @@ static void do_set_multicast_list(struct net_device *dev)
 
   	if(dev->flags&IFF_PROMISC)
   		ei_outb_p(E8390_RXCONFIG | 0x18, e8390_base + EN0_RXCR);
-	else if(dev->flags&IFF_ALLMULTI || dev->mc_list)
+	else if (dev->flags & IFF_ALLMULTI || !netdev_mc_empty(dev))
   		ei_outb_p(E8390_RXCONFIG | 0x08, e8390_base + EN0_RXCR);
   	else
   		ei_outb_p(E8390_RXCONFIG, e8390_base + EN0_RXCR);
@@ -992,7 +980,7 @@ static void do_set_multicast_list(struct net_device *dev)
  *	not called too often. Must protect against both bh and irq users
  */
 
-static void set_multicast_list(struct net_device *dev)
+static void __ei_set_multicast_list(struct net_device *dev)
 {
 	unsigned long flags;
 	struct ei_device *ei_local = (struct ei_device*)netdev_priv(dev);
@@ -1015,10 +1003,6 @@ static void ethdev_setup(struct net_device *dev)
 	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
 	if (ei_debug > 1)
 		printk(version);
-
-	dev->hard_start_xmit = &ei_start_xmit;
-	dev->get_stats	= get_stats;
-	dev->set_multicast_list = &set_multicast_list;
 
 	ether_setup(dev);
 

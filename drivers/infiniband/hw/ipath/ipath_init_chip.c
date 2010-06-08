@@ -33,6 +33,7 @@
 
 #include <linux/pci.h>
 #include <linux/netdevice.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 
 #include "ipath_kernel.h"
@@ -229,6 +230,7 @@ static int init_chip_first(struct ipath_devdata *dd)
 	spin_lock_init(&dd->ipath_kernel_tid_lock);
 	spin_lock_init(&dd->ipath_user_tid_lock);
 	spin_lock_init(&dd->ipath_sendctrl_lock);
+	spin_lock_init(&dd->ipath_uctxt_lock);
 	spin_lock_init(&dd->ipath_sdma_lock);
 	spin_lock_init(&dd->ipath_gpio_lock);
 	spin_lock_init(&dd->ipath_eep_st_lock);
@@ -454,7 +456,7 @@ static void init_shadow_tids(struct ipath_devdata *dd)
 	if (!addrs) {
 		ipath_dev_err(dd, "failed to allocate shadow dma handle "
 			      "array, no expected sends!\n");
-		vfree(dd->ipath_pageshadow);
+		vfree(pages);
 		dd->ipath_pageshadow = NULL;
 		return;
 	}

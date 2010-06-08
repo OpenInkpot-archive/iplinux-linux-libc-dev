@@ -13,6 +13,9 @@
  *  Both are almost identical and seem to be based on pci-skeleton.c
  *
  *  Rewritten for 2.6 by Cesar Eduardo Barros
+ *
+ *  A datasheet for this chip can be found at
+ *  http://www.silan.com.cn/english/products/pdf/SC92031AY.pdf
  */
 
 /* Note about set_mac_address: I don't know how to change the hardware
@@ -31,13 +34,7 @@
 
 #include <asm/irq.h>
 
-#define PCI_VENDOR_ID_SILAN		0x1904
-#define PCI_DEVICE_ID_SILAN_SC92031	0x2031
-#define PCI_DEVICE_ID_SILAN_8139D	0x8139
-
 #define SC92031_NAME "sc92031"
-#define SC92031_DESCRIPTION "Silan SC92031 PCI Fast Ethernet Adapter driver"
-#define SC92031_VERSION "2.0c"
 
 /* BAR 0 is MMIO, BAR 1 is PIO */
 #ifndef SC92031_USE_BAR
@@ -431,14 +428,14 @@ static void _sc92031_set_mar(struct net_device *dev)
 	void __iomem *port_base = priv->port_base;
 	u32 mar0 = 0, mar1 = 0;
 
-	if ((dev->flags & IFF_PROMISC)
-			|| dev->mc_count > multicast_filter_limit
-			|| (dev->flags & IFF_ALLMULTI))
+	if ((dev->flags & IFF_PROMISC) ||
+	    netdev_mc_count(dev) > multicast_filter_limit ||
+	    (dev->flags & IFF_ALLMULTI))
 		mar0 = mar1 = 0xffffffff;
 	else if (dev->flags & IFF_MULTICAST) {
 		struct dev_mc_list *mc_list;
 
-		for (mc_list = dev->mc_list; mc_list; mc_list = mc_list->next) {
+		netdev_for_each_mc_addr(mc_list, dev) {
 			u32 crc;
 			unsigned bit = 0;
 
@@ -780,10 +777,10 @@ static void _sc92031_rx_tasklet(struct net_device *dev)
 
 		rx_ring_offset = (rx_ring_offset + 4) % RX_BUF_LEN;
 
-		if (unlikely(rx_status == 0
-				|| rx_size > (MAX_ETH_FRAME_SIZE + 4)
-				|| rx_size < 16
-				|| !(rx_status & RxStatesOK))) {
+		if (unlikely(rx_status == 0 ||
+			     rx_size > (MAX_ETH_FRAME_SIZE + 4) ||
+			     rx_size < 16 ||
+			     !(rx_status & RxStatesOK))) {
 			_sc92031_rx_tasklet_error(dev, rx_status, rx_size);
 			break;
 		}
@@ -796,15 +793,13 @@ static void _sc92031_rx_tasklet(struct net_device *dev)
 
 		rx_len -= rx_size_align + 4;
 
-		skb = netdev_alloc_skb(dev, pkt_size + NET_IP_ALIGN);
+		skb = netdev_alloc_skb_ip_align(dev, pkt_size);
 		if (unlikely(!skb)) {
 			if (printk_ratelimit())
 				printk(KERN_ERR "%s: Couldn't allocate a skb_buff for a packet of size %u\n",
 						dev->name, pkt_size);
 			goto next;
 		}
-
-		skb_reserve(skb, NET_IP_ALIGN);
 
 		if ((rx_ring_offset + pkt_size) > RX_BUF_LEN) {
 			memcpy(skb_put(skb, RX_BUF_LEN - rx_ring_offset),
@@ -816,7 +811,6 @@ static void _sc92031_rx_tasklet(struct net_device *dev)
 		}
 
 		skb->protocol = eth_type_trans(skb, dev);
-		dev->last_rx = jiffies;
 		netif_rx(skb);
 
 		dev->stats.rx_bytes += pkt_size;
@@ -945,7 +939,8 @@ static struct net_device_stats *sc92031_get_stats(struct net_device *dev)
 	return &dev->stats;
 }
 
-static int sc92031_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t sc92031_start_xmit(struct sk_buff *skb,
+				      struct net_device *dev)
 {
 	struct sc92031_priv *priv = netdev_priv(dev);
 	void __iomem *port_base = priv->port_base;
@@ -1265,7 +1260,6 @@ static void sc92031_ethtool_get_drvinfo(struct net_device *dev,
 	struct pci_dev *pdev = priv->pdev;
 
 	strcpy(drvinfo->driver, SC92031_NAME);
-	strcpy(drvinfo->version, SC92031_VERSION);
 	strcpy(drvinfo->bus_info, pci_name(pdev));
 }
 
@@ -1387,7 +1381,7 @@ static void sc92031_ethtool_get_ethtool_stats(struct net_device *dev,
 	spin_unlock_bh(&priv->lock);
 }
 
-static struct ethtool_ops sc92031_ethtool_ops = {
+static const struct ethtool_ops sc92031_ethtool_ops = {
 	.get_settings		= sc92031_ethtool_get_settings,
 	.set_settings		= sc92031_ethtool_set_settings,
 	.get_drvinfo		= sc92031_ethtool_get_drvinfo,
@@ -1400,6 +1394,22 @@ static struct ethtool_ops sc92031_ethtool_ops = {
 	.get_ethtool_stats	= sc92031_ethtool_get_ethtool_stats,
 };
 
+
+static const struct net_device_ops sc92031_netdev_ops = {
+	.ndo_get_stats		= sc92031_get_stats,
+	.ndo_start_xmit		= sc92031_start_xmit,
+	.ndo_open		= sc92031_open,
+	.ndo_stop		= sc92031_stop,
+	.ndo_set_multicast_list	= sc92031_set_multicast_list,
+	.ndo_change_mtu		= eth_change_mtu,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address 	= eth_mac_addr,
+	.ndo_tx_timeout		= sc92031_tx_timeout,
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	.ndo_poll_controller	= sc92031_poll_controller,
+#endif
+};
+
 static int __devinit sc92031_probe(struct pci_dev *pdev,
 		const struct pci_device_id *id)
 {
@@ -1408,6 +1418,7 @@ static int __devinit sc92031_probe(struct pci_dev *pdev,
 	struct net_device *dev;
 	struct sc92031_priv *priv;
 	u32 mac0, mac1;
+	unsigned long base_addr;
 
 	err = pci_enable_device(pdev);
 	if (unlikely(err < 0))
@@ -1415,11 +1426,11 @@ static int __devinit sc92031_probe(struct pci_dev *pdev,
 
 	pci_set_master(pdev);
 
-	err = pci_set_dma_mask(pdev, DMA_32BIT_MASK);
+	err = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
 	if (unlikely(err < 0))
 		goto out_set_dma_mask;
 
-	err = pci_set_consistent_dma_mask(pdev, DMA_32BIT_MASK);
+	err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
 	if (unlikely(err < 0))
 		goto out_set_dma_mask;
 
@@ -1453,17 +1464,9 @@ static int __devinit sc92031_probe(struct pci_dev *pdev,
 	/* faked with skb_copy_and_csum_dev */
 	dev->features = NETIF_F_SG | NETIF_F_HW_CSUM | NETIF_F_HIGHDMA;
 
-	dev->get_stats		= sc92031_get_stats;
-	dev->ethtool_ops	= &sc92031_ethtool_ops;
-	dev->hard_start_xmit	= sc92031_start_xmit;
+	dev->netdev_ops		= &sc92031_netdev_ops;
 	dev->watchdog_timeo	= TX_TIMEOUT;
-	dev->open		= sc92031_open;
-	dev->stop		= sc92031_stop;
-	dev->set_multicast_list	= sc92031_set_multicast_list;
-	dev->tx_timeout		= sc92031_tx_timeout;
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	dev->poll_controller	= sc92031_poll_controller;
-#endif
+	dev->ethtool_ops	= &sc92031_ethtool_ops;
 
 	priv = netdev_priv(dev);
 	spin_lock_init(&priv->lock);
@@ -1489,6 +1492,14 @@ static int __devinit sc92031_probe(struct pci_dev *pdev,
 	err = register_netdev(dev);
 	if (err < 0)
 		goto out_register_netdev;
+
+#if SC92031_USE_BAR == 0
+	base_addr = dev->mem_start;
+#elif SC92031_USE_BAR == 1
+	base_addr = dev->base_addr;
+#endif
+	printk(KERN_INFO "%s: SC92031 at 0x%lx, %pM, IRQ %d\n", dev->name,
+			base_addr, dev->dev_addr, dev->irq);
 
 	return 0;
 
@@ -1578,9 +1589,10 @@ out:
 	return 0;
 }
 
-static struct pci_device_id sc92031_pci_device_id_table[] __devinitdata = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_SILAN, PCI_DEVICE_ID_SILAN_SC92031) },
-	{ PCI_DEVICE(PCI_VENDOR_ID_SILAN, PCI_DEVICE_ID_SILAN_8139D) },
+static DEFINE_PCI_DEVICE_TABLE(sc92031_pci_device_id_table) = {
+	{ PCI_DEVICE(PCI_VENDOR_ID_SILAN, 0x2031) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_SILAN, 0x8139) },
+	{ PCI_DEVICE(0x1088, 0x2031) },
 	{ 0, }
 };
 MODULE_DEVICE_TABLE(pci, sc92031_pci_device_id_table);
@@ -1596,7 +1608,6 @@ static struct pci_driver sc92031_pci_driver = {
 
 static int __init sc92031_init(void)
 {
-	printk(KERN_INFO SC92031_DESCRIPTION " " SC92031_VERSION "\n");
 	return pci_register_driver(&sc92031_pci_driver);
 }
 
@@ -1610,5 +1621,4 @@ module_exit(sc92031_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Cesar Eduardo Barros <cesarb@cesarb.net>");
-MODULE_DESCRIPTION(SC92031_DESCRIPTION);
-MODULE_VERSION(SC92031_VERSION);
+MODULE_DESCRIPTION("Silan SC92031 PCI Fast Ethernet Adapter driver");

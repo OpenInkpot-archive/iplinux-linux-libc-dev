@@ -56,12 +56,6 @@ iic_cook_addr(struct i2c_msg *msg)
 	if (msg->flags & I2C_M_RD)
 		addr |= 1;
 
-	/*
-	 * Read or Write?
-	 */
-	if (msg->flags & I2C_M_REV_DIR_ADDR)
-		addr ^= 1;
-
 	return addr;   
 }
 
@@ -480,7 +474,6 @@ iop3xx_i2c_probe(struct platform_device *pdev)
 	}
 
 	memcpy(new_adapter->name, pdev->name, strlen(pdev->name));
-	new_adapter->id = I2C_HW_IOP3XX;
 	new_adapter->owner = THIS_MODULE;
 	new_adapter->class = I2C_CLASS_HWMON | I2C_CLASS_SPD;
 	new_adapter->dev.parent = &pdev->dev;
@@ -489,7 +482,7 @@ iop3xx_i2c_probe(struct platform_device *pdev)
 	/*
 	 * Default values...should these come in from board code?
 	 */
-	new_adapter->timeout = 100;	
+	new_adapter->timeout = HZ;
 	new_adapter->algo = &iop3xx_i2c_algo;
 
 	init_waitqueue_head(&adapter_data->waitq);

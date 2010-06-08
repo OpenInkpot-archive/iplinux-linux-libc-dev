@@ -9,7 +9,7 @@
 #ifdef CONFIG_X86_32
 # define __BUG_C0	"2:\t.long 1b, %c0\n"
 #else
-# define __BUG_C0	"2:\t.quad 1b, %c0\n"
+# define __BUG_C0	"2:\t.long 1b - 2b, %c0 - 2b\n"
 #endif
 
 #define BUG()							\
@@ -22,14 +22,14 @@ do {								\
 		     ".popsection"				\
 		     : : "i" (__FILE__), "i" (__LINE__),	\
 		     "i" (sizeof(struct bug_entry)));		\
-	for (;;) ;						\
+	unreachable();						\
 } while (0)
 
 #else
 #define BUG()							\
 do {								\
 	asm volatile("ud2");					\
-	for (;;) ;						\
+	unreachable();						\
 } while (0)
 #endif
 

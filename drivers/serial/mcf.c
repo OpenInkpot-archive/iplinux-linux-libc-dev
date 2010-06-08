@@ -212,10 +212,18 @@ static void mcf_set_termios(struct uart_port *port, struct ktermios *termios,
 {
 	unsigned long flags;
 	unsigned int baud, baudclk;
+#if defined(CONFIG_M5272)
+	unsigned int baudfr;
+#endif
 	unsigned char mr1, mr2;
 
 	baud = uart_get_baud_rate(port, termios, old, 0, 230400);
+#if defined(CONFIG_M5272)
+	baudclk = (MCF_BUSCLK / baud) / 32;
+	baudfr = (((MCF_BUSCLK / baud) + 1) / 2) % 16;
+#else
 	baudclk = ((MCF_BUSCLK / baud) + 16) / 32;
+#endif
 
 	mr1 = MCFUART_MR1_RXIRQRDY | MCFUART_MR1_RXERRCHAR;
 	mr2 = 0;
@@ -255,6 +263,7 @@ static void mcf_set_termios(struct uart_port *port, struct ktermios *termios,
 	}
 
 	spin_lock_irqsave(&port->lock, flags);
+	uart_update_timeout(port, termios->c_cflag, baud);
 	writeb(MCFUART_UCR_CMDRESETRX, port->membase + MCFUART_UCR);
 	writeb(MCFUART_UCR_CMDRESETTX, port->membase + MCFUART_UCR);
 	writeb(MCFUART_UCR_CMDRESETMRPTR, port->membase + MCFUART_UCR);
@@ -262,6 +271,9 @@ static void mcf_set_termios(struct uart_port *port, struct ktermios *termios,
 	writeb(mr2, port->membase + MCFUART_UMR);
 	writeb((baudclk & 0xff00) >> 8, port->membase + MCFUART_UBG1);
 	writeb((baudclk & 0xff), port->membase + MCFUART_UBG2);
+#if defined(CONFIG_M5272)
+	writeb((baudfr & 0x0f), port->membase + MCFUART_UFPD);
+#endif
 	writeb(MCFUART_UCSR_RXCLKTIMER | MCFUART_UCSR_TXCLKTIMER,
 		port->membase + MCFUART_UCSR);
 	writeb(MCFUART_UCR_RXENABLE | MCFUART_UCR_TXENABLE,
@@ -312,7 +324,7 @@ static void mcf_rx_chars(struct mcf_uart *pp)
 		uart_insert_char(port, status, MCFUART_USR_RXOVERRUN, ch, flag);
 	}
 
-	tty_flip_buffer_push(port->info->port.tty);
+	tty_flip_buffer_push(port->state->port.tty);
 }
 
 /****************************************************************************/
@@ -320,7 +332,7 @@ static void mcf_rx_chars(struct mcf_uart *pp)
 static void mcf_tx_chars(struct mcf_uart *pp)
 {
 	struct uart_port *port = &pp->port;
-	struct circ_buf *xmit = &port->info->xmit;
+	struct circ_buf *xmit = &port->state->xmit;
 
 	if (port->x_char) {
 		/* Send special char - probably flow control */
@@ -368,6 +380,7 @@ static irqreturn_t mcf_interrupt(int irq, void *data)
 static void mcf_config_port(struct uart_port *port, int flags)
 {
 	port->type = PORT_MCF;
+	port->fifosize = MCFUART_TXFIFOSIZE;
 
 	/* Clear mask, so no surprise interrupts. */
 	writeb(0, port->membase + MCFUART_UIMR);
@@ -413,7 +426,7 @@ static int mcf_verify_port(struct uart_port *port, struct serial_struct *ser)
 /*
  *	Define the basic serial functions we support.
  */
-static struct uart_ops mcf_uart_ops = {
+static const struct uart_ops mcf_uart_ops = {
 	.tx_empty	= mcf_tx_empty,
 	.get_mctrl	= mcf_get_mctrl,
 	.set_mctrl	= mcf_set_mctrl,
@@ -432,7 +445,7 @@ static struct uart_ops mcf_uart_ops = {
 	.verify_port	= mcf_verify_port,
 };
 
-static struct mcf_uart mcf_ports[3];
+static struct mcf_uart mcf_ports[4];
 
 #define	MCF_MAXPORTS	ARRAY_SIZE(mcf_ports)
 
@@ -502,7 +515,7 @@ static int __init mcf_console_setup(struct console *co, char *options)
 	int parity = 'n';
 	int flow = 'n';
 
-	if ((co->index >= 0) && (co->index <= MCF_MAXPORTS))
+	if ((co->index < 0) || (co->index >= MCF_MAXPORTS))
 		co->index = 0;
 	port = &mcf_ports[co->index].port;
 	if (port->membase == 0)
@@ -591,7 +604,7 @@ static int __devinit mcf_probe(struct platform_device *pdev)
 
 /****************************************************************************/
 
-static int mcf_remove(struct platform_device *pdev)
+static int __devexit mcf_remove(struct platform_device *pdev)
 {
 	struct uart_port *port;
 	int i;

@@ -82,6 +82,12 @@
 
 #include "atl1.h"
 
+#define ATLX_DRIVER_VERSION "2.1.3"
+MODULE_AUTHOR("Xiong Huang <xiong.huang@atheros.com>, \
+Chris Snook <csnook@redhat.com>, Jay Cliburn <jcliburn@gmail.com>");
+MODULE_LICENSE("GPL");
+MODULE_VERSION(ATLX_DRIVER_VERSION);
+
 /* Temporary hack for merging atl1 and atl2 */
 #include "atlx.c"
 
@@ -105,7 +111,7 @@
  * Default Value: 100 (200us)
  */
 static int __devinitdata int_mod_timer[ATL1_MAX_NIC+1] = ATL1_PARAM_INIT;
-static int num_int_mod_timer;
+static unsigned int num_int_mod_timer;
 module_param_array_named(int_mod_timer, int_mod_timer, int,
 	&num_int_mod_timer, 0);
 MODULE_PARM_DESC(int_mod_timer, "Interrupt moderator timer");
@@ -195,7 +201,7 @@ static int __devinit atl1_validate_option(int *value, struct atl1_option *opt,
  * value exists, a default value is used.  The final value is stored
  * in a variable in the adapter structure.
  */
-void __devinit atl1_check_options(struct atl1_adapter *adapter)
+static void __devinit atl1_check_options(struct atl1_adapter *adapter)
 {
 	struct pci_dev *pdev = adapter->pdev;
 	int bd = adapter->bd_number;
@@ -226,7 +232,7 @@ void __devinit atl1_check_options(struct atl1_adapter *adapter)
 /*
  * atl1_pci_tbl - PCI Device ID Table
  */
-static const struct pci_device_id atl1_pci_tbl[] = {
+static DEFINE_PCI_DEVICE_TABLE(atl1_pci_tbl) = {
 	{PCI_DEVICE(PCI_VENDOR_ID_ATTANSIC, PCI_DEVICE_ID_ATTANSIC_L1)},
 	/* required last entry */
 	{0,}
@@ -523,7 +529,7 @@ static int atl1_get_permanent_address(struct atl1_hw *hw)
  * Reads the adapter's MAC address from the EEPROM
  * hw - Struct containing variables accessed by shared code
  */
-s32 atl1_read_mac_addr(struct atl1_hw *hw)
+static s32 atl1_read_mac_addr(struct atl1_hw *hw)
 {
 	u16 i;
 
@@ -1338,8 +1344,8 @@ static u32 atl1_check_link(struct atl1_adapter *adapter)
 
 	/* link result is our setting */
 	if (!reconfig) {
-		if (adapter->link_speed != speed
-		    || adapter->link_duplex != duplex) {
+		if (adapter->link_speed != speed ||
+		    adapter->link_duplex != duplex) {
 			adapter->link_speed = speed;
 			adapter->link_duplex = duplex;
 			atl1_setup_mac_ctrl(adapter);
@@ -1390,7 +1396,8 @@ static u32 atl1_check_link(struct atl1_adapter *adapter)
 	/* auto-neg, insert timer to re-config phy */
 	if (!adapter->phy_timer_pending) {
 		adapter->phy_timer_pending = true;
-		mod_timer(&adapter->phy_config_timer, jiffies + 3 * HZ);
+		mod_timer(&adapter->phy_config_timer,
+			  round_jiffies(jiffies + 3 * HZ));
 	}
 
 	return 0;
@@ -1662,6 +1669,7 @@ static void atl1_via_workaround(struct atl1_adapter *adapter)
 
 static void atl1_inc_smb(struct atl1_adapter *adapter)
 {
+	struct net_device *netdev = adapter->netdev;
 	struct stats_msg_block *smb = adapter->smb.smb;
 
 	/* Fill out the OS statistics structure */
@@ -1704,30 +1712,30 @@ static void atl1_inc_smb(struct atl1_adapter *adapter)
 	adapter->soft_stats.tx_trunc += smb->tx_trunc;
 	adapter->soft_stats.tx_pause += smb->tx_pause;
 
-	adapter->net_stats.rx_packets = adapter->soft_stats.rx_packets;
-	adapter->net_stats.tx_packets = adapter->soft_stats.tx_packets;
-	adapter->net_stats.rx_bytes = adapter->soft_stats.rx_bytes;
-	adapter->net_stats.tx_bytes = adapter->soft_stats.tx_bytes;
-	adapter->net_stats.multicast = adapter->soft_stats.multicast;
-	adapter->net_stats.collisions = adapter->soft_stats.collisions;
-	adapter->net_stats.rx_errors = adapter->soft_stats.rx_errors;
-	adapter->net_stats.rx_over_errors =
+	netdev->stats.rx_packets = adapter->soft_stats.rx_packets;
+	netdev->stats.tx_packets = adapter->soft_stats.tx_packets;
+	netdev->stats.rx_bytes = adapter->soft_stats.rx_bytes;
+	netdev->stats.tx_bytes = adapter->soft_stats.tx_bytes;
+	netdev->stats.multicast = adapter->soft_stats.multicast;
+	netdev->stats.collisions = adapter->soft_stats.collisions;
+	netdev->stats.rx_errors = adapter->soft_stats.rx_errors;
+	netdev->stats.rx_over_errors =
 		adapter->soft_stats.rx_missed_errors;
-	adapter->net_stats.rx_length_errors =
+	netdev->stats.rx_length_errors =
 		adapter->soft_stats.rx_length_errors;
-	adapter->net_stats.rx_crc_errors = adapter->soft_stats.rx_crc_errors;
-	adapter->net_stats.rx_frame_errors =
+	netdev->stats.rx_crc_errors = adapter->soft_stats.rx_crc_errors;
+	netdev->stats.rx_frame_errors =
 		adapter->soft_stats.rx_frame_errors;
-	adapter->net_stats.rx_fifo_errors = adapter->soft_stats.rx_fifo_errors;
-	adapter->net_stats.rx_missed_errors =
+	netdev->stats.rx_fifo_errors = adapter->soft_stats.rx_fifo_errors;
+	netdev->stats.rx_missed_errors =
 		adapter->soft_stats.rx_missed_errors;
-	adapter->net_stats.tx_errors = adapter->soft_stats.tx_errors;
-	adapter->net_stats.tx_fifo_errors = adapter->soft_stats.tx_fifo_errors;
-	adapter->net_stats.tx_aborted_errors =
+	netdev->stats.tx_errors = adapter->soft_stats.tx_errors;
+	netdev->stats.tx_fifo_errors = adapter->soft_stats.tx_fifo_errors;
+	netdev->stats.tx_aborted_errors =
 		adapter->soft_stats.tx_aborted_errors;
-	adapter->net_stats.tx_window_errors =
+	netdev->stats.tx_window_errors =
 		adapter->soft_stats.tx_window_errors;
-	adapter->net_stats.tx_carrier_errors =
+	netdev->stats.tx_carrier_errors =
 		adapter->soft_stats.tx_carrier_errors;
 }
 
@@ -1856,20 +1864,13 @@ static u16 atl1_alloc_rx_buffers(struct atl1_adapter *adapter)
 
 		rfd_desc = ATL1_RFD_DESC(rfd_ring, rfd_next_to_use);
 
-		skb = netdev_alloc_skb(adapter->netdev,
-				       adapter->rx_buffer_len + NET_IP_ALIGN);
+		skb = netdev_alloc_skb_ip_align(adapter->netdev,
+						adapter->rx_buffer_len);
 		if (unlikely(!skb)) {
 			/* Better luck next round */
-			adapter->net_stats.rx_dropped++;
+			adapter->netdev->stats.rx_dropped++;
 			break;
 		}
-
-		/*
-		 * Make buffer alignment 2 beyond a 16 byte boundary
-		 * this will result in a 16 byte aligned IP header after
-		 * the 14 byte MAC header is removed
-		 */
-		skb_reserve(skb, NET_IP_ALIGN);
 
 		buffer_info->alloced = 1;
 		buffer_info->skb = skb;
@@ -2026,8 +2027,6 @@ rrd_ok:
 		buffer_info->skb = NULL;
 		buffer_info->alloced = 0;
 		rrd->xsz.valid = 0;
-
-		adapter->netdev->last_rx = jiffies;
 	}
 
 	atomic_set(&rrd_ring->next_to_clean, rrd_next_to_clean);
@@ -2088,8 +2087,8 @@ static void atl1_intr_tx(struct atl1_adapter *adapter)
 	}
 	atomic_set(&tpd_ring->next_to_clean, sw_tpd_next_to_clean);
 
-	if (netif_queue_stopped(adapter->netdev)
-	    && netif_carrier_ok(adapter->netdev))
+	if (netif_queue_stopped(adapter->netdev) &&
+	    netif_carrier_ok(adapter->netdev))
 		netif_wake_queue(adapter->netdev);
 }
 
@@ -2207,8 +2206,7 @@ static void atl1_tx_map(struct atl1_adapter *adapter, struct sk_buff *skb,
 	nr_frags = skb_shinfo(skb)->nr_frags;
 	next_to_use = atomic_read(&tpd_ring->next_to_use);
 	buffer_info = &tpd_ring->buffer_info[next_to_use];
-	if (unlikely(buffer_info->skb))
-		BUG();
+	BUG_ON(buffer_info->skb);
 	/* put skb in last TPD */
 	buffer_info->skb = NULL;
 
@@ -2274,8 +2272,8 @@ static void atl1_tx_map(struct atl1_adapter *adapter, struct sk_buff *skb,
 			ATL1_MAX_TX_BUF_LEN;
 		for (i = 0; i < nseg; i++) {
 			buffer_info = &tpd_ring->buffer_info[next_to_use];
-			if (unlikely(buffer_info->skb))
-				BUG();
+			BUG_ON(buffer_info->skb);
+
 			buffer_info->skb = NULL;
 			buffer_info->length = (buf_len > ATL1_MAX_TX_BUF_LEN) ?
 				ATL1_MAX_TX_BUF_LEN : buf_len;
@@ -2344,7 +2342,8 @@ static void atl1_tx_queue(struct atl1_adapter *adapter, u16 count,
 	atomic_set(&tpd_ring->next_to_use, next_to_use);
 }
 
-static int atl1_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
+static netdev_tx_t atl1_xmit_frame(struct sk_buff *skb,
+					 struct net_device *netdev)
 {
 	struct atl1_adapter *adapter = netdev_priv(netdev);
 	struct atl1_tpd_ring *tpd_ring = &adapter->tpd_ring;
@@ -2377,7 +2376,7 @@ static int atl1_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 
 	mss = skb_shinfo(skb)->gso_size;
 	if (mss) {
-		if (skb->protocol == ntohs(ETH_P_IP)) {
+		if (skb->protocol == htons(ETH_P_IP)) {
 			proto_hdr_len = (skb_transport_offset(skb) +
 					 tcp_hdrlen(skb));
 			if (unlikely(proto_hdr_len > len)) {
@@ -2432,7 +2431,6 @@ static int atl1_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 	atl1_tx_queue(adapter, count, ptpd);
 	atl1_update_mailbox(adapter);
 	mmiowb();
-	netdev->trans_start = jiffies;
 	return NETDEV_TX_OK;
 }
 
@@ -2524,17 +2522,6 @@ static irqreturn_t atl1_intr(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-/*
- * atl1_watchdog - Timer Call-back
- * @data: pointer to netdev cast into an unsigned long
- */
-static void atl1_watchdog(unsigned long data)
-{
-	struct atl1_adapter *adapter = (struct atl1_adapter *)data;
-
-	/* Reset the timer */
-	mod_timer(&adapter->watchdog_timer, jiffies + 2 * HZ);
-}
 
 /*
  * atl1_phy_config - Timer Call-back
@@ -2602,12 +2589,11 @@ static s32 atl1_up(struct atl1_adapter *adapter)
 		irq_flags |= IRQF_SHARED;
 	}
 
-	err = request_irq(adapter->pdev->irq, &atl1_intr, irq_flags,
+	err = request_irq(adapter->pdev->irq, atl1_intr, irq_flags,
 			netdev->name, netdev);
 	if (unlikely(err))
 		goto err_up;
 
-	mod_timer(&adapter->watchdog_timer, jiffies);
 	atlx_irq_enable(adapter);
 	atl1_check_link(adapter);
 	netif_start_queue(netdev);
@@ -2625,7 +2611,6 @@ static void atl1_down(struct atl1_adapter *adapter)
 	struct net_device *netdev = adapter->netdev;
 
 	netif_stop_queue(netdev);
-	del_timer_sync(&adapter->watchdog_timer);
 	del_timer_sync(&adapter->phy_config_timer);
 	adapter->phy_timer_pending = false;
 
@@ -2893,6 +2878,22 @@ static void atl1_poll_controller(struct net_device *netdev)
 }
 #endif
 
+static const struct net_device_ops atl1_netdev_ops = {
+	.ndo_open		= atl1_open,
+	.ndo_stop		= atl1_close,
+	.ndo_start_xmit		= atl1_xmit_frame,
+	.ndo_set_multicast_list	= atlx_set_multi,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_set_mac_address	= atl1_set_mac,
+	.ndo_change_mtu		= atl1_change_mtu,
+	.ndo_do_ioctl		= atlx_ioctl,
+	.ndo_tx_timeout		= atlx_tx_timeout,
+	.ndo_vlan_rx_register	= atlx_vlan_rx_register,
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	.ndo_poll_controller	= atl1_poll_controller,
+#endif
+};
+
 /*
  * atl1_probe - Device Initialization Routine
  * @pdev: PCI device information struct
@@ -2926,7 +2927,7 @@ static int __devinit atl1_probe(struct pci_dev *pdev,
 	 * various kernel subsystems to support the mechanics required by a
 	 * fixed-high-32-bit system.
 	 */
-	err = pci_set_dma_mask(pdev, DMA_32BIT_MASK);
+	err = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
 	if (err) {
 		dev_err(&pdev->dev, "no usable DMA configuration\n");
 		goto err_dma;
@@ -2980,20 +2981,8 @@ static int __devinit atl1_probe(struct pci_dev *pdev,
 	adapter->mii.phy_id_mask = 0x1f;
 	adapter->mii.reg_num_mask = 0x1f;
 
-	netdev->open = &atl1_open;
-	netdev->stop = &atl1_close;
-	netdev->hard_start_xmit = &atl1_xmit_frame;
-	netdev->get_stats = &atlx_get_stats;
-	netdev->set_multicast_list = &atlx_set_multi;
-	netdev->set_mac_address = &atl1_set_mac;
-	netdev->change_mtu = &atl1_change_mtu;
-	netdev->do_ioctl = &atlx_ioctl;
-	netdev->tx_timeout = &atlx_tx_timeout;
+	netdev->netdev_ops = &atl1_netdev_ops;
 	netdev->watchdog_timeo = 5 * HZ;
-#ifdef CONFIG_NET_POLL_CONTROLLER
-	netdev->poll_controller = atl1_poll_controller;
-#endif
-	netdev->vlan_rx_register = atlx_vlan_rx_register;
 
 	netdev->ethtool_ops = &atl1_ethtool_ops;
 	adapter->bd_number = cards_found;
@@ -3049,13 +3038,8 @@ static int __devinit atl1_probe(struct pci_dev *pdev,
 	netif_carrier_off(netdev);
 	netif_stop_queue(netdev);
 
-	init_timer(&adapter->watchdog_timer);
-	adapter->watchdog_timer.function = &atl1_watchdog;
-	adapter->watchdog_timer.data = (unsigned long)adapter;
-
-	init_timer(&adapter->phy_config_timer);
-	adapter->phy_config_timer.function = &atl1_phy_config;
-	adapter->phy_config_timer.data = (unsigned long)adapter;
+	setup_timer(&adapter->phy_config_timer, &atl1_phy_config,
+		    (unsigned long)adapter);
 	adapter->phy_timer_pending = false;
 
 	INIT_WORK(&adapter->tx_timeout_task, atl1_tx_timeout_task);
@@ -3173,8 +3157,6 @@ static struct atl1_stats atl1_gstrings_stats[] = {
 	{"tx_bytes", ATL1_STAT(soft_stats.tx_bytes)},
 	{"rx_errors", ATL1_STAT(soft_stats.rx_errors)},
 	{"tx_errors", ATL1_STAT(soft_stats.tx_errors)},
-	{"rx_dropped", ATL1_STAT(net_stats.rx_dropped)},
-	{"tx_dropped", ATL1_STAT(net_stats.tx_dropped)},
 	{"multicast", ATL1_STAT(soft_stats.multicast)},
 	{"collisions", ATL1_STAT(soft_stats.collisions)},
 	{"rx_length_errors", ATL1_STAT(soft_stats.rx_length_errors)},
@@ -3390,11 +3372,11 @@ static void atl1_get_drvinfo(struct net_device *netdev,
 {
 	struct atl1_adapter *adapter = netdev_priv(netdev);
 
-	strncpy(drvinfo->driver, ATLX_DRIVER_NAME, sizeof(drvinfo->driver));
-	strncpy(drvinfo->version, ATLX_DRIVER_VERSION,
+	strlcpy(drvinfo->driver, ATLX_DRIVER_NAME, sizeof(drvinfo->driver));
+	strlcpy(drvinfo->version, ATLX_DRIVER_VERSION,
 		sizeof(drvinfo->version));
-	strncpy(drvinfo->fw_version, "N/A", sizeof(drvinfo->fw_version));
-	strncpy(drvinfo->bus_info, pci_name(adapter->pdev),
+	strlcpy(drvinfo->fw_version, "N/A", sizeof(drvinfo->fw_version));
+	strlcpy(drvinfo->bus_info, pci_name(adapter->pdev),
 		sizeof(drvinfo->bus_info));
 	drvinfo->eedump_len = ATL1_EEDUMP_LEN;
 }

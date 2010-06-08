@@ -46,7 +46,7 @@ static void ivtv_pio_work_handler(struct ivtv *itv)
 
 	IVTV_DEBUG_HI_DMA("ivtv_pio_work_handler\n");
 	if (itv->cur_pio_stream < 0 || itv->cur_pio_stream >= IVTV_MAX_STREAMS ||
-			s->v4l2dev == NULL || !ivtv_use_pio(s)) {
+			s->vdev == NULL || !ivtv_use_pio(s)) {
 		itv->cur_pio_stream = -1;
 		/* trigger PIO complete user interrupt */
 		write_reg(IVTV_IRQ_ENC_PIO_COMPLETE, 0x44);
@@ -109,7 +109,7 @@ static int stream_enc_dma_append(struct ivtv_stream *s, u32 data[CX2341X_MBOX_MA
 	int rc;
 
 	/* sanity checks */
-	if (s->v4l2dev == NULL) {
+	if (s->vdev == NULL) {
 		IVTV_DEBUG_WARN("Stream %s not started\n", s->name);
 		return -1;
 	}
@@ -196,7 +196,7 @@ static int stream_enc_dma_append(struct ivtv_stream *s, u32 data[CX2341X_MBOX_MA
 				bytes_needed, s->name);
 		return -1;
 	}
-	if (rc && !s->buffers_stolen && (s->s_flags & IVTV_F_S_APPL_IO)) {
+	if (rc && !s->buffers_stolen && test_bit(IVTV_F_S_APPL_IO, &s->s_flags)) {
 		IVTV_WARN("All %s stream buffers are full. Dropping data.\n", s->name);
 		IVTV_WARN("Cause: the application is not reading fast enough.\n");
 	}
@@ -562,7 +562,7 @@ static void ivtv_irq_enc_dma_complete(struct ivtv *itv)
 	u32 data[CX2341X_MBOX_MAX_DATA];
 	struct ivtv_stream *s;
 
-	ivtv_api_get_data(&itv->enc_mbox, IVTV_MBOX_DMA_END, data);
+	ivtv_api_get_data(&itv->enc_mbox, IVTV_MBOX_DMA_END, 2, data);
 	IVTV_DEBUG_HI_IRQ("ENC DMA COMPLETE %x %d (%d)\n", data[0], data[1], itv->cur_dma_stream);
 
 	del_timer(&itv->dma_timer);
@@ -638,7 +638,7 @@ static void ivtv_irq_dma_err(struct ivtv *itv)
 	u32 data[CX2341X_MBOX_MAX_DATA];
 
 	del_timer(&itv->dma_timer);
-	ivtv_api_get_data(&itv->enc_mbox, IVTV_MBOX_DMA_END, data);
+	ivtv_api_get_data(&itv->enc_mbox, IVTV_MBOX_DMA_END, 2, data);
 	IVTV_DEBUG_WARN("DMA ERROR %08x %08x %08x %d\n", data[0], data[1],
 				read_reg(IVTV_REG_DMASTATUS), itv->cur_dma_stream);
 	write_reg(read_reg(IVTV_REG_DMASTATUS) & 3, IVTV_REG_DMASTATUS);
@@ -669,7 +669,7 @@ static void ivtv_irq_enc_start_cap(struct ivtv *itv)
 	struct ivtv_stream *s;
 
 	/* Get DMA destination and size arguments from card */
-	ivtv_api_get_data(&itv->enc_mbox, IVTV_MBOX_DMA, data);
+	ivtv_api_get_data(&itv->enc_mbox, IVTV_MBOX_DMA, 7, data);
 	IVTV_DEBUG_HI_IRQ("ENC START CAP %d: %08x %08x\n", data[0], data[1], data[2]);
 
 	if (data[0] > 2 || data[1] == 0 || data[2] == 0) {
@@ -713,9 +713,9 @@ static void ivtv_irq_dec_data_req(struct ivtv *itv)
 	struct ivtv_stream *s;
 
 	/* YUV or MPG */
-	ivtv_api_get_data(&itv->dec_mbox, IVTV_MBOX_DMA, data);
 
 	if (test_bit(IVTV_F_I_DEC_YUV, &itv->i_flags)) {
+		ivtv_api_get_data(&itv->dec_mbox, IVTV_MBOX_DMA, 2, data);
 		itv->dma_data_req_size =
 				 1080 * ((itv->yuv_info.v4l2_src_h + 31) & ~31);
 		itv->dma_data_req_offset = data[1];
@@ -724,6 +724,7 @@ static void ivtv_irq_dec_data_req(struct ivtv *itv)
 		s = &itv->streams[IVTV_DEC_STREAM_TYPE_YUV];
 	}
 	else {
+		ivtv_api_get_data(&itv->dec_mbox, IVTV_MBOX_DMA, 3, data);
 		itv->dma_data_req_size = min_t(u32, data[2], 0x10000);
 		itv->dma_data_req_offset = data[1];
 		s = &itv->streams[IVTV_DEC_STREAM_TYPE_MPG];
@@ -940,9 +941,10 @@ irqreturn_t ivtv_irq_handler(int irq, void *dev_id)
 				ivtv_dma_enc_start(s);
 			break;
 		}
-		if (i == IVTV_MAX_STREAMS && test_and_clear_bit(IVTV_F_I_UDMA_PENDING, &itv->i_flags)) {
+
+		if (i == IVTV_MAX_STREAMS &&
+		    test_bit(IVTV_F_I_UDMA_PENDING, &itv->i_flags))
 			ivtv_udma_start(itv);
-		}
 	}
 
 	if ((combo & IVTV_IRQ_DMA) && !test_bit(IVTV_F_I_PIO, &itv->i_flags)) {

@@ -120,7 +120,7 @@ int usb_choose_configuration(struct usb_device *udev)
 		 * than a vendor-specific driver. */
 		else if (udev->descriptor.bDeviceClass !=
 						USB_CLASS_VENDOR_SPEC &&
-				(!desc || desc->bInterfaceClass !=
+				(desc && desc->bInterfaceClass !=
 						USB_CLASS_VENDOR_SPEC)) {
 			best = c;
 			break;
@@ -139,7 +139,7 @@ int usb_choose_configuration(struct usb_device *udev)
 
 	if (best) {
 		i = best->desc.bConfigurationValue;
-		dev_info(&udev->dev,
+		dev_dbg(&udev->dev,
 			"configuration #%d chosen from %d choice%s\n",
 			i, num_configs, plural(num_configs));
 	} else {
@@ -158,7 +158,9 @@ static int generic_probe(struct usb_device *udev)
 	/* Choose and set the configuration.  This registers the interfaces
 	 * with the driver core and lets interface drivers bind to them.
 	 */
-	if (udev->authorized == 0)
+	if (usb_device_is_owned(udev))
+		;		/* Don't configure if the device is owned */
+	else if (udev->authorized == 0)
 		dev_err(&udev->dev, "Device is not authorized for usage\n");
 	else {
 		c = usb_choose_configuration(udev);
@@ -200,18 +202,18 @@ static int generic_suspend(struct usb_device *udev, pm_message_t msg)
 	 * interfaces manually by doing a bus (or "global") suspend.
 	 */
 	if (!udev->parent)
-		rc = hcd_bus_suspend(udev);
+		rc = hcd_bus_suspend(udev, msg);
 
 	/* Non-root devices don't need to do anything for FREEZE or PRETHAW */
 	else if (msg.event == PM_EVENT_FREEZE || msg.event == PM_EVENT_PRETHAW)
 		rc = 0;
 	else
-		rc = usb_port_suspend(udev);
+		rc = usb_port_suspend(udev, msg);
 
 	return rc;
 }
 
-static int generic_resume(struct usb_device *udev)
+static int generic_resume(struct usb_device *udev, pm_message_t msg)
 {
 	int rc;
 
@@ -221,9 +223,9 @@ static int generic_resume(struct usb_device *udev)
 	 * interfaces manually by doing a bus (or "global") resume.
 	 */
 	if (!udev->parent)
-		rc = hcd_bus_resume(udev);
+		rc = hcd_bus_resume(udev, msg);
 	else
-		rc = usb_port_resume(udev);
+		rc = usb_port_resume(udev, msg);
 	return rc;
 }
 

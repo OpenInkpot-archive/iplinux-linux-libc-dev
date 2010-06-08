@@ -19,12 +19,14 @@
 
 #include <linux/poll.h>
 #include <linux/vmalloc.h>
+#include <linux/slab.h>
 #include <linux/timer.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mISDNif.h>
+#include "core.h"
 
-static int	*debug;
+static u_int	*debug;
 
 
 struct mISDNtimerdev {
@@ -85,7 +87,7 @@ mISDN_close(struct inode *ino, struct file *filep)
 }
 
 static ssize_t
-mISDN_read(struct file *filep, char *buf, size_t count, loff_t *off)
+mISDN_read(struct file *filep, char __user *buf, size_t count, loff_t *off)
 {
 	struct mISDNtimerdev	*dev = filep->private_data;
 	struct mISDNtimer	*timer;
@@ -115,7 +117,7 @@ mISDN_read(struct file *filep, char *buf, size_t count, loff_t *off)
 		timer = (struct mISDNtimer *)dev->expired.next;
 		list_del(&timer->list);
 		spin_unlock_irqrestore(&dev->lock, flags);
-		if (put_user(timer->id, (int *)buf))
+		if (put_user(timer->id, (int __user *)buf))
 			ret = -EFAULT;
 		else
 			ret = sizeof(int);
@@ -151,8 +153,7 @@ dev_expire_timer(unsigned long data)
 	u_long			flags;
 
 	spin_lock_irqsave(&timer->dev->lock, flags);
-	list_del(&timer->list);
-	list_add_tail(&timer->list, &timer->dev->expired);
+	list_move_tail(&timer->list, &timer->dev->expired);
 	spin_unlock_irqrestore(&timer->dev->lock, flags);
 	wake_up_interruptible(&timer->dev->wait);
 }
@@ -259,7 +260,7 @@ mISDN_ioctl(struct inode *inode, struct file *filep, unsigned int cmd,
 	return ret;
 }
 
-static struct file_operations mISDN_fops = {
+static const struct file_operations mISDN_fops = {
 	.read		= mISDN_read,
 	.poll		= mISDN_poll,
 	.ioctl		= mISDN_ioctl,
@@ -274,7 +275,7 @@ static struct miscdevice mISDNtimer = {
 };
 
 int
-mISDN_inittimer(int *deb)
+mISDN_inittimer(u_int *deb)
 {
 	int	err;
 

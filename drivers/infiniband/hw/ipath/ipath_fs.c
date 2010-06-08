@@ -37,6 +37,7 @@
 #include <linux/pagemap.h>
 #include <linux/init.h>
 #include <linux/namei.h>
+#include <linux/slab.h>
 
 #include "ipath_kernel.h"
 
@@ -57,9 +58,6 @@ static int ipathfs_mknod(struct inode *dir, struct dentry *dentry,
 	}
 
 	inode->i_mode = mode;
-	inode->i_uid = 0;
-	inode->i_gid = 0;
-	inode->i_blocks = 0;
 	inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 	inode->i_private = data;
 	if ((mode & S_IFMT) == S_IFDIR) {
@@ -86,7 +84,7 @@ static int create_file(const char *name, mode_t mode,
 	*dentry = NULL;
 	mutex_lock(&parent->d_inode->i_mutex);
 	*dentry = lookup_one_len(name, parent, strlen(name));
-	if (!IS_ERR(dentry))
+	if (!IS_ERR(*dentry))
 		error = ipathfs_mknod(parent->d_inode, *dentry,
 				      mode, fops, data);
 	else
@@ -349,10 +347,8 @@ static int ipathfs_fill_super(struct super_block *sb, void *data,
 	list_for_each_entry_safe(dd, tmp, &ipath_dev_list, ipath_list) {
 		spin_unlock_irqrestore(&ipath_devs_lock, flags);
 		ret = create_device_files(sb, dd);
-		if (ret) {
-			deactivate_super(sb);
+		if (ret)
 			goto bail;
-		}
 		spin_lock_irqsave(&ipath_devs_lock, flags);
 	}
 

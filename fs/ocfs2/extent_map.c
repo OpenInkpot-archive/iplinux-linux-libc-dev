@@ -24,6 +24,7 @@
 
 #include <linux/fs.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/fiemap.h>
 
@@ -37,6 +38,7 @@
 #include "extent_map.h"
 #include "inode.h"
 #include "super.h"
+#include "symlink.h"
 
 #include "buffer_head_io.h"
 
@@ -191,7 +193,7 @@ static int ocfs2_try_to_merge_extent_map(struct ocfs2_extent_map_item *emi,
 		emi->ei_clusters += ins->ei_clusters;
 		return 1;
 	} else if ((ins->ei_phys + ins->ei_clusters) == emi->ei_phys &&
-		   (ins->ei_cpos + ins->ei_clusters) == emi->ei_phys &&
+		   (ins->ei_cpos + ins->ei_clusters) == emi->ei_cpos &&
 		   ins->ei_flags == emi->ei_flags) {
 		emi->ei_phys = ins->ei_phys;
 		emi->ei_cpos = ins->ei_cpos;
@@ -293,7 +295,7 @@ static int ocfs2_last_eb_is_empty(struct inode *inode,
 	struct ocfs2_extent_block *eb;
 	struct ocfs2_extent_list *el;
 
-	ret = ocfs2_read_block(inode, last_eb_blk, &eb_bh);
+	ret = ocfs2_read_extent_block(INODE_CACHE(inode), last_eb_blk, &eb_bh);
 	if (ret) {
 		mlog_errno(ret);
 		goto out;
@@ -301,12 +303,6 @@ static int ocfs2_last_eb_is_empty(struct inode *inode,
 
 	eb = (struct ocfs2_extent_block *) eb_bh->b_data;
 	el = &eb->h_list;
-
-	if (!OCFS2_IS_VALID_EXTENT_BLOCK(eb)) {
-		ret = -EROFS;
-		OCFS2_RO_ON_INVALID_EXTENT_BLOCK(inode->i_sb, eb);
-		goto out;
-	}
 
 	if (el->l_tree_depth) {
 		ocfs2_error(inode->i_sb,
@@ -359,11 +355,11 @@ static int ocfs2_search_for_hole_index(struct ocfs2_extent_list *el,
  * eb_bh is NULL. Otherwise, eb_bh should point to the extent block
  * containing el.
  */
-static int ocfs2_figure_hole_clusters(struct inode *inode,
-				      struct ocfs2_extent_list *el,
-				      struct buffer_head *eb_bh,
-				      u32 v_cluster,
-				      u32 *num_clusters)
+int ocfs2_figure_hole_clusters(struct ocfs2_caching_info *ci,
+			       struct ocfs2_extent_list *el,
+			       struct buffer_head *eb_bh,
+			       u32 v_cluster,
+			       u32 *num_clusters)
 {
 	int ret, i;
 	struct buffer_head *next_eb_bh = NULL;
@@ -381,23 +377,16 @@ static int ocfs2_figure_hole_clusters(struct inode *inode,
 		if (le64_to_cpu(eb->h_next_leaf_blk) == 0ULL)
 			goto no_more_extents;
 
-		ret = ocfs2_read_block(inode,
-				       le64_to_cpu(eb->h_next_leaf_blk),
-				       &next_eb_bh);
+		ret = ocfs2_read_extent_block(ci,
+					      le64_to_cpu(eb->h_next_leaf_blk),
+					      &next_eb_bh);
 		if (ret) {
 			mlog_errno(ret);
 			goto out;
 		}
+
 		next_eb = (struct ocfs2_extent_block *)next_eb_bh->b_data;
-
-		if (!OCFS2_IS_VALID_EXTENT_BLOCK(next_eb)) {
-			ret = -EROFS;
-			OCFS2_RO_ON_INVALID_EXTENT_BLOCK(inode->i_sb, next_eb);
-			goto out;
-		}
-
 		el = &next_eb->h_list;
-
 		i = ocfs2_search_for_hole_index(el, v_cluster);
 	}
 
@@ -441,7 +430,8 @@ static int ocfs2_get_clusters_nocache(struct inode *inode,
 	tree_height = le16_to_cpu(el->l_tree_depth);
 
 	if (tree_height > 0) {
-		ret = ocfs2_find_leaf(inode, el, v_cluster, &eb_bh);
+		ret = ocfs2_find_leaf(INODE_CACHE(inode), el, v_cluster,
+				      &eb_bh);
 		if (ret) {
 			mlog_errno(ret);
 			goto out;
@@ -464,11 +454,12 @@ static int ocfs2_get_clusters_nocache(struct inode *inode,
 	if (i == -1) {
 		/*
 		 * Holes can be larger than the maximum size of an
-		 * extent, so we return their lengths in a seperate
+		 * extent, so we return their lengths in a separate
 		 * field.
 		 */
 		if (hole_len) {
-			ret = ocfs2_figure_hole_clusters(inode, el, eb_bh,
+			ret = ocfs2_figure_hole_clusters(INODE_CACHE(inode),
+							 el, eb_bh,
 							 v_cluster, &len);
 			if (ret) {
 				mlog_errno(ret);
@@ -552,7 +543,8 @@ static void ocfs2_relative_extent_offsets(struct super_block *sb,
 
 int ocfs2_xattr_get_clusters(struct inode *inode, u32 v_cluster,
 			     u32 *p_cluster, u32 *num_clusters,
-			     struct ocfs2_extent_list *el)
+			     struct ocfs2_extent_list *el,
+			     unsigned int *extent_flags)
 {
 	int ret = 0, i;
 	struct buffer_head *eb_bh = NULL;
@@ -561,7 +553,8 @@ int ocfs2_xattr_get_clusters(struct inode *inode, u32 v_cluster,
 	u32 coff;
 
 	if (el->l_tree_depth) {
-		ret = ocfs2_find_leaf(inode, el, v_cluster, &eb_bh);
+		ret = ocfs2_find_leaf(INODE_CACHE(inode), el, v_cluster,
+				      &eb_bh);
 		if (ret) {
 			mlog_errno(ret);
 			goto out;
@@ -603,6 +596,9 @@ int ocfs2_xattr_get_clusters(struct inode *inode, u32 v_cluster,
 		*p_cluster = *p_cluster + coff;
 		if (num_clusters)
 			*num_clusters = ocfs2_rec_clusters(el, rec) - coff;
+
+		if (extent_flags)
+			*extent_flags = rec->e_flags;
 	}
 out:
 	if (eb_bh)
@@ -630,7 +626,7 @@ int ocfs2_get_clusters(struct inode *inode, u32 v_cluster,
 	if (ret == 0)
 		goto out;
 
-	ret = ocfs2_read_block(inode, OCFS2_I(inode)->ip_blkno, &di_bh);
+	ret = ocfs2_read_inode_block(inode, &di_bh);
 	if (ret) {
 		mlog_errno(ret);
 		goto out;
@@ -709,6 +705,12 @@ out:
 	return ret;
 }
 
+/*
+ * The ocfs2_fiemap_inline() may be a little bit misleading, since
+ * it not only handles the fiemap for inlined files, but also deals
+ * with the fast symlink, cause they have no difference for extent
+ * mapping per se.
+ */
 static int ocfs2_fiemap_inline(struct inode *inode, struct buffer_head *di_bh,
 			       struct fiemap_extent_info *fieinfo,
 			       u64 map_start)
@@ -721,11 +723,18 @@ static int ocfs2_fiemap_inline(struct inode *inode, struct buffer_head *di_bh,
 	struct ocfs2_inode_info *oi = OCFS2_I(inode);
 
 	di = (struct ocfs2_dinode *)di_bh->b_data;
-	id_count = le16_to_cpu(di->id2.i_data.id_count);
+	if (ocfs2_inode_is_fast_symlink(inode))
+		id_count = ocfs2_fast_symlink_chars(inode->i_sb);
+	else
+		id_count = le16_to_cpu(di->id2.i_data.id_count);
 
 	if (map_start < id_count) {
 		phys = oi->ip_blkno << inode->i_sb->s_blocksize_bits;
-		phys += offsetof(struct ocfs2_dinode, id2.i_data.id_data);
+		if (ocfs2_inode_is_fast_symlink(inode))
+			phys += offsetof(struct ocfs2_dinode, id2.i_symlink);
+		else
+			phys += offsetof(struct ocfs2_dinode,
+					 id2.i_data.id_data);
 
 		ret = fiemap_fill_next_extent(fieinfo, 0, phys, id_count,
 					      flags);
@@ -762,9 +771,10 @@ int ocfs2_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 	down_read(&OCFS2_I(inode)->ip_alloc_sem);
 
 	/*
-	 * Handle inline-data separately.
+	 * Handle inline-data and fast symlink separately.
 	 */
-	if (OCFS2_I(inode)->ip_dyn_features & OCFS2_INLINE_DATA_FL) {
+	if ((OCFS2_I(inode)->ip_dyn_features & OCFS2_INLINE_DATA_FL) ||
+	    ocfs2_inode_is_fast_symlink(inode)) {
 		ret = ocfs2_fiemap_inline(inode, di_bh, fieinfo, map_start);
 		goto out_unlock;
 	}
@@ -792,6 +802,8 @@ int ocfs2_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 		fe_flags = 0;
 		if (rec.e_flags & OCFS2_EXT_UNWRITTEN)
 			fe_flags |= FIEMAP_EXTENT_UNWRITTEN;
+		if (rec.e_flags & OCFS2_EXT_REFCOUNTED)
+			fe_flags |= FIEMAP_EXTENT_SHARED;
 		if (is_last)
 			fe_flags |= FIEMAP_EXTENT_LAST;
 		len_bytes = (u64)le16_to_cpu(rec.e_leaf_clusters) << osb->s_clustersize_bits;
@@ -819,3 +831,74 @@ out:
 
 	return ret;
 }
+
+int ocfs2_read_virt_blocks(struct inode *inode, u64 v_block, int nr,
+			   struct buffer_head *bhs[], int flags,
+			   int (*validate)(struct super_block *sb,
+					   struct buffer_head *bh))
+{
+	int rc = 0;
+	u64 p_block, p_count;
+	int i, count, done = 0;
+
+	mlog_entry("(inode = %p, v_block = %llu, nr = %d, bhs = %p, "
+		   "flags = %x, validate = %p)\n",
+		   inode, (unsigned long long)v_block, nr, bhs, flags,
+		   validate);
+
+	if (((v_block + nr - 1) << inode->i_sb->s_blocksize_bits) >=
+	    i_size_read(inode)) {
+		BUG_ON(!(flags & OCFS2_BH_READAHEAD));
+		goto out;
+	}
+
+	while (done < nr) {
+		down_read(&OCFS2_I(inode)->ip_alloc_sem);
+		rc = ocfs2_extent_map_get_blocks(inode, v_block + done,
+						 &p_block, &p_count, NULL);
+		up_read(&OCFS2_I(inode)->ip_alloc_sem);
+		if (rc) {
+			mlog_errno(rc);
+			break;
+		}
+
+		if (!p_block) {
+			rc = -EIO;
+			mlog(ML_ERROR,
+			     "Inode #%llu contains a hole at offset %llu\n",
+			     (unsigned long long)OCFS2_I(inode)->ip_blkno,
+			     (unsigned long long)(v_block + done) <<
+			     inode->i_sb->s_blocksize_bits);
+			break;
+		}
+
+		count = nr - done;
+		if (p_count < count)
+			count = p_count;
+
+		/*
+		 * If the caller passed us bhs, they should have come
+		 * from a previous readahead call to this function.  Thus,
+		 * they should have the right b_blocknr.
+		 */
+		for (i = 0; i < count; i++) {
+			if (!bhs[done + i])
+				continue;
+			BUG_ON(bhs[done + i]->b_blocknr != (p_block + i));
+		}
+
+		rc = ocfs2_read_blocks(INODE_CACHE(inode), p_block, count,
+				       bhs + done, flags, validate);
+		if (rc) {
+			mlog_errno(rc);
+			break;
+		}
+		done += count;
+	}
+
+out:
+	mlog_exit(rc);
+	return rc;
+}
+
+

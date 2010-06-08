@@ -1,41 +1,23 @@
 /*
- * File:         include/asm-blackfin/mmu_context.h
- * Based on:
- * Author:
+ * Copyright 2004-2009 Analog Devices Inc.
  *
- * Created:
- * Description:
- *
- * Modified:
- *               Copyright 2004-2006 Analog Devices Inc.
- *
- * Bugs:         Enter bugs at http://blackfin.uclinux.org/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see the file COPYING, or write
- * to the Free Software Foundation, Inc.,
- * 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ * Licensed under the GPL-2 or later.
  */
 
 #ifndef __BLACKFIN_MMU_CONTEXT_H__
 #define __BLACKFIN_MMU_CONTEXT_H__
 
-#include <linux/gfp.h>
+#include <linux/slab.h>
 #include <linux/sched.h>
 #include <asm/setup.h>
 #include <asm/page.h>
 #include <asm/pgalloc.h>
 #include <asm/cplbinit.h>
+#include <asm/sections.h>
+
+/* Note: L1 stacks are CPU-private things, so we bluntly disable this
+   feature in SMP mode, and use the per-CPU scratch SRAM bank only to
+   store the PDA instead. */
 
 extern void *current_l1_stack_save;
 extern int nr_l1stack_tasks;
@@ -85,15 +67,18 @@ activate_l1stack(struct mm_struct *mm, unsigned long sp_base)
 
 #define activate_mm(prev, next) switch_mm(prev, next, NULL)
 
-static inline void switch_mm(struct mm_struct *prev_mm, struct mm_struct *next_mm,
-			     struct task_struct *tsk)
+static inline void __switch_mm(struct mm_struct *prev_mm, struct mm_struct *next_mm,
+			       struct task_struct *tsk)
 {
+#ifdef CONFIG_MPU
+	unsigned int cpu = smp_processor_id();
+#endif
 	if (prev_mm == next_mm)
 		return;
 #ifdef CONFIG_MPU
-	if (prev_mm->context.page_rwx_mask == current_rwx_mask) {
-		flush_switched_cplbs();
-		set_mask_dcplbs(next_mm->context.page_rwx_mask);
+	if (prev_mm->context.page_rwx_mask == current_rwx_mask[cpu]) {
+		flush_switched_cplbs(cpu);
+		set_mask_dcplbs(next_mm->context.page_rwx_mask, cpu);
 	}
 #endif
 
@@ -111,26 +96,50 @@ static inline void switch_mm(struct mm_struct *prev_mm, struct mm_struct *next_m
 #endif
 }
 
+#ifdef CONFIG_IPIPE
+#define lock_mm_switch(flags)	local_irq_save_hw_cond(flags)
+#define unlock_mm_switch(flags)	local_irq_restore_hw_cond(flags)
+#else
+#define lock_mm_switch(flags)	do { (void)(flags); } while (0)
+#define unlock_mm_switch(flags)	do { (void)(flags); } while (0)
+#endif /* CONFIG_IPIPE */
+
 #ifdef CONFIG_MPU
+static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
+			     struct task_struct *tsk)
+{
+	unsigned long flags;
+	lock_mm_switch(flags);
+	__switch_mm(prev, next, tsk);
+	unlock_mm_switch(flags);
+}
+
 static inline void protect_page(struct mm_struct *mm, unsigned long addr,
 				unsigned long flags)
 {
 	unsigned long *mask = mm->context.page_rwx_mask;
-	unsigned long page = addr >> 12;
-	unsigned long idx = page >> 5;
-	unsigned long bit = 1 << (page & 31);
+	unsigned long page;
+	unsigned long idx;
+	unsigned long bit;
 
-	if (flags & VM_MAYREAD)
+	if (unlikely(addr >= ASYNC_BANK0_BASE && addr < ASYNC_BANK3_BASE + ASYNC_BANK3_SIZE))
+		page = (addr - (ASYNC_BANK0_BASE - _ramend)) >> 12;
+	else
+		page = addr >> 12;
+	idx = page >> 5;
+	bit = 1 << (page & 31);
+
+	if (flags & VM_READ)
 		mask[idx] |= bit;
 	else
 		mask[idx] &= ~bit;
 	mask += page_mask_nelts;
-	if (flags & VM_MAYWRITE)
+	if (flags & VM_WRITE)
 		mask[idx] |= bit;
 	else
 		mask[idx] &= ~bit;
 	mask += page_mask_nelts;
-	if (flags & VM_MAYEXEC)
+	if (flags & VM_EXEC)
 		mask[idx] |= bit;
 	else
 		mask[idx] &= ~bit;
@@ -138,10 +147,17 @@ static inline void protect_page(struct mm_struct *mm, unsigned long addr,
 
 static inline void update_protections(struct mm_struct *mm)
 {
-	if (mm->context.page_rwx_mask == current_rwx_mask) {
-		flush_switched_cplbs();
-		set_mask_dcplbs(mm->context.page_rwx_mask);
+	unsigned int cpu = smp_processor_id();
+	if (mm->context.page_rwx_mask == current_rwx_mask[cpu]) {
+		flush_switched_cplbs(cpu);
+		set_mask_dcplbs(mm->context.page_rwx_mask, cpu);
 	}
+}
+#else /* !CONFIG_MPU */
+static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
+			     struct task_struct *tsk)
+{
+	__switch_mm(prev, next, tsk);
 }
 #endif
 
@@ -165,6 +181,9 @@ init_new_context(struct task_struct *tsk, struct mm_struct *mm)
 static inline void destroy_context(struct mm_struct *mm)
 {
 	struct sram_list_struct *tmp;
+#ifdef CONFIG_MPU
+	unsigned int cpu = smp_processor_id();
+#endif
 
 #ifdef CONFIG_APP_STACK_L1
 	if (current_l1_stack_save == mm->context.l1_stack_save)
@@ -179,10 +198,16 @@ static inline void destroy_context(struct mm_struct *mm)
 		kfree(tmp);
 	}
 #ifdef CONFIG_MPU
-	if (current_rwx_mask == mm->context.page_rwx_mask)
-		current_rwx_mask = NULL;
+	if (current_rwx_mask[cpu] == mm->context.page_rwx_mask)
+		current_rwx_mask[cpu] = NULL;
 	free_pages((unsigned long)mm->context.page_rwx_mask, page_mask_order);
 #endif
 }
+
+#define ipipe_mm_switch_protect(flags)		\
+	local_irq_save_hw_cond(flags)
+
+#define ipipe_mm_switch_unprotect(flags)	\
+	local_irq_restore_hw_cond(flags)
 
 #endif

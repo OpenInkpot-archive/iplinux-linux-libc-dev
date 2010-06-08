@@ -67,9 +67,6 @@
  *		ip_id_count: idlock
  */
 
-/* Exported for inet_getid inline function.  */
-DEFINE_SPINLOCK(inet_peer_idlock);
-
 static struct kmem_cache *peer_cachep __read_mostly;
 
 #define node_height(x) x->avl_height
@@ -144,7 +141,7 @@ static void unlink_from_unused(struct inet_peer *p)
  * _stack is known to be NULL or not at compile time,
  * so compiler will optimize the if (_stack) tests.
  */
-#define lookup(_daddr,_stack) 					\
+#define lookup(_daddr, _stack) 					\
 ({								\
 	struct inet_peer *u, **v;				\
 	if (_stack != NULL) {					\
@@ -390,7 +387,7 @@ struct inet_peer *inet_getpeer(__be32 daddr, int create)
 	n->v4daddr = daddr;
 	atomic_set(&n->refcnt, 1);
 	atomic_set(&n->rid, 0);
-	n->ip_id_count = secure_ip_id(daddr);
+	atomic_set(&n->ip_id_count, secure_ip_id(daddr));
 	n->tcp_ts_stamp = 0;
 
 	write_lock_bh(&peer_pool_lock);

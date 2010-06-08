@@ -11,7 +11,7 @@
  *
 */
 
-		.macro	addruart,rx
+		.macro	addruart, rx, tmp
 		mov	\rx, #0xe0000000
 		orr	\rx, \rx, #0x000003f8
 		.endm
@@ -27,5 +27,3 @@
 		bne	1001b
 		.endm
 
-		.macro	waituart,rd,rx
-		.endm

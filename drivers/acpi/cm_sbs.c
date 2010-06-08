@@ -27,9 +27,8 @@
 #include <linux/seq_file.h>
 #include <acpi/acpi_bus.h>
 #include <acpi/acpi_drivers.h>
-#include <acpi/acmacros.h>
-#include <acpi/actypes.h>
-#include <acpi/acutils.h>
+
+#define PREFIX "ACPI: "
 
 ACPI_MODULE_NAME("cm_sbs");
 #define ACPI_AC_CLASS		"ac_adapter"

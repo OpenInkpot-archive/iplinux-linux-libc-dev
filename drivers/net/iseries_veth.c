@@ -69,6 +69,7 @@
 #include <linux/mm.h>
 #include <linux/ethtool.h>
 #include <linux/if_ether.h>
+#include <linux/slab.h>
 
 #include <asm/abs_addr.h>
 #include <asm/iseries/mf.h>
@@ -384,7 +385,7 @@ static struct attribute *veth_cnx_default_attrs[] = {
 	NULL
 };
 
-static struct sysfs_ops veth_cnx_sysfs_ops = {
+static const struct sysfs_ops veth_cnx_sysfs_ops = {
 		.show = veth_cnx_attribute_show
 };
 
@@ -429,7 +430,7 @@ SIMPLE_PORT_ATTR(promiscuous);
 SIMPLE_PORT_ATTR(num_mcast);
 CUSTOM_PORT_ATTR(lpar_map, "0x%X\n", port->lpar_map);
 CUSTOM_PORT_ATTR(stopped_map, "0x%X\n", port->stopped_map);
-CUSTOM_PORT_ATTR(mac_addr, "0x%lX\n", port->mac_addr);
+CUSTOM_PORT_ATTR(mac_addr, "0x%llX\n", port->mac_addr);
 
 #define GET_PORT_ATTR(_name)	(&veth_port_attr_##_name.attr)
 static struct attribute *veth_port_default_attrs[] = {
@@ -441,7 +442,7 @@ static struct attribute *veth_port_default_attrs[] = {
 	NULL
 };
 
-static struct sysfs_ops veth_port_sysfs_ops = {
+static const struct sysfs_ops veth_port_sysfs_ops = {
 	.show = veth_port_attribute_show
 };
 
@@ -495,7 +496,7 @@ static void veth_take_cap_ack(struct veth_lpar_connection *cnx,
 			   cnx->remote_lp);
 	} else {
 		memcpy(&cnx->cap_ack_event, event,
-		       sizeof(&cnx->cap_ack_event));
+		       sizeof(cnx->cap_ack_event));
 		cnx->state |= VETH_STATE_GOTCAPACK;
 		veth_kick_statemachine(cnx);
 	}
@@ -604,10 +605,10 @@ static int veth_process_caps(struct veth_lpar_connection *cnx)
 	/* Convert timer to jiffies */
 	cnx->ack_timeout = remote_caps->ack_timeout * HZ / 1000000;
 
-	if ( (remote_caps->num_buffers == 0)
-	     || (remote_caps->ack_threshold > VETH_MAX_ACKS_PER_MSG)
-	     || (remote_caps->ack_threshold == 0)
-	     || (cnx->ack_timeout == 0) ) {
+	if ( (remote_caps->num_buffers == 0) ||
+	     (remote_caps->ack_threshold > VETH_MAX_ACKS_PER_MSG) ||
+	     (remote_caps->ack_threshold == 0) ||
+	     (cnx->ack_timeout == 0) ) {
 		veth_error("Received incompatible capabilities from LPAR %d.\n",
 				cnx->remote_lp);
 		return HvLpEvent_Rc_InvalidSubtypeData;
@@ -714,8 +715,8 @@ static void veth_statemachine(struct work_struct *work)
 		cnx->state |= VETH_STATE_OPEN;
 	}
 
-	if ( (cnx->state & VETH_STATE_OPEN)
-	     && !(cnx->state & VETH_STATE_SENTMON) ) {
+	if ( (cnx->state & VETH_STATE_OPEN) &&
+	     !(cnx->state & VETH_STATE_SENTMON) ) {
 		rc = veth_signalevent(cnx, VETH_EVENT_MONITOR,
 				      HvLpEvent_AckInd_DoAck,
 				      HvLpEvent_AckType_DeferredAck,
@@ -724,8 +725,8 @@ static void veth_statemachine(struct work_struct *work)
 		if (rc == HvLpEvent_Rc_Good) {
 			cnx->state |= VETH_STATE_SENTMON;
 		} else {
-			if ( (rc != HvLpEvent_Rc_PartitionDead)
-			     && (rc != HvLpEvent_Rc_PathClosed) )
+			if ( (rc != HvLpEvent_Rc_PartitionDead) &&
+			     (rc != HvLpEvent_Rc_PathClosed) )
 				veth_error("Error sending monitor to LPAR %d, "
 						"rc = %d\n", rlp, rc);
 
@@ -735,8 +736,8 @@ static void veth_statemachine(struct work_struct *work)
 		}
 	}
 
-	if ( (cnx->state & VETH_STATE_OPEN)
-	     && !(cnx->state & VETH_STATE_SENTCAPS)) {
+	if ( (cnx->state & VETH_STATE_OPEN) &&
+	     !(cnx->state & VETH_STATE_SENTCAPS)) {
 		u64 *rawcap = (u64 *)&cnx->local_caps;
 
 		rc = veth_signalevent(cnx, VETH_EVENT_CAP,
@@ -748,8 +749,8 @@ static void veth_statemachine(struct work_struct *work)
 		if (rc == HvLpEvent_Rc_Good) {
 			cnx->state |= VETH_STATE_SENTCAPS;
 		} else {
-			if ( (rc != HvLpEvent_Rc_PartitionDead)
-			     && (rc != HvLpEvent_Rc_PathClosed) )
+			if ( (rc != HvLpEvent_Rc_PartitionDead) &&
+			     (rc != HvLpEvent_Rc_PathClosed) )
 				veth_error("Error sending caps to LPAR %d, "
 						"rc = %d\n", rlp, rc);
 
@@ -759,8 +760,8 @@ static void veth_statemachine(struct work_struct *work)
 		}
 	}
 
-	if ((cnx->state & VETH_STATE_GOTCAPS)
-	    && !(cnx->state & VETH_STATE_SENTCAPACK)) {
+	if ((cnx->state & VETH_STATE_GOTCAPS) &&
+	    !(cnx->state & VETH_STATE_SENTCAPACK)) {
 		struct veth_cap_data *remote_caps = &cnx->remote_caps;
 
 		memcpy(remote_caps, &cnx->cap_event.u.caps_data,
@@ -783,9 +784,9 @@ static void veth_statemachine(struct work_struct *work)
 			goto cant_cope;
 	}
 
-	if ((cnx->state & VETH_STATE_GOTCAPACK)
-	    && (cnx->state & VETH_STATE_GOTCAPS)
-	    && !(cnx->state & VETH_STATE_READY)) {
+	if ((cnx->state & VETH_STATE_GOTCAPACK) &&
+	    (cnx->state & VETH_STATE_GOTCAPS) &&
+	    !(cnx->state & VETH_STATE_READY)) {
 		if (cnx->cap_ack_event.base_event.xRc == HvLpEvent_Rc_Good) {
 			/* Start the ACK timer */
 			cnx->ack_timer.expires = jiffies + cnx->ack_timeout;
@@ -818,8 +819,8 @@ static int veth_init_connection(u8 rlp)
 	struct veth_msg *msgs;
 	int i;
 
-	if ( (rlp == this_lp)
-	     || ! HvLpConfig_doLpsCommunicateOnVirtualLan(this_lp, rlp) )
+	if ( (rlp == this_lp) ||
+	     ! HvLpConfig_doLpsCommunicateOnVirtualLan(this_lp, rlp) )
 		return 0;
 
 	cnx = kzalloc(sizeof(*cnx), GFP_KERNEL);
@@ -952,24 +953,23 @@ static int veth_change_mtu(struct net_device *dev, int new_mtu)
 
 static void veth_set_multicast_list(struct net_device *dev)
 {
-	struct veth_port *port = (struct veth_port *) dev->priv;
+	struct veth_port *port = netdev_priv(dev);
 	unsigned long flags;
 
 	write_lock_irqsave(&port->mcast_gate, flags);
 
 	if ((dev->flags & IFF_PROMISC) || (dev->flags & IFF_ALLMULTI) ||
-			(dev->mc_count > VETH_MAX_MCAST)) {
+			(netdev_mc_count(dev) > VETH_MAX_MCAST)) {
 		port->promiscuous = 1;
 	} else {
-		struct dev_mc_list *dmi = dev->mc_list;
-		int i;
+		struct dev_mc_list *dmi;
 
 		port->promiscuous = 0;
 
 		/* Update table */
 		port->num_mcast = 0;
 
-		for (i = 0; i < dev->mc_count; i++) {
+		netdev_for_each_mc_addr(dmi, dev) {
 			u8 *addr = dmi->dmi_addr;
 			u64 xaddr = 0;
 
@@ -978,7 +978,6 @@ static void veth_set_multicast_list(struct net_device *dev)
 				port->mcast_addr[port->num_mcast] = xaddr;
 				port->num_mcast++;
 			}
-			dmi = dmi->next;
 		}
 	}
 
@@ -1021,6 +1020,16 @@ static const struct ethtool_ops ops = {
 	.get_link = veth_get_link,
 };
 
+static const struct net_device_ops veth_netdev_ops = {
+	.ndo_open		= veth_open,
+	.ndo_stop		= veth_close,
+	.ndo_start_xmit		= veth_start_xmit,
+	.ndo_change_mtu		= veth_change_mtu,
+	.ndo_set_multicast_list	= veth_set_multicast_list,
+	.ndo_set_mac_address	= NULL,
+	.ndo_validate_addr	= eth_validate_addr,
+};
+
 static struct net_device *veth_probe_one(int vlan,
 		struct vio_dev *vio_dev)
 {
@@ -1044,7 +1053,7 @@ static struct net_device *veth_probe_one(int vlan,
 		return NULL;
 	}
 
-	port = (struct veth_port *) dev->priv;
+	port = netdev_priv(dev);
 
 	spin_lock_init(&port->queue_lock);
 	rwlock_init(&port->mcast_gate);
@@ -1067,12 +1076,7 @@ static struct net_device *veth_probe_one(int vlan,
 
 	memcpy(&port->mac_addr, mac_addr, ETH_ALEN);
 
-	dev->open = veth_open;
-	dev->hard_start_xmit = veth_start_xmit;
-	dev->stop = veth_close;
-	dev->change_mtu = veth_change_mtu;
-	dev->set_mac_address = NULL;
-	dev->set_multicast_list = veth_set_multicast_list;
+	dev->netdev_ops = &veth_netdev_ops;
 	SET_ETHTOOL_OPS(dev, &ops);
 
 	SET_NETDEV_DEV(dev, vdev);
@@ -1102,7 +1106,7 @@ static int veth_transmit_to_one(struct sk_buff *skb, HvLpIndex rlp,
 				struct net_device *dev)
 {
 	struct veth_lpar_connection *cnx = veth_cnx[rlp];
-	struct veth_port *port = (struct veth_port *) dev->priv;
+	struct veth_port *port = netdev_priv(dev);
 	HvLpEvent_Rc rc;
 	struct veth_msg *msg = NULL;
 	unsigned long flags;
@@ -1191,7 +1195,7 @@ static void veth_transmit_to_many(struct sk_buff *skb,
 static int veth_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	unsigned char *frame = skb->data;
-	struct veth_port *port = (struct veth_port *) dev->priv;
+	struct veth_port *port = netdev_priv(dev);
 	HvLpIndexMap lpmask;
 
 	if (! (frame[0] & 0x01)) {
@@ -1200,7 +1204,7 @@ static int veth_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 		if ( ! ((1 << rlp) & port->lpar_map) ) {
 			dev_kfree_skb(skb);
-			return 0;
+			return NETDEV_TX_OK;
 		}
 
 		lpmask = 1 << rlp;
@@ -1212,7 +1216,7 @@ static int veth_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	dev_kfree_skb(skb);
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /* You must hold the connection's lock when you call this function. */
@@ -1255,7 +1259,7 @@ static void veth_wake_queues(struct veth_lpar_connection *cnx)
 		if (! dev)
 			continue;
 
-		port = (struct veth_port *)dev->priv;
+		port = netdev_priv(dev);
 
 		if (! (port->lpar_map & (1<<cnx->remote_lp)))
 			continue;
@@ -1284,7 +1288,7 @@ static void veth_stop_queues(struct veth_lpar_connection *cnx)
 		if (! dev)
 			continue;
 
-		port = (struct veth_port *)dev->priv;
+		port = netdev_priv(dev);
 
 		/* If this cnx is not on the vlan for this port, continue */
 		if (! (port->lpar_map & (1 << cnx->remote_lp)))
@@ -1379,7 +1383,7 @@ static inline void veth_build_dma_list(struct dma_chunk *list,
 	unsigned long done;
 	int i = 1;
 
-	/* FIXME: skbs are continguous in real addresses.  Do we
+	/* FIXME: skbs are contiguous in real addresses.  Do we
 	 * really need to break it into PAGE_SIZE chunks, or can we do
 	 * it just at the granularity of iSeries real->absolute
 	 * mapping?  Indeed, given the way the allocator works, can we
@@ -1506,7 +1510,7 @@ static void veth_receive(struct veth_lpar_connection *cnx,
 			continue;
 		}
 
-		port = (struct veth_port *)dev->priv;
+		port = netdev_priv(dev);
 		dest = *((u64 *) skb->data) & 0xFFFFFFFFFFFF0000;
 
 		if ((vlan > HVMAXARCHITECTEDVIRTUALLANS) || !port) {
@@ -1533,8 +1537,8 @@ static void veth_receive(struct veth_lpar_connection *cnx,
 	cnx->pending_acks[cnx->num_pending_acks++] =
 		event->base_event.xCorrelationToken;
 
-	if ( (cnx->num_pending_acks >= cnx->remote_caps.ack_threshold)
-	     || (cnx->num_pending_acks >= VETH_MAX_ACKS_PER_MSG) )
+	if ( (cnx->num_pending_acks >= cnx->remote_caps.ack_threshold) ||
+	     (cnx->num_pending_acks >= VETH_MAX_ACKS_PER_MSG) )
 		veth_flush_acks(cnx);
 
 	spin_unlock_irqrestore(&cnx->lock, flags);

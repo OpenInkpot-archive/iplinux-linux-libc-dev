@@ -58,8 +58,6 @@ static inline void enic_queue_wq_desc_ex(struct vnic_wq *wq,
 		(u16)vlan_tag,
 		0 /* loopback */);
 
-	wmb();
-
 	vnic_wq_post(wq, os_buf, dma_addr, len, sop, eop);
 }
 
@@ -127,8 +125,6 @@ static inline void enic_queue_rq_desc(struct vnic_rq *rq,
 		(u64)dma_addr | VNIC_PADDR_TARGET,
 		type, (u16)len);
 
-	wmb();
-
 	vnic_rq_post(rq, os_buf, os_buf_index, dma_addr, len);
 }
 
@@ -143,6 +139,8 @@ void enic_del_vlan(struct enic *enic, u16 vlanid);
 int enic_set_nic_cfg(struct enic *enic, u8 rss_default_cpu, u8 rss_hash_type,
 	u8 rss_hash_bits, u8 rss_base_cpu, u8 rss_enable, u8 tso_ipid_split_en,
 	u8 ig_vlan_strip_en);
+int enic_set_rss_key(struct enic *enic, dma_addr_t key_pa, u64 len);
+int enic_set_rss_cpu(struct enic *enic, dma_addr_t cpu_pa, u64 len);
 void enic_get_res_counts(struct enic *enic);
 void enic_init_vnic_resources(struct enic *enic);
 int enic_alloc_vnic_resources(struct enic *);

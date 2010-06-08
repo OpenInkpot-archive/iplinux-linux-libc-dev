@@ -37,6 +37,7 @@
 #include <linux/spinlock.h>
 #include <linux/pci.h>
 #include <linux/dma-mapping.h>
+#include <linux/slab.h>
 #include <net/net_namespace.h>
 
 #include "cxio_resource.h"
@@ -109,7 +110,6 @@ int cxio_hal_cq_op(struct cxio_rdev *rdev_p, struct t3_cq *cq,
 		while (!CQ_VLD_ENTRY(rptr, cq->size_log2, cqe)) {
 			udelay(1);
 			if (i++ > 1000000) {
-				BUG_ON(1);
 				printk(KERN_ERR "%s: stalled rnic\n",
 				       rdev_p->dev_name);
 				return -EIO;
@@ -152,10 +152,10 @@ static int cxio_hal_clear_qp_ctx(struct cxio_rdev *rdev_p, u32 qpid)
 	sge_cmd = qpid << 8 | 3;
 	wqe->sge_cmd = cpu_to_be64(sge_cmd);
 	skb->priority = CPL_PRIORITY_CONTROL;
-	return (cxgb3_ofld_send(rdev_p->t3cdev_p, skb));
+	return iwch_cxgb3_ofld_send(rdev_p->t3cdev_p, skb);
 }
 
-int cxio_create_cq(struct cxio_rdev *rdev_p, struct t3_cq *cq)
+int cxio_create_cq(struct cxio_rdev *rdev_p, struct t3_cq *cq, int kernel)
 {
 	struct rdma_cq_setup setup;
 	int size = (1UL << (cq->size_log2)) * sizeof(struct t3_cqe);
@@ -163,12 +163,12 @@ int cxio_create_cq(struct cxio_rdev *rdev_p, struct t3_cq *cq)
 	cq->cqid = cxio_hal_get_cqid(rdev_p->rscp);
 	if (!cq->cqid)
 		return -ENOMEM;
-	cq->sw_queue = kzalloc(size, GFP_KERNEL);
-	if (!cq->sw_queue)
-		return -ENOMEM;
-	cq->queue = dma_alloc_coherent(&(rdev_p->rnic_info.pdev->dev),
-					     (1UL << (cq->size_log2)) *
-					     sizeof(struct t3_cqe),
+	if (kernel) {
+		cq->sw_queue = kzalloc(size, GFP_KERNEL);
+		if (!cq->sw_queue)
+			return -ENOMEM;
+	}
+	cq->queue = dma_alloc_coherent(&(rdev_p->rnic_info.pdev->dev), size,
 					     &(cq->dma_addr), GFP_KERNEL);
 	if (!cq->queue) {
 		kfree(cq->sw_queue);
@@ -410,6 +410,7 @@ int cxio_flush_sq(struct t3_wq *wq, struct t3_cq *cq, int count)
 	ptr = wq->sq_rptr + count;
 	sqp = wq->sq + Q_PTR2IDX(ptr, wq->sq_size_log2);
 	while (ptr != wq->sq_wptr) {
+		sqp->signaled = 0;
 		insert_sq_cqe(wq, cq, sqp);
 		ptr++;
 		sqp = wq->sq + Q_PTR2IDX(ptr, wq->sq_size_log2);
@@ -450,7 +451,7 @@ static int cqe_completes_wr(struct t3_cqe *cqe, struct t3_wq *wq)
 	if ((CQE_OPCODE(*cqe) == T3_READ_RESP) && SQ_TYPE(*cqe))
 		return 0;
 
-	if ((CQE_OPCODE(*cqe) == T3_SEND) && RQ_TYPE(*cqe) &&
+	if (CQE_SEND_OPCODE(*cqe) && RQ_TYPE(*cqe) &&
 	    Q_EMPTY(wq->rq_rptr, wq->rq_wptr))
 		return 0;
 
@@ -571,7 +572,7 @@ static int cxio_hal_init_ctrl_qp(struct cxio_rdev *rdev_p)
 	     (unsigned long long) rdev_p->ctrl_qp.dma_addr,
 	     rdev_p->ctrl_qp.workq, 1 << T3_CTRL_QP_SIZE_LOG2);
 	skb->priority = CPL_PRIORITY_CONTROL;
-	return (cxgb3_ofld_send(rdev_p->t3cdev_p, skb));
+	return iwch_cxgb3_ofld_send(rdev_p->t3cdev_p, skb);
 err:
 	kfree_skb(skb);
 	return err;
@@ -588,7 +589,7 @@ static int cxio_hal_destroy_ctrl_qp(struct cxio_rdev *rdev_p)
 
 /* write len bytes of data into addr (32B aligned address)
  * If data is NULL, clear len byte of memory to zero.
- * caller aquires the ctrl_qp lock before the call
+ * caller acquires the ctrl_qp lock before the call
  */
 static int cxio_hal_ctrl_qp_write_mem(struct cxio_rdev *rdev_p, u32 addr,
 				      u32 len, void *data)
@@ -700,6 +701,9 @@ static int __cxio_tpt_op(struct cxio_rdev *rdev_p, u32 reset_tpt_entry,
 	struct tpt_entry tpt;
 	u32 stag_idx;
 	u32 wptr;
+
+	if (cxio_fatal_error(rdev_p))
+		return -EIO;
 
 	stag_state = stag_state > 0;
 	stag_idx = (*stag) >> 8;
@@ -848,14 +852,16 @@ int cxio_rdma_init(struct cxio_rdev *rdev_p, struct t3_rdma_init_attr *attr)
 	wqe->qpcaps = attr->qpcaps;
 	wqe->ulpdu_size = cpu_to_be16(attr->tcp_emss);
 	wqe->rqe_count = cpu_to_be16(attr->rqe_count);
-	wqe->flags_rtr_type = cpu_to_be16(attr->flags|V_RTR_TYPE(attr->rtr_type));
+	wqe->flags_rtr_type = cpu_to_be16(attr->flags |
+					  V_RTR_TYPE(attr->rtr_type) |
+					  V_CHAN(attr->chan));
 	wqe->ord = cpu_to_be32(attr->ord);
 	wqe->ird = cpu_to_be32(attr->ird);
 	wqe->qp_dma_addr = cpu_to_be64(attr->qp_dma_addr);
 	wqe->qp_dma_size = cpu_to_be32(attr->qp_dma_size);
 	wqe->irs = cpu_to_be32(attr->irs);
 	skb->priority = 0;	/* 0=>ToeQ; 1=>CtrlQ */
-	return (cxgb3_ofld_send(rdev_p->t3cdev_p, skb));
+	return iwch_cxgb3_ofld_send(rdev_p->t3cdev_p, skb);
 }
 
 void cxio_register_ev_cb(cxio_hal_ev_callback_func_t ev_cb)
@@ -938,6 +944,23 @@ int cxio_rdev_open(struct cxio_rdev *rdev_p)
 	if (!rdev_p->t3cdev_p)
 		rdev_p->t3cdev_p = dev2t3cdev(netdev_p);
 	rdev_p->t3cdev_p->ulp = (void *) rdev_p;
+
+	err = rdev_p->t3cdev_p->ctl(rdev_p->t3cdev_p, GET_EMBEDDED_INFO,
+					 &(rdev_p->fw_info));
+	if (err) {
+		printk(KERN_ERR "%s t3cdev_p(%p)->ctl returned error %d.\n",
+		     __func__, rdev_p->t3cdev_p, err);
+		goto err1;
+	}
+	if (G_FW_VERSION_MAJOR(rdev_p->fw_info.fw_vers) != CXIO_FW_MAJ) {
+		printk(KERN_ERR MOD "fatal firmware version mismatch: "
+		       "need version %u but adapter has version %u\n",
+		       CXIO_FW_MAJ,
+		       G_FW_VERSION_MAJOR(rdev_p->fw_info.fw_vers));
+		err = -EINVAL;
+		goto err1;
+	}
+
 	err = rdev_p->t3cdev_p->ctl(rdev_p->t3cdev_p, RDMA_GET_PARAMS,
 					 &(rdev_p->rnic_info));
 	if (err) {
@@ -1011,6 +1034,7 @@ err3:
 err2:
 	cxio_hal_destroy_ctrl_qp(rdev_p);
 err1:
+	rdev_p->t3cdev_p->ulp = NULL;
 	list_del(&rdev_p->entry);
 	return err;
 }
@@ -1021,9 +1045,9 @@ void cxio_rdev_close(struct cxio_rdev *rdev_p)
 		cxio_hal_pblpool_destroy(rdev_p);
 		cxio_hal_rqtpool_destroy(rdev_p);
 		list_del(&rdev_p->entry);
-		rdev_p->t3cdev_p->ulp = NULL;
 		cxio_hal_destroy_ctrl_qp(rdev_p);
 		cxio_hal_destroy_resource(rdev_p->rscp);
+		rdev_p->t3cdev_p->ulp = NULL;
 	}
 }
 
@@ -1204,11 +1228,12 @@ int cxio_poll_cq(struct t3_wq *wq, struct t3_cq *cq, struct t3_cqe *cqe,
 		}
 
 		/* incoming SEND with no receive posted failures */
-		if ((CQE_OPCODE(*hw_cqe) == T3_SEND) && RQ_TYPE(*hw_cqe) &&
+		if (CQE_SEND_OPCODE(*hw_cqe) && RQ_TYPE(*hw_cqe) &&
 		    Q_EMPTY(wq->rq_rptr, wq->rq_wptr)) {
 			ret = -1;
 			goto skip_cqe;
 		}
+		BUG_ON((*cqe_flushed == 0) && !SW_CQE(*hw_cqe));
 		goto proc_cqe;
 	}
 
@@ -1223,6 +1248,13 @@ int cxio_poll_cq(struct t3_wq *wq, struct t3_cq *cq, struct t3_cqe *cqe,
 		 * then we complete this with TPT_ERR_MSN and mark the wq in
 		 * error.
 		 */
+
+		if (Q_EMPTY(wq->rq_rptr, wq->rq_wptr)) {
+			wq->error = 1;
+			ret = -1;
+			goto skip_cqe;
+		}
+
 		if (unlikely((CQE_WRID_MSN(*hw_cqe) != (wq->rq_rptr + 1)))) {
 			wq->error = 1;
 			hw_cqe->header |= htonl(V_CQE_STATUS(TPT_ERR_MSN));
@@ -1277,6 +1309,7 @@ proc_cqe:
 			cxio_hal_pblpool_free(wq->rdev,
 				wq->rq[Q_PTR2IDX(wq->rq_rptr,
 				wq->rq_size_log2)].pbl_addr, T3_STAG0_PBL_SIZE);
+		BUG_ON(Q_EMPTY(wq->rq_rptr, wq->rq_wptr));
 		wq->rq_rptr++;
 	}
 

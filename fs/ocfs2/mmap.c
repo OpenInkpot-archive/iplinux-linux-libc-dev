@@ -25,7 +25,6 @@
 
 #include <linux/fs.h>
 #include <linux/types.h>
-#include <linux/slab.h>
 #include <linux/highmem.h>
 #include <linux/pagemap.h>
 #include <linux/uio.h>
@@ -154,8 +153,9 @@ out:
 	return ret;
 }
 
-static int ocfs2_page_mkwrite(struct vm_area_struct *vma, struct page *page)
+static int ocfs2_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
+	struct page *page = vmf->page;
 	struct inode *inode = vma->vm_file->f_path.dentry->d_inode;
 	struct buffer_head *di_bh = NULL;
 	sigset_t blocked, oldset;
@@ -196,11 +196,12 @@ out:
 	ret2 = ocfs2_vm_op_unblock_sigs(&oldset);
 	if (ret2 < 0)
 		mlog_errno(ret2);
-
+	if (ret)
+		ret = VM_FAULT_SIGBUS;
 	return ret;
 }
 
-static struct vm_operations_struct ocfs2_file_vm_ops = {
+static const struct vm_operations_struct ocfs2_file_vm_ops = {
 	.fault		= ocfs2_fault,
 	.page_mkwrite	= ocfs2_page_mkwrite,
 };

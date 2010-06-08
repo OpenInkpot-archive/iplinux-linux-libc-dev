@@ -194,7 +194,7 @@ static unsigned short snd_cs46xx_codec_read(struct snd_cs46xx *chip,
 	 *  ACSDA = Status Data Register = 474h
 	 */
 #if 0
-	printk("e) reg = 0x%x, val = 0x%x, BA0_ACCAD = 0x%x\n", reg,
+	printk(KERN_DEBUG "e) reg = 0x%x, val = 0x%x, BA0_ACCAD = 0x%x\n", reg,
 			snd_cs46xx_peekBA0(chip, BA0_ACSDA),
 			snd_cs46xx_peekBA0(chip, BA0_ACCAD));
 #endif
@@ -428,8 +428,8 @@ static int cs46xx_wait_for_fifo(struct snd_cs46xx * chip,int retry_timeout)
 	}
   
 	if(status & SERBST_WBSY) {
-		snd_printk( KERN_ERR "cs46xx: failure waiting for FIFO command to complete\n");
-
+		snd_printk(KERN_ERR "cs46xx: failure waiting for "
+			   "FIFO command to complete\n");
 		return -EINVAL;
 	}
 
@@ -2238,11 +2238,11 @@ static void snd_cs46xx_codec_reset (struct snd_ac97 * ac97)
 
 	/* set the desired CODEC mode */
 	if (ac97->num == CS46XX_PRIMARY_CODEC_INDEX) {
-		snd_printdd("cs46xx: CODOEC1 mode %04x\n",0x0);
-		snd_cs46xx_ac97_write(ac97,AC97_CSR_ACMODE,0x0);
+		snd_printdd("cs46xx: CODEC1 mode %04x\n", 0x0);
+		snd_cs46xx_ac97_write(ac97, AC97_CSR_ACMODE, 0x0);
 	} else if (ac97->num == CS46XX_SECONDARY_CODEC_INDEX) {
-		snd_printdd("cs46xx: CODOEC2 mode %04x\n",0x3);
-		snd_cs46xx_ac97_write(ac97,AC97_CSR_ACMODE,0x3);
+		snd_printdd("cs46xx: CODEC2 mode %04x\n", 0x3);
+		snd_cs46xx_ac97_write(ac97, AC97_CSR_ACMODE, 0x3);
 	} else {
 		snd_BUG(); /* should never happen ... */
 	}
@@ -2266,7 +2266,7 @@ static void snd_cs46xx_codec_reset (struct snd_ac97 * ac97)
 			return;
 
 		/* test if we can write to the record gain volume register */
-		snd_ac97_write_cache(ac97, AC97_REC_GAIN, 0x8a05);
+		snd_ac97_write(ac97, AC97_REC_GAIN, 0x8a05);
 		if ((err = snd_ac97_read(ac97, AC97_REC_GAIN)) == 0x8a05)
 			return;
 
@@ -3597,7 +3597,7 @@ static struct cs_card_type __devinitdata cards[] = {
 #ifdef CONFIG_PM
 static unsigned int saved_regs[] = {
 	BA0_ACOSV,
-	BA0_ASER_FADDR,
+	/*BA0_ASER_FADDR,*/
 	BA0_ASER_MASTER,
 	BA1_PVOL,
 	BA1_CVOL,
@@ -3640,7 +3640,11 @@ int snd_cs46xx_resume(struct pci_dev *pci)
 {
 	struct snd_card *card = pci_get_drvdata(pci);
 	struct snd_cs46xx *chip = card->private_data;
-	int i, amp_saved;
+	int amp_saved;
+#ifdef CONFIG_SND_CS46XX_NEW_DSP
+	int i;
+#endif
+	unsigned int tmp;
 
 	pci_set_power_state(pci, PCI_D0);
 	pci_restore_state(pci);
@@ -3681,6 +3685,15 @@ int snd_cs46xx_resume(struct pci_dev *pci)
 
 	snd_ac97_resume(chip->ac97[CS46XX_PRIMARY_CODEC_INDEX]);
 	snd_ac97_resume(chip->ac97[CS46XX_SECONDARY_CODEC_INDEX]);
+
+	/*
+         *  Stop capture DMA.
+	 */
+	tmp = snd_cs46xx_peek(chip, BA1_CCTL);
+	chip->capt.ctl = tmp & 0x0000ffff;
+	snd_cs46xx_poke(chip, BA1_CCTL, tmp & 0xffff0000);
+
+	mdelay(5);
 
 	/* reset playback/capture */
 	snd_cs46xx_set_play_sample_rate(chip, 8000);

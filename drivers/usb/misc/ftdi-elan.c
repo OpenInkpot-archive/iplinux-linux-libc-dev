@@ -86,7 +86,7 @@ static struct list_head ftdi_static_list;
 #define USB_FTDI_ELAN_VENDOR_ID 0x0403
 #define USB_FTDI_ELAN_PRODUCT_ID 0xd6ea
 /* table of devices that work with this driver*/
-static struct usb_device_id ftdi_elan_table[] = {
+static const struct usb_device_id ftdi_elan_table[] = {
         {USB_DEVICE(USB_FTDI_ELAN_VENDOR_ID, USB_FTDI_ELAN_PRODUCT_ID)},
         { /* Terminating entry */ }
 };
@@ -623,9 +623,12 @@ static void ftdi_elan_status_work(struct work_struct *work)
 */
 static int ftdi_elan_open(struct inode *inode, struct file *file)
 {
-        int subminor = iminor(inode);
-        struct usb_interface *interface = usb_find_interface(&ftdi_elan_driver,
-                subminor);
+	int subminor;
+	struct usb_interface *interface;
+
+        subminor = iminor(inode);
+        interface = usb_find_interface(&ftdi_elan_driver, subminor);
+
         if (!interface) {
                 printk(KERN_ERR "can't find device for minor %d\n", subminor);
                 return -ENODEV;
@@ -1568,7 +1571,7 @@ static int ftdi_elan_edset_input(struct usb_ftdi *ftdi, u8 ed_number,
                         struct u132_target *target = &ftdi->target[ed];
                         struct u132_command *command = &ftdi->command[
                                 COMMAND_MASK & ftdi->command_next];
-                        int remaining_length = urb->transfer_buffer_length -
+                        u32 remaining_length = urb->transfer_buffer_length -
                                 urb->actual_length;
                         command->header = 0x82 | (ed << 5);
                         if (remaining_length == 0) {
@@ -1702,7 +1705,7 @@ static int ftdi_elan_edset_output(struct usb_ftdi *ftdi, u8 ed_number,
                                 | (address << 0);
                         command->width = usb_maxpacket(urb->dev, urb->pipe,
                                 usb_pipeout(urb->pipe));
-                        command->follows = min(1024,
+                        command->follows = min_t(u32, 1024,
                                 urb->transfer_buffer_length -
                                 urb->actual_length);
                         command->value = 0;
@@ -1766,7 +1769,7 @@ static int ftdi_elan_edset_single(struct usb_ftdi *ftdi, u8 ed_number,
                 mutex_lock(&ftdi->u132_lock);
                 command_size = ftdi->command_next - ftdi->command_head;
                 if (command_size < COMMAND_SIZE) {
-                        int remaining_length = urb->transfer_buffer_length -
+                        u32 remaining_length = urb->transfer_buffer_length -
                                 urb->actual_length;
                         struct u132_target *target = &ftdi->target[ed];
                         struct u132_command *command = &ftdi->command[
